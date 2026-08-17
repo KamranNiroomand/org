@@ -265,6 +265,18 @@ const DEFAULT_RULES: Array<
   // 'skipthedishes' rule that sends food orders to Restaurants.
   ['skipplus', 'Subscriptions', 90],
   ['paramount', 'Restaurants'],
+  ['pykd', 'Shopping'],
+  ['pur simple', 'Restaurants'],
+
+  /**
+   * Branch transactions carry a branch number and no description. The one in
+   * this ledger funded a same-day Wealthsimple contribution and nets to zero
+   * in chequing, so the deposit is a transfer rather than income; the $10
+   * beside it is the branch's fee for the service. The [NS] and [DC] tags are
+   * what separate the two — the rest of the text is identical.
+   */
+  ['ns br', 'Transfer', 75],
+  ['dc br', 'Fees & Charges', 75],
 
 ];
 
