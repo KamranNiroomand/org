@@ -24,7 +24,11 @@ ml = ["lightgbm>=4.5", "scikit-learn>=1.6"]
 text = ["sentence-transformers>=3.3"]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-cov>=6.0"]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
