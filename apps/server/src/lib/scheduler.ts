@@ -4,6 +4,7 @@ import { asc } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { holdings } from '../db/schema.js';
+import { syncAllFeeds } from './calendarFeeds.js';
 import { syncAllItems, syncIsStale } from './plaid.js';
 import { fetchQuotes, fetchUsdCad, saveQuotes } from './quotes.js';
 
@@ -31,6 +32,7 @@ let running = false;
 export interface NightlyResult {
   startedAt: string;
   banks: { items: number; added: number; modified: number; removed: number; categorized: number };
+  calendars: { feeds: number; added: number; updated: number; removed: number };
   prices: { symbols: number; quoted: number; usdCad: number | null };
   errors: string[];
 }
@@ -39,6 +41,7 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
   const result: NightlyResult = {
     startedAt: new Date().toISOString(),
     banks: { items: 0, added: 0, modified: 0, removed: 0, categorized: 0 },
+    calendars: { feeds: 0, added: 0, updated: 0, removed: 0 },
     prices: { symbols: 0, quoted: 0, usdCad: null },
     errors: [],
   };
@@ -65,6 +68,27 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
       log.info(
         `Banks: ${result.banks.added} new, ${result.banks.modified} updated, ` +
           `${result.banks.categorized} categorized across ${result.banks.items} institution(s)`,
+      );
+    }
+
+    // --- Calendars ----------------------------------------------------------
+    /**
+     * Subscribed calendars refresh on the same schedule as the banks. Google
+     * serves outside subscribers a cached copy that lags by hours, so polling
+     * more often than daily mostly buys repeated identical downloads.
+     */
+    const feedOutcomes = await syncAllFeeds();
+    result.calendars.feeds = feedOutcomes.length;
+    for (const f of feedOutcomes) {
+      result.calendars.added += f.added;
+      result.calendars.updated += f.updated;
+      result.calendars.removed += f.removed;
+      if (f.error) result.errors.push(`${f.name}: ${f.error}`);
+    }
+    if (feedOutcomes.length > 0) {
+      log.info(
+        `Calendars: ${result.calendars.added} new, ${result.calendars.updated} updated, ` +
+          `${result.calendars.removed} removed across ${result.calendars.feeds} feed(s)`,
       );
     }
 

@@ -14,6 +14,7 @@ import {
   weekdayLabels,
   type CivilDate,
 } from '@org/shared';
+import { CalendarFeeds } from '../components/CalendarFeeds';
 import { Page, PageHeader } from '../components/PageHeader';
 import { Badge, Button, Card, cn } from '../components/ui';
 import { api } from '../lib/api';
@@ -136,6 +137,8 @@ export function CalendarPage() {
             {monthLabel(cursor.year, cursor.month, calendar, persianDigits)}
           </h2>
         </div>
+
+        <CalendarFeeds />
 
         <Card className="overflow-hidden">
           <div className="grid grid-cols-7 border-b border-border bg-bg-subtle">

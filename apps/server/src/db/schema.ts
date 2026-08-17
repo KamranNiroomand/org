@@ -62,6 +62,28 @@ export const tasks = sqliteTable(
   ],
 );
 
+/**
+ * A subscribed calendar — the "secret address in iCal format" Google and
+ * Outlook hand out.
+ *
+ * That URL is a bearer credential: anyone holding it can read the whole
+ * calendar without logging in. So it is encrypted at rest with the same
+ * Keychain-backed AES-256-GCM used for Plaid access tokens, and never returned
+ * to the client once saved.
+ */
+export const calendarFeeds = sqliteTable('calendar_feeds', {
+  id: id(),
+  name: text('name').notNull(),
+  urlEnc: text('url_enc').notNull(),
+  color: text('color').notNull().default('blue'),
+  status: text('status', { enum: ['ok', 'error'] })
+    .notNull()
+    .default('ok'),
+  error: text('error'),
+  lastSyncAt: text('last_sync_at'),
+  createdAt: now(),
+});
+
 export const events = sqliteTable(
   'events',
   {
@@ -73,10 +95,30 @@ export const events = sqliteTable(
     allDay: integer('all_day', { mode: 'boolean' }).notNull().default(false),
     location: text('location'),
     color: text('color').notNull().default('blue'),
+    /**
+     * Null for events created by hand in Org; set for subscribed ones.
+     *
+     * Deliberately *not* declared ON DELETE CASCADE. This column was added by
+     * ALTER TABLE, and SQLite cannot attach a cascading action that way — the
+     * constraint lands as NO ACTION whatever the declaration says. Rather than
+     * carry a schema that lies about the database, removing a feed deletes its
+     * events explicitly in the route.
+     */
+    feedId: text('feed_id').references(() => calendarFeeds.id),
+    /**
+     * The iCalendar UID, suffixed with the occurrence start for expanded
+     * recurrences. Unique per feed, which is what makes a re-sync an update
+     * rather than a duplicate — the same property `transactions` relies on.
+     */
+    externalUid: text('external_uid'),
     createdAt: now(),
     updatedAt: text('updated_at').notNull(),
   },
-  (t) => [index('events_start_idx').on(t.startsAt)],
+  (t) => [
+    index('events_start_idx').on(t.startsAt),
+    index('events_feed_idx').on(t.feedId),
+    uniqueIndex('events_feed_uid_uq').on(t.feedId, t.externalUid),
+  ],
 );
 
 // ---------------------------------------------------------------------------
