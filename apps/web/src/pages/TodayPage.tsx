@@ -16,9 +16,27 @@ import { Badge, Card, CardHeader, cn } from '../components/ui';
 import { api, type MonthSummary, type PortfolioResponse } from '../lib/api';
 import { useSettings } from '../lib/settings';
 
+interface AgendaTask {
+  id: string;
+  title: string;
+  dueOn: string;
+  priority: string;
+  /** Project work belongs on this list too, but it has to say where it's from. */
+  projectName: string | null;
+}
+
 interface Agenda {
-  overdue: Array<{ id: string; title: string; dueOn: string; priority: string }>;
-  today: Array<{ id: string; title: string; dueOn: string; priority: string }>;
+  overdue: AgendaTask[];
+  today: AgendaTask[];
+}
+
+function AgendaTitle({ title, projectName }: { title: string; projectName: string | null }) {
+  return (
+    <span className="flex min-w-0 flex-1 items-baseline gap-2">
+      <span className="truncate text-sm">{title}</span>
+      {projectName && <span className="shrink-0 text-[11px] text-faint">{projectName}</span>}
+    </span>
+  );
 }
 
 interface Idea {
@@ -122,7 +140,7 @@ export function TodayPage() {
                 {agenda?.overdue.map((t) => (
                   <div key={t.id} className="flex items-center gap-3 px-4 py-2.5">
                     <span className="size-1.5 shrink-0 rounded-full bg-negative" />
-                    <span className="flex-1 truncate text-sm">{t.title}</span>
+                    <AgendaTitle title={t.title} projectName={t.projectName} />
                     <span className="shrink-0 text-xs text-negative">
                       <DualDate date={t.dueOn} style="short" />
                     </span>
@@ -131,7 +149,7 @@ export function TodayPage() {
                 {agenda?.today.map((t) => (
                   <div key={t.id} className="flex items-center gap-3 px-4 py-2.5">
                     <span className="size-1.5 shrink-0 rounded-full bg-accent" />
-                    <span className="flex-1 truncate text-sm">{t.title}</span>
+                    <AgendaTitle title={t.title} projectName={t.projectName} />
                     <Badge tone="accent">today</Badge>
                   </div>
                 ))}

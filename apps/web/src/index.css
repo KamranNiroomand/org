@@ -28,6 +28,14 @@
   --negative: oklch(58% 0.19 22);
   --warning: oklch(70% 0.15 70);
   --shadow: 0 1px 2px oklch(20% 0.02 260 / 0.06), 0 4px 12px oklch(20% 0.02 260 / 0.04);
+  /* Sticky-note surfaces, light enough that --text reads cleanly on each. */
+  --sticky-yellow: oklch(95% 0.055 95);
+  --sticky-amber: oklch(94% 0.06 62);
+  --sticky-green: oklch(94% 0.05 150);
+  --sticky-blue: oklch(94% 0.05 240);
+  --sticky-violet: oklch(94% 0.05 292);
+  --sticky-pink: oklch(94% 0.05 355);
+  --sticky-slate: oklch(95% 0.008 260);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -46,6 +54,14 @@
     --negative: oklch(70% 0.17 22);
     --warning: oklch(78% 0.14 70);
     --shadow: 0 1px 2px oklch(0% 0 0 / 0.3), 0 4px 14px oklch(0% 0 0 / 0.22);
+    /* Muted enough to sit just above --panel without glowing. */
+    --sticky-yellow: oklch(32% 0.045 95);
+    --sticky-amber: oklch(32% 0.05 62);
+    --sticky-green: oklch(31% 0.04 150);
+    --sticky-blue: oklch(31% 0.045 240);
+    --sticky-violet: oklch(31% 0.045 292);
+    --sticky-pink: oklch(31% 0.045 355);
+    --sticky-slate: oklch(30% 0.01 260);
   }
 }
 
@@ -64,6 +80,29 @@
   --negative: oklch(70% 0.17 22);
   --warning: oklch(78% 0.14 70);
   --shadow: 0 1px 2px oklch(0% 0 0 / 0.3), 0 4px 14px oklch(0% 0 0 / 0.22);
+  /* Muted enough to sit just above --panel without glowing. */
+  --sticky-yellow: oklch(32% 0.045 95);
+  --sticky-amber: oklch(32% 0.05 62);
+  --sticky-green: oklch(31% 0.04 150);
+  --sticky-blue: oklch(31% 0.045 240);
+  --sticky-violet: oklch(31% 0.045 292);
+  --sticky-pink: oklch(31% 0.045 355);
+  --sticky-slate: oklch(30% 0.01 260);
+}
+
+/**
+ * Sticky-note borders, derived once rather than restated per theme. Custom
+ * property substitution resolves at *use* time against :root's current computed
+ * value, so this one declaration picks up whichever theme block won the cascade.
+ */
+:root {
+  --sticky-yellow-line: color-mix(in oklch, var(--sticky-yellow), var(--text) 12%);
+  --sticky-amber-line: color-mix(in oklch, var(--sticky-amber), var(--text) 12%);
+  --sticky-green-line: color-mix(in oklch, var(--sticky-green), var(--text) 12%);
+  --sticky-blue-line: color-mix(in oklch, var(--sticky-blue), var(--text) 12%);
+  --sticky-violet-line: color-mix(in oklch, var(--sticky-violet), var(--text) 12%);
+  --sticky-pink-line: color-mix(in oklch, var(--sticky-pink), var(--text) 12%);
+  --sticky-slate-line: color-mix(in oklch, var(--sticky-slate), var(--text) 12%);
 }
 
 @theme inline {
@@ -80,10 +119,32 @@
   --color-positive: var(--positive);
   --color-negative: var(--negative);
   --color-warning: var(--warning);
+  --color-sticky-yellow: var(--sticky-yellow);
+  --color-sticky-yellow-line: var(--sticky-yellow-line);
+  --color-sticky-amber: var(--sticky-amber);
+  --color-sticky-amber-line: var(--sticky-amber-line);
+  --color-sticky-green: var(--sticky-green);
+  --color-sticky-green-line: var(--sticky-green-line);
+  --color-sticky-blue: var(--sticky-blue);
+  --color-sticky-blue-line: var(--sticky-blue-line);
+  --color-sticky-violet: var(--sticky-violet);
+  --color-sticky-violet-line: var(--sticky-violet-line);
+  --color-sticky-pink: var(--sticky-pink);
+  --color-sticky-pink-line: var(--sticky-pink-line);
+  --color-sticky-slate: var(--sticky-slate);
+  --color-sticky-slate-line: var(--sticky-slate-line);
 }
 
-* {
-  border-color: var(--border);
+/*
+ * A default border colour, in @layer base so that utilities can still override
+ * it. Unlayered rules beat every layered one no matter their specificity, so
+ * declaring this bare would silently defeat `border-accent`, `border-sticky-*`,
+ * and every other border utility in the app.
+ */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
 }
 
 html,

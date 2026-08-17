@@ -38,6 +38,12 @@ export interface Task {
   projectId: ID | null;
   tags: string[];
   sortOrder: number;
+  /** Planned effort in whole minutes. `null` means "no estimate", not zero. */
+  estimateMinutes: number | null;
+  /** Effort already banked. Excludes the interval currently running. */
+  trackedSeconds: number;
+  /** Set while the timer runs; elapsed is derived from it, never counted. */
+  timerStartedAt: Instant | null;
   createdAt: Instant;
   updatedAt: Instant;
 }
@@ -59,6 +65,40 @@ export interface ProjectWithStats extends Project {
   taskCount: number;
   doneCount: number;
   overdueCount: number;
+  /** Sum of the tasks' estimates. Tasks without one contribute nothing. */
+  estimateMinutes: number;
+  /** Sum of banked time. A running timer is not counted until it stops. */
+  trackedSeconds: number;
+}
+
+// ---------------------------------------------------------------------------
+// Sticky notes
+// ---------------------------------------------------------------------------
+
+/**
+ * Colours are stored as *keys*, never hexes — the actual value lives in the
+ * theme tokens and swaps between light and dark. This array is the single
+ * source of truth: the server validates against it, the picker renders it.
+ */
+export const STICKY_COLORS = [
+  'yellow',
+  'amber',
+  'green',
+  'blue',
+  'violet',
+  'pink',
+  'slate',
+] as const;
+
+export type StickyColor = (typeof STICKY_COLORS)[number];
+
+export interface StickyNote {
+  id: ID;
+  body: string;
+  color: StickyColor;
+  sortOrder: number;
+  createdAt: Instant;
+  updatedAt: Instant;
 }
 
 // ---------------------------------------------------------------------------
