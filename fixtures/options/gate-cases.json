@@ -1,0 +1,145 @@
+{
+  "description": "Real NVDA chain rows captured 2026-08-17, used to pin the per-contract liquidity gate. Shared by the TypeScript gate (apps/server/src/lib/options/gate.ts) and the Python backtest gate (services/quant/app/gate.py) so the two implementations cannot drift apart unnoticed. Prices are in whole dollars for readability; both readers convert to E4.",
+  "asOf": "2026-08-17",
+  "underlying": "NVDA",
+  "expiry": "2026-08-19",
+  "type": "call",
+  "spot": 225.05,
+  "thresholds": {
+    "minMid": 0.1,
+    "maxSpreadFraction": 0.1,
+    "minOpenInterest": 100,
+    "minVolume": 10
+  },
+  "cases": [
+    {
+      "note": "Deepest volume on the board. The candidate set looks like this.",
+      "strike": 227.5,
+      "bid": 1.1,
+      "ask": 1.14,
+      "openInterest": 5367,
+      "volume": 65854,
+      "liquid": true,
+      "reasons": []
+    },
+    {
+      "note": "Next strike up, still 3-6% round trip.",
+      "strike": 230,
+      "bid": 0.52,
+      "ask": 0.55,
+      "openInterest": 10863,
+      "volume": 52135,
+      "liquid": true,
+      "reasons": []
+    },
+    {
+      "note": "At the money.",
+      "strike": 225,
+      "bid": 2.13,
+      "ask": 2.19,
+      "openInterest": 8006,
+      "volume": 24447,
+      "liquid": true,
+      "reasons": []
+    },
+    {
+      "note": "Cheap but genuinely traded \u2014 must pass. A gate that rejects this is too strict.",
+      "strike": 235,
+      "bid": 0.13,
+      "ask": 0.14,
+      "openInterest": 2990,
+      "volume": 15894,
+      "liquid": true,
+      "reasons": []
+    },
+    {
+      "note": "In the money, wide-ish but inside tolerance.",
+      "strike": 220,
+      "bid": 5.55,
+      "ask": 5.8,
+      "openInterest": 1328,
+      "volume": 3219,
+      "liquid": true,
+      "reasons": []
+    },
+    {
+      "note": "Below the minimum price, and a 1-cent tick on a 7.5-cent mid is a 13% spread. Cheap and wide are the same failure at this end of the board.",
+      "strike": 237.5,
+      "bid": 0.07,
+      "ask": 0.08,
+      "openInterest": 1850,
+      "volume": 4271,
+      "liquid": false,
+      "reasons": [
+        "too-cheap",
+        "spread-too-wide"
+      ]
+    },
+    {
+      "note": "A penny contract with real open interest. Volume does not rescue a 1.5-cent mid quoted 0.01/0.02 \u2014 that is a 67% round trip.",
+      "strike": 245,
+      "bid": 0.01,
+      "ask": 0.02,
+      "openInterest": 8115,
+      "volume": 3068,
+      "liquid": false,
+      "reasons": [
+        "too-cheap",
+        "spread-too-wide"
+      ]
+    },
+    {
+      "note": "Zero bid \u2014 literally unsellable. Its 435.84% quoted IV is a solver artifact.",
+      "strike": 390,
+      "bid": 0.0,
+      "ask": 0.01,
+      "openInterest": 1,
+      "volume": 9,
+      "liquid": false,
+      "reasons": [
+        "no-bid",
+        "too-cheap",
+        "thin-open-interest",
+        "thin-volume"
+      ]
+    },
+    {
+      "note": "The case that disproved a per-underlying gate: NVDA, but a 20% round trip AND a mid beneath intrinsic value of 17.55.",
+      "strike": 207.5,
+      "bid": 15.05,
+      "ask": 18.35,
+      "openInterest": 130,
+      "volume": 3679,
+      "liquid": false,
+      "reasons": [
+        "spread-too-wide",
+        "below-intrinsic"
+      ]
+    },
+    {
+      "note": "13% round trip on a liquid-looking row.",
+      "strike": 212.5,
+      "bid": 12.55,
+      "ask": 14.35,
+      "openInterest": 312,
+      "volume": 7737,
+      "liquid": false,
+      "reasons": [
+        "spread-too-wide"
+      ]
+    },
+    {
+      "note": "Deep ITM with no participants at all. Spread alone would have let it through.",
+      "strike": 170,
+      "bid": 53.1,
+      "ask": 58.0,
+      "openInterest": 0,
+      "volume": 0,
+      "liquid": false,
+      "reasons": [
+        "thin-open-interest",
+        "thin-volume"
+      ]
+    }
+  ]
+}

@@ -14,7 +14,7 @@ export function runMigrations(): void {
 }
 
 // Also runnable directly via `npm run db:migrate`.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runMigrations();
   console.log(`Migrated ${config.dbPath}`);
 }
