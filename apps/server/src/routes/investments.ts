@@ -8,6 +8,7 @@ import { fetchQuotes, fetchUsdCad, lastKnownPrice, saveQuotes } from '../lib/quo
 import { getMarket, refreshSymbols, sweepMarket } from '../lib/market.js';
 import { refreshUniverse } from '../lib/universe.js';
 import { newId, nowIso } from '../lib/util.js';
+import { patchOf } from './_shared.js';
 
 const body = z.object({
   symbol: z.string().min(1).max(20),
@@ -43,7 +44,7 @@ export async function investmentRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch<{ Params: { id: string } }>('/api/holdings/:id', async (req, reply) => {
-    const parsed = body.partial().safeParse(req.body);
+    const parsed = patchOf(body).safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
 
     const d = parsed.data;
