@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { db } from '../db/index.js';
 import { ideaLinks, ideas } from '../db/schema.js';
 import { newId, nowIso } from '../lib/util.js';
+import { patchOf } from './_shared.js';
 
 const body = z.object({
   title: z.string().min(1).max(500),
@@ -69,7 +70,7 @@ export async function ideaRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch<{ Params: { id: string } }>('/api/ideas/:id', async (req, reply) => {
-    const parsed = body.partial().safeParse(req.body);
+    const parsed = patchOf(body).safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
 
     const d = parsed.data;

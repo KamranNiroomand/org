@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { formatDual, todayCivil } from '@org/shared';
 import { CommandPalette } from './CommandPalette';
+import { TimerChip } from './TimerChip';
 import { cn } from './ui';
 import { useSettings } from '../lib/settings';
 
@@ -112,6 +113,8 @@ export function Shell() {
         </nav>
 
         <div className="space-y-2 border-t border-border p-3">
+          <TimerChip />
+
           <div className="flex rounded-lg border border-border bg-panel p-0.5 text-[11px]">
             {(['miladi', 'shamsi'] as const).map((sys) => (
               <button

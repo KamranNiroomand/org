@@ -6,6 +6,7 @@ import { db } from '../db/index.js';
 import { calendarFeeds, events, tasks } from '../db/schema.js';
 import { feedEventCount, syncAllFeeds, syncFeed } from '../lib/calendarFeeds.js';
 import { newId, nowIso } from '../lib/util.js';
+import { patchOf } from './_shared.js';
 
 const civilKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
@@ -64,7 +65,7 @@ export async function calendarRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch<{ Params: { id: string } }>('/api/events/:id', async (req, reply) => {
-    const parsed = body.partial().safeParse(req.body);
+    const parsed = patchOf(body).safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
 
     const d = parsed.data;

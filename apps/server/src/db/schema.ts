@@ -52,15 +52,48 @@ export const tasks = sqliteTable(
     projectId: text('project_id').references(() => projects.id, { onDelete: 'set null' }),
     tags: text('tags', { mode: 'json' }).$type<string[]>().notNull().default([]),
     sortOrder: integer('sort_order').notNull().default(0),
+    // Estimates are whole minutes; tracked time is seconds so a timer that has
+    // just started visibly moves. Null estimate means "unestimated", not zero —
+    // the UI shows nothing at all rather than a misleading 0m.
+    estimateMinutes: integer('estimate_minutes'),
+    trackedSeconds: integer('tracked_seconds').notNull().default(0),
+    // Set while a timer runs. Elapsed is always derived from this instant, so a
+    // reload, a sleeping laptop, and a server restart all agree.
+    timerStartedAt: text('timer_started_at'),
     createdAt: now(),
     updatedAt: text('updated_at').notNull(),
   },
+  // No index on timer_started_at: at most one row holds it and the table is a
+  // single person's task list. An index here would be decoration.
   (t) => [
     index('tasks_due_idx').on(t.dueOn),
     index('tasks_status_idx').on(t.status),
     index('tasks_project_idx').on(t.projectId),
   ],
 );
+
+/**
+ * A sticky note on the Todo board — a scrap of text that isn't a task.
+ *
+ * Colour is stored as a *key* (`'yellow'`), never a hex, so the actual value
+ * can differ between light and dark themes. The keys are the `STICKY_COLORS`
+ * array in `@org/shared`, which the API validates against.
+ *
+ * Order is user-controlled but layout is not: the client drags to reorder and
+ * the grid arranges itself, so there are no x/y coordinates to store.
+ */
+export const stickyNotes = sqliteTable('sticky_notes', {
+  id: id(),
+  body: text('body').notNull().default(''),
+  color: text('color', {
+    enum: ['yellow', 'amber', 'green', 'blue', 'violet', 'pink', 'slate'],
+  })
+    .notNull()
+    .default('yellow'),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: now(),
+  updatedAt: text('updated_at').notNull(),
+});
 
 /**
  * A subscribed calendar — the "secret address in iCal format" Google and
