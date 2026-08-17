@@ -139,13 +139,56 @@ all.
 | Rules-based auto-categorizer that learns from corrections | Done |
 | Investments: holdings, live quotes, BoC FX, allocation | Done |
 | Ideas: editor + Claude expand / critique / relate / break down | Done |
-| **Plaid Link + daily sync** | **Not built** — schema, crypto, and config are in place; the Link flow and `/transactions/sync` cursor loop are not |
-| **CSV / OFX statement import** | **Not built** — `import_hash` column and dedupe design are in place; the parser and drop-zone are not |
-| **Daily cron** | **Not built** — `SYNC_CRON` is parsed but nothing is scheduled yet |
+| Plaid Link, cursor-based sync, nightly scheduler | Done — see below |
+| **CSV / OFX statement import** | **Not built** — the `import_hash` column and dedupe design are in place; the parser and drop-zone are not |
 
-The three unbuilt items are the automated-ingestion half of the finance tab.
-Everything they'd feed — the ledger, the categorizer, budgets, the charts —
-already works against manually entered and seeded data.
+Everything except statement import is built. The Plaid path is written against
+the v45 SDK and typechecks, but has **not yet been exercised against live Plaid
+credentials** — add keys and connect a sandbox institution to prove it before
+pointing it at a real card.
+
+---
+
+## How credit-card updates work
+
+Connect a card once in **Finances → Automatic sync → Connect**. After that:
+
+**Nightly at 06:00 local** (`SYNC_CRON`, default `0 6 * * *`) the scheduler
+pulls new transactions for every connected institution, refreshes balances and
+credit limits, runs the categorizer over anything new, and updates market
+quotes and the USD/CAD rate in the same pass.
+
+The cron fires on your **wall clock**, not UTC — 6am stays 6am across daylight
+saving. On this machine that resolves to `America/St_Johns`, so the next run
+lands at 08:30 UTC.
+
+**Three things make a missed night harmless:**
+
+1. Sync is **cursor-based**, not date-ranged. A run that covers three missed
+   nights returns everything since the last committed cursor.
+2. The cursor advances **inside the same transaction that writes the batch**.
+   If the process dies mid-page, the next run re-fetches from the last
+   committed position rather than skipping the gap.
+3. A **catch-up run** fires ~15s after startup whenever anything looks stale,
+   so opening the app after a weekend away pulls the backlog immediately
+   instead of waiting for the next 06:00.
+
+A laptop that's asleep at 6am still won't fire the cron — that's what the
+catch-up run covers. For a hard guarantee independent of the app running, a
+launchd agent hitting `POST /api/sync/run` would do it; that's deliberately not
+installed for you.
+
+**Two details the sync layer normalizes once, at the boundary:**
+
+- **Plaid's sign convention is inverted** — a positive amount means money
+  leaving the account. It's flipped on ingest so nothing downstream has to
+  remember.
+- **A settling charge gets a new transaction id** pointing at its pending one.
+  The pending row is deleted when the settled row arrives, so a coffee doesn't
+  appear twice.
+
+Re-running a sync that already completed is a no-op, so **Sync now** is always
+safe to press.
 
 ---
 

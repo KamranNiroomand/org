@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { runMigrations } from './db/migrate.js';
 import { registerAuth } from './auth.js';
 import { registerRoutes } from './routes/index.js';
+import { startScheduler } from './lib/scheduler.js';
 
 const app = Fastify({
   logger: {
@@ -32,6 +33,8 @@ async function main() {
   await registerRoutes(app);
 
   await app.listen({ port: config.port, host: config.host });
+
+  startScheduler(app.log);
 
   const where = config.bindLan
     ? `http://${config.host}:${config.port} (LAN — password required)`

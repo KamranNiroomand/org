@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CreditCard, Landmark, RefreshCw, Wallet } from 'lucide-react';
 import { useState } from 'react';
 import { formatMoney, money, todayCivil, civilKey } from '@org/shared';
+import { BankSync } from '../components/BankSync';
 import { CashflowChart, CategoryBars, StatTile } from '../components/charts';
 import { DualDate } from '../components/DualDate';
 import { Page, PageHeader } from '../components/PageHeader';
@@ -94,6 +95,8 @@ export function FinancesPage() {
       />
 
       <Page>
+        <BankSync />
+
         <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatTile label="Income" value={m(summary?.income ?? 0)} tone="positive" />
           <StatTile label="Spent" value={m(summary?.expense ?? 0)} />
