@@ -123,23 +123,42 @@ export const accounts = sqliteTable(
     creditLimit: integer('credit_limit'),
     institutionName: text('institution_name'),
     isManual: integer('is_manual', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * Whether this account feeds the summary tiles, cashflow, and category
+     * breakdown. Balances and the account list always show every account —
+     * this only governs the aggregates, so a joint account or a dormant
+     * savings account can be kept visible without skewing the charts.
+     */
+    includeInStats: integer('include_in_stats', { mode: 'boolean' })
+      .notNull()
+      .default(true),
     lastSyncedAt: text('last_synced_at'),
     createdAt: now(),
   },
   (t) => [uniqueIndex('accounts_plaid_uq').on(t.plaidAccountId)],
 );
 
-export const categories = sqliteTable('categories', {
-  id: id(),
-  name: text('name').notNull(),
-  parentId: text('parent_id'),
-  kind: text('kind', { enum: ['expense', 'income', 'transfer'] })
-    .notNull()
-    .default('expense'),
-  color: text('color').notNull().default('slate'),
-  icon: text('icon'),
-  isSystem: integer('is_system', { mode: 'boolean' }).notNull().default(false),
-});
+export const categories = sqliteTable(
+  'categories',
+  {
+    id: id(),
+    name: text('name').notNull(),
+    parentId: text('parent_id'),
+    kind: text('kind', { enum: ['expense', 'income', 'transfer'] })
+      .notNull()
+      .default('expense'),
+    color: text('color').notNull().default('slate'),
+    icon: text('icon'),
+    isSystem: integer('is_system', { mode: 'boolean' }).notNull().default(false),
+  },
+  /**
+   * Names are the identity here: the seeder looks categories up by name, and
+   * so does `categoryIdByName`. Without this constraint two seed runs racing
+   * each other — which is exactly what a dev-server restart does — both see a
+   * category missing and both insert it.
+   */
+  (t) => [uniqueIndex('categories_name_uq').on(t.name)],
+);
 
 export const transactions = sqliteTable(
   'transactions',
@@ -195,7 +214,12 @@ export const categoryRules = sqliteTable(
     priority: integer('priority').notNull().default(100),
     createdAt: now(),
   },
-  (t) => [index('rules_priority_idx').on(t.priority)],
+  /**
+   * `learnRule` already treats a pattern as unique — it updates the existing
+   * row rather than adding a second one. The constraint makes that assumption
+   * true rather than merely intended.
+   */
+  (t) => [index('rules_priority_idx').on(t.priority), uniqueIndex('rules_pattern_uq').on(t.pattern)],
 );
 
 export const budgets = sqliteTable(

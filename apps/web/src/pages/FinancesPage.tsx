@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CreditCard, Landmark, RefreshCw, Wallet } from 'lucide-react';
+import { CreditCard, Eye, EyeOff, Landmark, RefreshCw, Wallet } from 'lucide-react';
 import { useState } from 'react';
 import { formatMoney, money, todayCivil, civilKey } from '@org/shared';
 import { BankSync } from '../components/BankSync';
@@ -20,6 +20,7 @@ interface Account {
   creditLimit: number | null;
   institutionName: string | null;
   isManual: boolean;
+  includeInStats: boolean;
 }
 
 interface Category {
@@ -64,16 +65,31 @@ export function FinancesPage() {
     },
   });
 
+  /**
+   * Excluding an account is a display choice, not a destructive one — the
+   * account and its transactions stay exactly where they are, they just stop
+   * feeding the tiles and charts. Every aggregate query has to be invalidated
+   * together or the tiles and the charts disagree for a beat.
+   */
+  const toggleAccount = useMutation({
+    mutationFn: (vars: { id: string; includeInStats: boolean }) =>
+      api.patch(`/api/accounts/${vars.id}`, { includeInStats: vars.includeInStats }),
+    onSuccess: () => {
+      for (const key of ['accounts', 'summary', 'cashflow', 'budgets']) {
+        void qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
+
   const m = (cents: number) => formatMoney(money(cents, baseCurrency));
 
-  const debt =
-    accounts
-      ?.filter((a) => a.type === 'credit')
-      .reduce((s, a) => s + Math.abs(a.currentBalance ?? 0), 0) ?? 0;
-  const cash =
-    accounts
-      ?.filter((a) => a.type === 'depository')
-      .reduce((s, a) => s + (a.currentBalance ?? 0), 0) ?? 0;
+  const counted = accounts?.filter((a) => a.includeInStats) ?? [];
+  const debt = counted
+    .filter((a) => a.type === 'credit')
+    .reduce((s, a) => s + Math.abs(a.currentBalance ?? 0), 0);
+  const cash = counted
+    .filter((a) => a.type === 'depository')
+    .reduce((s, a) => s + (a.currentBalance ?? 0), 0);
 
   return (
     <>
@@ -127,7 +143,13 @@ export function FinancesPage() {
         <Card className="mb-5 overflow-hidden">
           <CardHeader
             title="Accounts"
-            subtitle={accounts?.length ? `${accounts.length} connected` : undefined}
+            subtitle={
+              accounts?.length
+                ? counted.length === accounts.length
+                  ? `${accounts.length} connected`
+                  : `${counted.length} of ${accounts.length} counted`
+                : undefined
+            }
           />
           {accounts?.length === 0 ? (
             <Empty
@@ -147,7 +169,35 @@ export function FinancesPage() {
                     ? Math.abs(a.currentBalance ?? 0) / a.creditLimit
                     : null;
                 return (
-                  <div key={a.id} className="flex items-center gap-3 px-4 py-3">
+                  <div
+                    key={a.id}
+                    className={cn(
+                      'flex items-center gap-3 px-4 py-3',
+                      !a.includeInStats && 'opacity-45',
+                    )}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        toggleAccount.mutate({ id: a.id, includeInStats: !a.includeInStats })
+                      }
+                      title={
+                        a.includeInStats
+                          ? 'Counted in totals and charts — click to exclude'
+                          : 'Excluded from totals and charts — click to include'
+                      }
+                      aria-label={
+                        a.includeInStats ? `Exclude ${a.name} from totals` : `Include ${a.name} in totals`
+                      }
+                      aria-pressed={a.includeInStats}
+                      className="rounded-md p-1 text-faint transition-colors hover:bg-bg-subtle hover:text-text"
+                    >
+                      {a.includeInStats ? (
+                        <Eye className="size-3.5" />
+                      ) : (
+                        <EyeOff className="size-3.5" />
+                      )}
+                    </button>
                     <div className="rounded-lg bg-bg-subtle p-2 text-muted">
                       {a.type === 'credit' ? (
                         <CreditCard className="size-4" />

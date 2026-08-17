@@ -8,6 +8,20 @@
       "when": 1786977716623,
       "tag": "0000_tough_shocker",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1786989583114,
+      "tag": "0001_lovely_proemial_gods",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786989772227,
+      "tag": "0002_smiling_dark_beast",
+      "breakpoints": true
     }
   ]
 }

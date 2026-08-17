@@ -102,6 +102,8 @@ export interface Account {
   creditLimit: number | null;
   institutionName: string | null;
   isManual: boolean;
+  /** Whether this account is counted in summary, cashflow, and category totals. */
+  includeInStats: boolean;
   lastSyncedAt: Instant | null;
 }
 

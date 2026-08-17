@@ -54,6 +54,26 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(row);
   });
 
+  /**
+   * Toggles whether an account feeds the aggregates. Deliberately separate
+   * from deleting it — excluding an account keeps its balance and its
+   * transactions, it just stops them being counted in the totals.
+   */
+  app.patch<{ Params: { id: string } }>('/api/accounts/:id', async (req, reply) => {
+    const parsed = z.object({ includeInStats: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
+
+    const existing = db.select().from(accounts).where(eq(accounts.id, req.params.id)).get();
+    if (!existing) return reply.code(404).send({ error: 'Account not found' });
+
+    db.update(accounts)
+      .set({ includeInStats: parsed.data.includeInStats })
+      .where(eq(accounts.id, req.params.id))
+      .run();
+
+    return db.select().from(accounts).where(eq(accounts.id, req.params.id)).get();
+  });
+
   app.delete<{ Params: { id: string } }>('/api/accounts/:id', async (req, reply) => {
     db.delete(accounts).where(eq(accounts.id, req.params.id)).run();
     return reply.code(204).send();
@@ -263,11 +283,13 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
         total: sql<number>`sum(${transactions.amount})`,
       })
       .from(transactions)
+      .innerJoin(accounts, eq(transactions.accountId, accounts.id))
       .where(
         and(
           gte(transactions.date, `${month}-01`),
           lte(transactions.date, `${month}-31`),
           eq(transactions.isTransfer, false),
+          eq(accounts.includeInStats, true),
         ),
       )
       .groupBy(transactions.categoryId)
@@ -346,11 +368,13 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
       })
       .from(transactions)
       .leftJoin(categories, eq(transactions.categoryId, categories.id))
+      .innerJoin(accounts, eq(transactions.accountId, accounts.id))
       .where(
         and(
           gte(transactions.date, from),
           lte(transactions.date, to),
           eq(transactions.isTransfer, false),
+          eq(accounts.includeInStats, true),
         ),
       )
       .all();
@@ -402,7 +426,8 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
         expense: sql<number>`sum(case when ${transactions.amount} < 0 then -${transactions.amount} else 0 end)`,
       })
       .from(transactions)
-      .where(eq(transactions.isTransfer, false))
+      .innerJoin(accounts, eq(transactions.accountId, accounts.id))
+      .where(and(eq(transactions.isTransfer, false), eq(accounts.includeInStats, true)))
       .groupBy(sql`substr(${transactions.date}, 1, 7)`)
       .orderBy(desc(sql`substr(${transactions.date}, 1, 7)`))
       .limit(months)

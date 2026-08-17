@@ -45,6 +45,13 @@ const SYSTEM_CATEGORIES: Array<{
   { name: 'Education', kind: 'expense', color: 'blue', icon: 'graduation-cap' },
   { name: 'Gifts & Donations', kind: 'expense', color: 'red', icon: 'gift' },
   { name: 'Fees & Charges', kind: 'expense', color: 'stone', icon: 'receipt' },
+
+  // Money leaving that isn't a purchase. From this account's point of view an
+  // e-transfer to a person and a bill paid through the bank are both genuine
+  // spending, so they are expenses rather than transfers — which is what puts
+  // them in "Where it went" instead of being excluded from it.
+  { name: 'E-Transfer Sent', kind: 'expense', color: 'violet', icon: 'send' },
+  { name: 'Bill Payment', kind: 'expense', color: 'amber', icon: 'file-text' },
   { name: 'Taxes', kind: 'expense', color: 'stone', icon: 'landmark' },
   { name: 'Uncategorized', kind: 'expense', color: 'slate', icon: 'circle-help' },
 
@@ -76,6 +83,9 @@ export function seedCategories(): number {
         isSystem: true,
       })),
     )
+    // The unique index on name is the real guard; this keeps a concurrent
+    // seed — two server processes overlapping on restart — from throwing.
+    .onConflictDoNothing()
     .run();
 
   return missing.length;

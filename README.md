@@ -98,6 +98,19 @@ PLAID_CLIENT_ID=...
 PLAID_SECRET=...
 ```
 
+Then prove the whole pipeline against a fake bank before a real card is
+involved:
+
+```
+npm run plaid:check
+```
+
+In sandbox that mints a token, exchanges it, runs a full sync, reports what
+landed, and deletes the item again so the ledger is left untouched. In
+production it validates the keys and stops. Sandbox and production have
+separate secrets — the check names that specific mistake if you paste the wrong
+one.
+
 Access tokens are AES-256-GCM encrypted before they touch the database, with the
 key held in the macOS Keychain rather than on disk. `/api/health` reports
 `features.encryption` so the UI can explain why connecting a bank is unavailable
@@ -144,7 +157,7 @@ all.
 
 Everything except statement import is built. The Plaid path is written against
 the v45 SDK and typechecks, but has **not yet been exercised against live Plaid
-credentials** — add keys and connect a sandbox institution to prove it before
+credentials** — add keys and run `npm run plaid:check` to prove it before
 pointing it at a real card.
 
 ---

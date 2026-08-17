@@ -155,7 +155,7 @@ export function learnRule(
  * Default rules covering common Canadian merchants, seeded once so the very
  * first import lands somewhere sensible rather than entirely in Uncategorized.
  */
-const DEFAULT_RULES: Array<[pattern: string, category: string]> = [
+const DEFAULT_RULES: Array<[pattern: string, category: string, priority?: number]> = [
   ['loblaws', 'Groceries'], ['no frills', 'Groceries'], ['sobeys', 'Groceries'],
   ['metro', 'Groceries'], ['food basics', 'Groceries'], ['freshco', 'Groceries'],
   ['costco', 'Groceries'], ['walmart', 'Groceries'], ['farm boy', 'Groceries'],
@@ -178,15 +178,45 @@ const DEFAULT_RULES: Array<[pattern: string, category: string]> = [
   ['interest', 'Interest & Dividends'], ['dividend', 'Interest & Dividends'],
   ['payment - thank you', 'Credit Card Payment'], ['paiement', 'Credit Card Payment'],
   ['e-transfer', 'Transfer'], ['transfer', 'Transfer'],
+
+  /**
+   * Outgoing e-transfers and bank bill payments, at priority 80 so they beat
+   * the merchant rules below. That ordering is deliberate: `BELL MOBILITY
+   * BPY/FAC` is both a Bell charge and a bill payment, and the bill-payment
+   * reading is the one being asked for here. Correcting any single transaction
+   * still wins, since learned rules sit at 50.
+   *
+   * Patterns are matched after `normalizeDescription`, which strips
+   * punctuation — so 'bpy/fac' matches the 'bpy fac' the description becomes.
+   * CIBC and BMO both write the abbreviated 'ETRNSFR', not 'e-transfer',
+   * which is why the seeded 'e-transfer' rule above never fired on them.
+   */
+  ['etrnsfr sent', 'E-Transfer Sent', 80],
+  ['e-transfer sent', 'E-Transfer Sent', 80],
+  ['etransfer sent', 'E-Transfer Sent', 80],
+  ['bpy/fac', 'Bill Payment', 80],
+  ['bill payment', 'Bill Payment', 80],
+  ['bill pay', 'Bill Payment', 80],
   ['nsf fee', 'Fees & Charges'], ['overdraft', 'Fees & Charges'], ['annual fee', 'Fees & Charges'],
 ];
 
-/** Inserts default rules if none exist. Safe to run on every startup. */
+/**
+ * Inserts any default rule that isn't already present, keyed by pattern. Safe
+ * to run on every startup.
+ *
+ * Additive rather than all-or-nothing, so a rule added to the list above
+ * reaches a database that was seeded before it existed. The cost is that a
+ * default you delete comes back on the next restart — delete it again, or
+ * point it somewhere else by correcting a transaction, which writes a
+ * priority-50 rule that outranks every default here.
+ */
 export function seedDefaultRules(): number {
-  const count = db.select({ id: categoryRules.id }).from(categoryRules).all().length;
-  if (count > 0) return 0;
+  const existing = new Set(
+    db.select({ pattern: categoryRules.pattern }).from(categoryRules).all().map((r) => r.pattern),
+  );
 
-  const rows = DEFAULT_RULES.flatMap(([pattern, categoryName]) => {
+  const rows = DEFAULT_RULES.flatMap(([pattern, categoryName, priority]) => {
+    if (existing.has(pattern)) return [];
     const categoryId = categoryIdByName(categoryName);
     if (!categoryId) return [];
     return [
@@ -195,13 +225,13 @@ export function seedDefaultRules(): number {
         matchType: 'contains' as const,
         pattern,
         categoryId,
-        priority: 100,
+        priority: priority ?? 100,
         createdAt: nowIso(),
       },
     ];
   });
 
-  if (rows.length > 0) db.insert(categoryRules).values(rows).run();
+  if (rows.length > 0) db.insert(categoryRules).values(rows).onConflictDoNothing().run();
   return rows.length;
 }
 

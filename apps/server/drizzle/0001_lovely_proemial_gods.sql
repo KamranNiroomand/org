@@ -1,0 +1,1 @@
+ALTER TABLE `accounts` ADD `include_in_stats` integer DEFAULT true NOT NULL;

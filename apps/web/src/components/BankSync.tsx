@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Building2, Plus, RefreshCw, Trash2 } from 'lucide-react';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { usePlaidLink, type PlaidLinkOnSuccess } from 'react-plaid-link';
 import { Badge, Button, Card, CardHeader, Empty, cn } from './ui';
 import { api } from '../lib/api';
@@ -131,11 +131,15 @@ export function BankSync() {
     onExit: () => setLinkToken(null),
   });
 
-  // Link is ready the moment the token lands; opening it is the next step.
-  if (linkToken && ready) {
-    open();
-    setLinkToken(null);
-  }
+  /**
+   * Opening Link is a side effect, so it belongs in an effect rather than the
+   * render body. Clearing the token here as well would tear the handler down
+   * before the modal could paint — it is cleared in onSuccess and onExit
+   * instead, once Link itself is finished with it.
+   */
+  useEffect(() => {
+    if (linkToken && ready) open();
+  }, [linkToken, ready, open]);
 
   if (!status?.configured) {
     return (
