@@ -59,6 +59,9 @@ const SYSTEM_CATEGORIES: Array<{
   // credit-card payment being counted as an expense on top of the purchases it
   // settles, which would double-count every dollar.
   { name: 'Transfer', kind: 'transfer', color: 'slate', icon: 'arrow-left-right' },
+  // Money arriving from a person rather than earned. Transfer-kind, so it is
+  // visible in the ledger without inflating income.
+  { name: 'E-Transfer Received', kind: 'transfer', color: 'slate', icon: 'move-down-left' },
   { name: 'Credit Card Payment', kind: 'transfer', color: 'slate', icon: 'credit-card' },
 ];
 

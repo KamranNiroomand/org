@@ -194,6 +194,8 @@ const DEFAULT_RULES: Array<[pattern: string, category: string, priority?: number
   ['etrnsfr sent', 'E-Transfer Sent', 80],
   ['e-transfer sent', 'E-Transfer Sent', 80],
   ['etransfer sent', 'E-Transfer Sent', 80],
+  ['etrnsfr recvd', 'E-Transfer Received', 80],
+  ['e-transfer received', 'E-Transfer Received', 80],
   ['bpy/fac', 'Bill Payment', 80],
   ['bill payment', 'Bill Payment', 80],
   ['bill pay', 'Bill Payment', 80],

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, like, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, like, lte, ne, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
@@ -6,6 +6,22 @@ import { db } from '../db/index.js';
 import { accounts, budgets, categories, categoryRules, transactions } from '../db/schema.js';
 import { categorizeUncategorized, learnRule } from '../lib/categorize.js';
 import { newId, nowIso, todayKey } from '../lib/util.js';
+
+/**
+ * Keeps transfers out of income and spending totals.
+ *
+ * Two separate things mean "transfer" and both have to be honoured: the
+ * per-transaction `is_transfer` flag, and a category whose kind is 'transfer'.
+ * Only the flag was ever checked, which left the transfer *categories* purely
+ * decorative — a credit-card payment landed in spending on the chequing side
+ * and in income on the card side, double-counting the very dollars it settles.
+ * An uncategorized row has a null kind and must still be counted.
+ */
+const notATransfer = () =>
+  and(
+    eq(transactions.isTransfer, false),
+    or(isNull(categories.kind), ne(categories.kind, 'transfer')),
+  );
 
 const civilKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const monthKeySchema = z.string().regex(/^\d{4}-\d{2}$/);
@@ -373,7 +389,7 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
         and(
           gte(transactions.date, from),
           lte(transactions.date, to),
-          eq(transactions.isTransfer, false),
+          notATransfer(),
           eq(accounts.includeInStats, true),
         ),
       )
@@ -427,7 +443,8 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
       })
       .from(transactions)
       .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-      .where(and(eq(transactions.isTransfer, false), eq(accounts.includeInStats, true)))
+      .leftJoin(categories, eq(transactions.categoryId, categories.id))
+      .where(and(notATransfer(), eq(accounts.includeInStats, true)))
       .groupBy(sql`substr(${transactions.date}, 1, 7)`)
       .orderBy(desc(sql`substr(${transactions.date}, 1, 7)`))
       .limit(months)
