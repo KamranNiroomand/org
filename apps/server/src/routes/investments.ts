@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { holdings } from '../db/schema.js';
 import { fetchQuotes, fetchUsdCad, lastKnownPrice, saveQuotes } from '../lib/quotes.js';
+import { getMarket } from '../lib/market.js';
 import { newId, nowIso } from '../lib/util.js';
 
 const body = z.object({
@@ -165,5 +166,18 @@ export async function investmentRoutes(app: FastifyInstance): Promise<void> {
       usdCad,
       stale,
     };
+  });
+
+  // -------------------------------------------------------------------------
+  // Market map
+  // -------------------------------------------------------------------------
+
+  /**
+   * The S&P 500 with live quotes. `?force=true` bypasses the 60s cache for the
+   * refresh button; ordinary page loads share whatever sweep is current.
+   */
+  app.get<{ Querystring: { force?: string } }>('/api/investments/market', async (req) => {
+    const snapshot = await getMarket(req.query.force === 'true');
+    return snapshot;
   });
 }
