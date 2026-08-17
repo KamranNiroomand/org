@@ -24,7 +24,8 @@
     "db:migrate": "npm run db:migrate -w @org/server",
     "db:seed": "npm run db:seed -w @org/server",
     "db:studio": "npm run db:studio -w @org/server",
-    "plaid:check": "npm run plaid:check -w @org/server"
+    "plaid:check": "npm run plaid:check -w @org/server",
+    "backup": "npm run backup -w @org/server"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

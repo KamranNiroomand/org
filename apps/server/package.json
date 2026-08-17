@@ -11,7 +11,8 @@
     "db:seed": "tsx --env-file-if-exists=../../.env src/db/seed.ts",
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio",
-    "plaid:check": "tsx --env-file-if-exists=../../.env src/scripts/plaid-check.ts"
+    "plaid:check": "tsx --env-file-if-exists=../../.env src/scripts/plaid-check.ts",
+    "backup": "tsx --env-file-if-exists=../../.env src/scripts/backup.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
