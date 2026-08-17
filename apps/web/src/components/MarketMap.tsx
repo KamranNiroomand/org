@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { RefreshCw, Search } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ResponsiveContainer, Tooltip, Treemap } from 'recharts';
 import { Button, Card, CardHeader, Skeleton, cn } from './ui';
 import { api } from '../lib/api';
@@ -24,9 +24,11 @@ interface MarketRow {
 
 interface Snapshot {
   asOf: string | null;
+  matched: number;
   quoted: number;
   universe: number;
   exchanges: string[];
+  sectors: string[];
   rows: MarketRow[];
 }
 
@@ -121,28 +123,28 @@ const num = (v: number | null, digits = 1): string => (v === null ? '—' : v.to
 const listedYear = (ms: number | null): number | null =>
   ms === null ? null : new Date(ms).getUTCFullYear();
 
-const CAP_BANDS = {
-  all: { label: 'Any size', test: () => true },
-  mega: { label: 'Mega · >$200B', test: (c: number) => c > 200e9 },
-  large: { label: 'Large · $10–200B', test: (c: number) => c >= 10e9 && c <= 200e9 },
-  mid: { label: 'Mid · <$10B', test: (c: number) => c < 10e9 },
-} as const;
+const CAP_BANDS: Array<[string, string]> = [
+  ['all', 'Any size'],
+  ['mega', 'Mega · >$200B'],
+  ['large', 'Large · $10–200B'],
+  ['mid', 'Mid · <$10B'],
+];
 
-const AGE_BANDS = {
-  all: { label: 'Any age', test: () => true },
-  recent: { label: 'Listed since 2015', test: (y: number) => y >= 2015 },
-  mature: { label: 'Listed 1990–2014', test: (y: number) => y >= 1990 && y < 2015 },
-  old: { label: 'Listed before 1990', test: (y: number) => y < 1990 },
-} as const;
+const AGE_BANDS: Array<[string, string]> = [
+  ['all', 'Any age'],
+  ['recent', 'Listed since 2015'],
+  ['mature', 'Listed 1990–2014'],
+  ['old', 'Listed before 1990'],
+];
 
-const PE_BANDS = {
-  all: { label: 'Any P/E', test: () => true },
-  value: { label: 'P/E under 15', test: (p: number | null) => p !== null && p < 15 },
-  fair: { label: 'P/E 15–25', test: (p: number | null) => p !== null && p >= 15 && p <= 25 },
-  growth: { label: 'P/E 25–40', test: (p: number | null) => p !== null && p > 25 && p <= 40 },
-  rich: { label: 'P/E over 40', test: (p: number | null) => p !== null && p > 40 },
-  none: { label: 'No P/E (loss-making)', test: (p: number | null) => p === null },
-} as const;
+const PE_BANDS: Array<[string, string]> = [
+  ['all', 'Any P/E'],
+  ['value', 'P/E under 15'],
+  ['fair', 'P/E 15–25'],
+  ['growth', 'P/E 25–40'],
+  ['rich', 'P/E over 40'],
+  ['none', 'No P/E (loss-making)'],
+];
 
 /** Boxes below this share of the canvas cannot fit a legible label. */
 const MAX_BOXES = 120;
@@ -177,17 +179,30 @@ export function MarketMap() {
   const [index, setIndex] = useState('all');
   const [exchange, setExchange] = useState('all');
   const [sector, setSector] = useState('all');
-  const [cap, setCap] = useState<keyof typeof CAP_BANDS>('all');
-  const [age, setAge] = useState<keyof typeof AGE_BANDS>('all');
-  const [pe, setPe] = useState<keyof typeof PE_BANDS>('all');
+  const [cap, setCap] = useState('all');
+  const [age, setAge] = useState('all');
+  const [pe, setPe] = useState('all');
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('marketCap');
   const [asc, setAsc] = useState(false);
 
+  /**
+   * Debounced so typing a symbol doesn't fire a query per keystroke.
+   */
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => clearTimeout(t);
+  }, [query]);
+
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['market', index, exchange],
-    queryFn: () =>
-      api.get<Snapshot>(`/api/investments/market?index=${index}&exchange=${exchange}`),
+    queryKey: ['market', index, exchange, sector, cap, age, pe, debouncedQuery],
+    queryFn: () => {
+      const params = new URLSearchParams({ index, exchange, sector, cap, age, pe });
+      if (debouncedQuery) params.set('search', debouncedQuery);
+      return api.get<Snapshot>(`/api/investments/market?${params.toString()}`);
+    },
+    placeholderData: (prev) => prev,
   });
 
   /**
@@ -201,23 +216,9 @@ export function MarketMap() {
     onSuccess: () => void refetch(),
   });
 
-  const sectors = useMemo(
-    () => [...new Set((data?.rows ?? []).map((r) => r.sector).filter((x): x is string => !!x))].sort(),
-    [data],
-  );
+  const sectors = data?.sectors ?? [];
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return (data?.rows ?? []).filter((r) => {
-      if (sector !== 'all' && r.sector !== sector) return false;
-      if (r.marketCap === null || !CAP_BANDS[cap].test(r.marketCap)) return false;
-      const y = listedYear(r.firstTradeMs);
-      if (age !== 'all' && (y === null || !AGE_BANDS[age].test(y))) return false;
-      if (!PE_BANDS[pe].test(r.trailingPE)) return false;
-      if (q && !r.symbol.toLowerCase().includes(q) && !r.name.toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [data, sector, cap, age, pe, query]);
+  const filtered = data?.rows ?? [];
 
   const dark = isDark();
 
@@ -275,7 +276,7 @@ export function MarketMap() {
           title="Market map"
           subtitle={
             data
-              ? `${filtered.length.toLocaleString()} shown · ${data.quoted.toLocaleString()} of ${data.universe.toLocaleString()} instruments quoted · sized by market cap`
+              ? `${data.matched.toLocaleString()} matching · ${data.universe.toLocaleString()} instruments · sized by market cap`
               : 'Loading…'
           }
           action={
@@ -326,18 +327,18 @@ export function MarketMap() {
           />
           <Select
             value={cap}
-            onChange={(v) => setCap(v as keyof typeof CAP_BANDS)}
-            options={Object.entries(CAP_BANDS).map(([k, v]) => [k, v.label])}
+            onChange={setCap}
+            options={CAP_BANDS}
           />
           <Select
             value={age}
-            onChange={(v) => setAge(v as keyof typeof AGE_BANDS)}
-            options={Object.entries(AGE_BANDS).map(([k, v]) => [k, v.label])}
+            onChange={setAge}
+            options={AGE_BANDS}
           />
           <Select
             value={pe}
-            onChange={(v) => setPe(v as keyof typeof PE_BANDS)}
-            options={Object.entries(PE_BANDS).map(([k, v]) => [k, v.label])}
+            onChange={setPe}
+            options={PE_BANDS}
           />
         </div>
 
@@ -362,10 +363,12 @@ export function MarketMap() {
                 </Treemap>
               </ResponsiveContainer>
             </div>
-            {filtered.length > MAX_BOXES && (
+            {(data?.matched ?? 0) > MAX_BOXES && (
               <p className="px-4 pb-2 pt-1 text-[11px] text-faint">
-                Showing the {MAX_BOXES} largest of {filtered.length} matches — smaller boxes would be
-                unreadable. All {filtered.length} appear in the table below.
+                Drawing the {MAX_BOXES} largest of {data!.matched.toLocaleString()} matches — smaller
+                boxes would be unreadable.
+                {data!.matched > filtered.length &&
+                  ` The table lists the largest ${filtered.length.toLocaleString()}.`}
               </p>
             )}
           </>
@@ -373,7 +376,12 @@ export function MarketMap() {
       </Card>
 
       <Card className="overflow-hidden">
-        <CardHeader title="Companies" subtitle={`${sorted.length} matching`} />
+        <CardHeader
+          title="Companies"
+          subtitle={`${sorted.length.toLocaleString()} shown${
+            (data?.matched ?? 0) > sorted.length ? ` of ${data!.matched.toLocaleString()} matching` : ''
+          }`}
+        />
         <div className="max-h-[520px] overflow-auto">
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-panel text-muted shadow-[0_1px_0_var(--color-border)]">

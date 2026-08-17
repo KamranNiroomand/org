@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { instruments } from '../db/schema.js';
@@ -35,7 +35,7 @@ interface RawQuote {
   forwardPE?: number;
   priceToBook?: number;
   dividendYield?: number;
-  firstTradeDateMilliseconds?: number;
+  firstTradeDateMilliseconds?: unknown;
   sector?: string;
 }
 
@@ -54,6 +54,17 @@ async function getClient(): Promise<YahooClient> {
 
 const num = (v: number | undefined): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? v : null;
+
+/**
+ * `yahoo-finance2` parses date-ish fields into `Date` objects rather than
+ * leaving them as the epoch milliseconds the field name promises. Reading it
+ * as a number silently discards every value — which is exactly what happened,
+ * leaving the listing date null for the entire universe.
+ */
+const epochMs = (v: unknown): number | null => {
+  if (v instanceof Date) return Number.isFinite(v.getTime()) ? v.getTime() : null;
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+};
 
 /** Quotes a list of symbols in batches, returning only what came back. */
 async function quoteAll(symbols: string[], pause = CHUNK_PAUSE_MS): Promise<RawQuote[]> {
@@ -96,7 +107,7 @@ function writeQuotes(rows: RawQuote[]): number {
           forwardPe: num(q.forwardPE),
           priceToBook: num(q.priceToBook),
           dividendYield: num(q.dividendYield),
-          firstTradeMs: num(q.firstTradeDateMilliseconds),
+          firstTradeMs: epochMs(q.firstTradeDateMilliseconds),
           // Sector deliberately untouched: it is set by the universe refresh
           // from Nasdaq's screener, and writing it here would blank every
           // symbol the quote call knows nothing about — which is all of them.
@@ -138,11 +149,23 @@ export async function refreshSymbols(symbols: string[]): Promise<number> {
 
 export type IndexFilter = 'all' | 'sp500' | 'nasdaq100' | 'us' | 'ca';
 
+export type CapBand = 'all' | 'mega' | 'large' | 'mid';
+export type AgeBand = 'all' | 'recent' | 'mature' | 'old';
+export type PeBand = 'all' | 'value' | 'fair' | 'growth' | 'rich' | 'none';
+
 export interface MarketQuery {
   index?: IndexFilter;
   exchange?: string;
+  sector?: string;
+  cap?: CapBand;
+  age?: AgeBand;
+  pe?: PeBand;
+  search?: string;
   limit?: number;
 }
+
+/** Epoch millis for 1 January of a given year, UTC. */
+const jan1 = (year: number): number => Date.UTC(year, 0, 1);
 
 export interface MarketRow {
   symbol: string;
@@ -164,19 +187,27 @@ export interface MarketRow {
 export interface MarketSnapshot {
   asOf: string | null;
   rows: MarketRow[];
+  /** Total matching the filters, which can exceed the rows returned. */
+  matched: number;
   /** How much of the universe carries a quote at all. */
   quoted: number;
   universe: number;
   exchanges: string[];
+  sectors: string[];
 }
 
 /**
- * Reads the stored universe. Ordered by market cap and capped, because the map
- * can only draw so many boxes and the table only scrolls so far — the tail of
- * a seven-thousand-name universe is micro-caps nobody is looking for by eye.
+ * Reads the stored universe.
+ *
+ * Every filter is applied here rather than in the browser. Sending a
+ * top-N-by-cap slice and filtering it client-side looks equivalent and is not:
+ * the slice is the *largest* companies, so asking for anything small returns
+ * only whatever small companies happened to survive the cut — a wrong answer
+ * that looks like a real one. Filtering first and truncating after means the
+ * cap only ever limits how much of a correct result is drawn.
  */
 export function getMarket(query: MarketQuery = {}): MarketSnapshot {
-  const { index = 'all', exchange, limit = 1500 } = query;
+  const { index = 'all', exchange, sector, cap = 'all', age = 'all', pe = 'all', search, limit = 1500 } = query;
 
   const filters: SQL[] = [isNotNull(instruments.marketCap)];
   if (index === 'sp500') filters.push(inArray(instruments.symbol, [...SP500_SET]));
@@ -184,11 +215,41 @@ export function getMarket(query: MarketQuery = {}): MarketSnapshot {
   if (index === 'us') filters.push(eq(instruments.country, 'US'));
   if (index === 'ca') filters.push(eq(instruments.country, 'CA'));
   if (exchange && exchange !== 'all') filters.push(eq(instruments.exchange, exchange));
+  if (sector && sector !== 'all') filters.push(eq(instruments.sector, sector));
+
+  if (cap === 'mega') filters.push(gt(instruments.marketCap, 200e9));
+  if (cap === 'large') {
+    filters.push(gte(instruments.marketCap, 10e9), lte(instruments.marketCap, 200e9));
+  }
+  if (cap === 'mid') filters.push(lt(instruments.marketCap, 10e9));
+
+  if (age === 'recent') filters.push(gte(instruments.firstTradeMs, jan1(2015)));
+  if (age === 'mature') {
+    filters.push(gte(instruments.firstTradeMs, jan1(1990)), lt(instruments.firstTradeMs, jan1(2015)));
+  }
+  if (age === 'old') filters.push(lt(instruments.firstTradeMs, jan1(1990)));
+
+  if (pe === 'value') filters.push(lt(instruments.trailingPe, 15));
+  if (pe === 'fair') filters.push(gte(instruments.trailingPe, 15), lte(instruments.trailingPe, 25));
+  if (pe === 'growth') filters.push(gt(instruments.trailingPe, 25), lte(instruments.trailingPe, 40));
+  if (pe === 'rich') filters.push(gt(instruments.trailingPe, 40));
+  if (pe === 'none') filters.push(isNull(instruments.trailingPe));
+
+  const term = search?.trim();
+  if (term) {
+    const pattern = `%${term}%`;
+    filters.push(or(like(instruments.symbol, pattern), like(instruments.name, pattern))!);
+  }
+
+  const where = and(...filters);
+
+  const matched =
+    db.select({ n: sql<number>`count(*)` }).from(instruments).where(where).get()?.n ?? 0;
 
   const rows = db
     .select()
     .from(instruments)
-    .where(and(...filters))
+    .where(where)
     .orderBy(desc(instruments.marketCap))
     .limit(limit)
     .all();
@@ -209,11 +270,21 @@ export function getMarket(query: MarketQuery = {}): MarketSnapshot {
     .map((r) => r.exchange)
     .sort();
 
+  const sectors = db
+    .selectDistinct({ sector: instruments.sector })
+    .from(instruments)
+    .all()
+    .map((r) => r.sector)
+    .filter((s): s is string => s !== null)
+    .sort();
+
   return {
     asOf: stats?.asOf ?? null,
+    matched,
     quoted: stats?.quoted ?? 0,
     universe: stats?.universe ?? 0,
     exchanges,
+    sectors,
     rows: rows.map((r) => ({
       symbol: r.symbol,
       name: r.name,

@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { holdings } from '../db/schema.js';
 import { fetchQuotes, fetchUsdCad, lastKnownPrice, saveQuotes } from '../lib/quotes.js';
-import { getMarket, refreshSymbols, sweepMarket, type IndexFilter } from '../lib/market.js';
+import { getMarket, refreshSymbols, sweepMarket } from '../lib/market.js';
 import { refreshUniverse } from '../lib/universe.js';
 import { newId, nowIso } from '../lib/util.js';
 
@@ -177,15 +177,30 @@ export async function investmentRoutes(app: FastifyInstance): Promise<void> {
    * The S&P 500 with live quotes. `?force=true` bypasses the 60s cache for the
    * refresh button; ordinary page loads share whatever sweep is current.
    */
-  app.get<{ Querystring: { index?: string; exchange?: string } }>(
-    '/api/investments/market',
-    async (req) => {
-      const index = ['all', 'sp500', 'nasdaq100', 'us', 'ca'].includes(req.query.index ?? '')
-        ? (req.query.index as IndexFilter)
-        : 'all';
-      return getMarket({ index, exchange: req.query.exchange });
-    },
-  );
+  app.get<{
+    Querystring: {
+      index?: string;
+      exchange?: string;
+      sector?: string;
+      cap?: string;
+      age?: string;
+      pe?: string;
+      search?: string;
+    };
+  }>('/api/investments/market', async (req) => {
+    const oneOf = <T extends string>(value: string | undefined, allowed: readonly T[], fallback: T): T =>
+      allowed.includes((value ?? '') as T) ? ((value ?? '') as T) : fallback;
+
+    return getMarket({
+      index: oneOf(req.query.index, ['all', 'sp500', 'nasdaq100', 'us', 'ca'] as const, 'all'),
+      exchange: req.query.exchange,
+      sector: req.query.sector,
+      cap: oneOf(req.query.cap, ['all', 'mega', 'large', 'mid'] as const, 'all'),
+      age: oneOf(req.query.age, ['all', 'recent', 'mature', 'old'] as const, 'all'),
+      pe: oneOf(req.query.pe, ['all', 'value', 'fair', 'growth', 'rich', 'none'] as const, 'all'),
+      search: req.query.search,
+    });
+  });
 
   /**
    * Re-quotes just the symbols a client is displaying. The whole universe is
