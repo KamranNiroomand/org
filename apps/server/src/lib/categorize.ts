@@ -155,7 +155,9 @@ export function learnRule(
  * Default rules covering common Canadian merchants, seeded once so the very
  * first import lands somewhere sensible rather than entirely in Uncategorized.
  */
-const DEFAULT_RULES: Array<[pattern: string, category: string, priority?: number]> = [
+const DEFAULT_RULES: Array<
+  [pattern: string, category: string, priority?: number, matchType?: 'contains' | 'regex']
+> = [
   ['loblaws', 'Groceries'], ['no frills', 'Groceries'], ['sobeys', 'Groceries'],
   ['metro', 'Groceries'], ['food basics', 'Groceries'], ['freshco', 'Groceries'],
   ['costco', 'Groceries'], ['walmart', 'Groceries'], ['farm boy', 'Groceries'],
@@ -200,6 +202,70 @@ const DEFAULT_RULES: Array<[pattern: string, category: string, priority?: number
   ['bill payment', 'Bill Payment', 80],
   ['bill pay', 'Bill Payment', 80],
   ['nsf fee', 'Fees & Charges'], ['overdraft', 'Fees & Charges'], ['annual fee', 'Fees & Charges'],
+
+  /**
+   * BMO and CIBC label transactions with bilingual three-letter codes rather
+   * than merchant names, and the largest amounts in the ledger are these — not
+   * spending at all, but money moving between the account holder's own
+   * accounts. Left uncategorized they dwarf every real purchase and make the
+   * spending total meaningless.
+   *
+   * Priority 70 puts them ahead of everything except a human correction. They
+   * have to outrank the merchant rules because several carry a bank or brand
+   * name that would otherwise win — TANGERINE, CIBC VISA, WS INVESTMENTS.
+   */
+  ['cw tf', 'Transfer', 70],
+  ['trsf from', 'Transfer', 70],
+  ['ftd/rii', 'Transfer', 70],
+  ['inv/pla', 'Transfer', 70],
+  ['cibc visa', 'Credit Card Payment', 70],
+
+  // Payroll, tax, and insurance codes.
+  ['pay/pay', 'Salary', 75],
+  ['txd/dim', 'Taxes', 75],
+  ['paysimply', 'Taxes', 75],
+  ['ins/ass', 'Insurance', 75],
+
+  // Bank charges and their reversals. The rebates must outrank the charge
+  // itself, since 'service charge discount' contains 'service charge'.
+  ['service charge discount', 'Refunds', 74],
+  ['full plan fee rebate', 'Refunds', 74],
+  ['cash back', 'Refunds', 75],
+  ['service charge', 'Fees & Charges', 75],
+  ['performance plan', 'Fees & Charges', 75],
+  ['annual card fee', 'Fees & Charges', 75],
+  ['o/d per item', 'Fees & Charges', 75],
+  // Bare '[IN]' interest postings carry no description. Matched by regex on the
+  // raw text because normalization reduces the tag to 'in', and a 'contains'
+  // rule for that would swallow most of the ledger.
+  ['^\\s*\\[IN\\]', 'Interest & Dividends', 75, 'regex'],
+
+  // Merchants actually present in this ledger, beyond the national chains.
+  ['marshalls', 'Shopping'], ['homesens', 'Shopping'], ['winners', 'Shopping'],
+  ['bureau en gros', 'Shopping'], ['staples', 'Shopping'], ['jomashop', 'Shopping'],
+  ['ebay', 'Shopping'], ['on sportswear', 'Shopping'], ['coohom', 'Shopping'],
+  ['dicks and company', 'Shopping'], ['cpc / scp', 'Shopping'], ['dhl', 'Shopping'],
+  ['dominion', 'Groceries'], ['superstore', 'Groceries'],
+  ['kelsey', 'Restaurants'], ['harvey', 'Restaurants'], ['mary brown', 'Restaurants'],
+  ['pizza', 'Restaurants'], ['pizzeria', 'Restaurants'], ['poulet', 'Restaurants'],
+  ['fuddruckers', 'Restaurants'], ['spaghetti', 'Restaurants'], ['grill', 'Restaurants'],
+  ['deli', 'Restaurants'], ['popeyes', 'Restaurants'], ['kfc', 'Restaurants'],
+  ['subway', 'Restaurants'], ['blue on water', 'Restaurants'], ['fish exchange', 'Restaurants'],
+  ['smachno', 'Restaurants'], ['la buche', 'Restaurants'], ['slice and soda', 'Restaurants'],
+  ['speakeatery', 'Restaurants'], ['paddy wagon', 'Restaurants'], ['sumac', 'Restaurants'],
+  ['kooko', 'Restaurants'], ['meltwich', 'Restaurants'], ['tst-', 'Restaurants'],
+  ['cafe', 'Coffee'],
+  ['taxi', 'Transport'], ['parking', 'Transport'], ['pkg pay stn', 'Transport'],
+  ['stm ', 'Transport'], ['fine motors', 'Transport'],
+  ['couche tard', 'Fuel'],
+  ['clinic', 'Health'], ['pharma', 'Health'], ['barber', 'Health'],
+  ['hertz', 'Travel'],
+  ['namecheap', 'Subscriptions'], ['upwork', 'Subscriptions'], ['hedra', 'Subscriptions'],
+  // Skip+ is a recurring membership, not a meal — it must outrank the
+  // 'skipthedishes' rule that sends food orders to Restaurants.
+  ['skipplus', 'Subscriptions', 90],
+  ['paramount', 'Restaurants'],
+
 ];
 
 /**
@@ -217,14 +283,14 @@ export function seedDefaultRules(): number {
     db.select({ pattern: categoryRules.pattern }).from(categoryRules).all().map((r) => r.pattern),
   );
 
-  const rows = DEFAULT_RULES.flatMap(([pattern, categoryName, priority]) => {
+  const rows = DEFAULT_RULES.flatMap(([pattern, categoryName, priority, matchType]) => {
     if (existing.has(pattern)) return [];
     const categoryId = categoryIdByName(categoryName);
     if (!categoryId) return [];
     return [
       {
         id: newId(),
-        matchType: 'contains' as const,
+        matchType: matchType ?? ('contains' as const),
         pattern,
         categoryId,
         priority: priority ?? 100,
