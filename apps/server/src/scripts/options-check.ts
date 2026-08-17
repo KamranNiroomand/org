@@ -6,12 +6,24 @@ import { parseOccSymbol, fromE4 } from '@org/shared';
 /**
  * Preflight for the options data subscription.
  *
- * Answers the question that decides the shape of the whole backtest before
- * two years of backfill are spent finding out the hard way: does this tier
- * serve historical bid and ask, or only historical trades? Without quotes a
- * backtest can only fill at last-traded prices, and on instruments whose
- * spreads routinely run to several percent that difference is not a detail —
- * it is usually the entire measured edge.
+ * Confirms what the key actually reaches before a two-year backfill is spent
+ * finding out the hard way.
+ *
+ * We are on **Options Starter** deliberately. Historical NBBO quotes sit on
+ * the $199 Advanced tier — not Starter, and not even the $79 Developer tier —
+ * so their absence here is a known, priced-in limitation rather than a fault
+ * to be alarmed by. What follows from it is a split worth keeping straight:
+ *
+ *   forecasting          equity bars and aggregates. Fully covered, two years
+ *                        of history, available immediately.
+ *   forward paper trades  live snapshots carry a real bid and ask, so every
+ *                        mark from tonight onward is an honest one.
+ *   historical fills     the one thing that genuinely needs NBBO. Deferred
+ *                        until a strategy looks good enough to be worth
+ *                        measuring precisely.
+ *
+ * The 15-minute delay on Starter costs us nothing: capture runs after the US
+ * close, by which time the delayed feed and the real-time feed agree.
  *
  *   npm run options:check -w @org/server
  */
@@ -25,8 +37,9 @@ async function main(): Promise<void> {
 
   if (!config.market.configured) {
     bad('POLYGON_API_KEY is not set in .env');
-    console.log('\n  Get one from polygon.io → Dashboard → API Keys.');
-    console.log('  Options Starter (~$29/mo) is the tier this build assumes.\n');
+    console.log('\n  Get one from massive.com → Dashboard → API Keys.');
+    console.log('  (Polygon rebranded to Massive; polygon.io redirects there.)');
+    console.log('  Options Starter ($29/mo) is the tier this build assumes.\n');
     process.exit(1);
   }
   ok('API key is present');
@@ -55,23 +68,26 @@ async function main(): Promise<void> {
 
   console.log('');
   if (caps.historicalQuotes) {
-    ok('HISTORICAL NBBO QUOTES AVAILABLE');
-    console.log('    Backtest fills can use the real bid and ask. This is the good case;');
-    console.log('    proceed with the full backfill.');
+    ok('historical NBBO quotes available — backtest fills can use real bid/ask');
+    console.log('    Better than the Starter tier promises. Historical fill simulation');
+    console.log('    can be turned on.');
   } else {
-    bad('HISTORICAL NBBO QUOTES NOT AVAILABLE ON THIS TIER');
-    console.log('    This is the constraint worth knowing before backfilling. Without');
-    console.log('    historical bid/ask, a backtest can only fill at last-traded prices,');
-    console.log('    which systematically overstates returns — on wide options markets,');
-    console.log('    usually by more than the edge being measured.');
+    console.log('  note  historical NBBO quotes not available — expected on Starter');
+    console.log('    Quotes are an Advanced-tier ($199/mo) entitlement. This is priced in,');
+    console.log('    not a failure. What it means concretely:');
     console.log('');
-    console.log('    Options, in the order I would consider them:');
-    console.log('      1. Upgrade the Polygon plan until this probe passes.');
-    console.log('      2. Switch to ThetaData (~$80/mo), which serves historical NBBO');
-    console.log('         explicitly. The provider adapter exists so this costs one file.');
-    console.log('      3. Proceed anyway, capturing live quotes forward from today and');
-    console.log('         backtesting only on what we captured ourselves. Honest, but it');
-    console.log('         means months before there is enough history to train on.');
+    console.log('      works now   forecasting the underlying (equity bars), realized vol,');
+    console.log('                  IV levels and term structure from aggregates, and');
+    console.log('                  forward paper trading marked at real bid/ask.');
+    console.log('      deferred    simulating fills on *historical* chains. Any backtest');
+    console.log('                  over backfilled data can only fill at last-traded');
+    console.log('                  prices, which overstates returns — often by more than');
+    console.log('                  the edge being measured. So those results are labelled');
+    console.log('                  indicative, and the paper book is the real evidence.');
+    console.log('');
+    console.log('    Upgrade when a strategy looks good enough to be worth measuring');
+    console.log('    precisely — Advanced at $199/mo, or ThetaData, which the provider');
+    console.log('    adapter exists to make a one-file swap.');
   }
 
   // A live sample, so the gate is exercised against real vendor data rather
