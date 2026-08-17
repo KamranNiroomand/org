@@ -311,6 +311,49 @@ export const holdings = sqliteTable('holdings', {
   createdAt: now(),
 });
 
+/**
+ * The tradeable universe: every US and Canadian common stock, with whatever
+ * the last sweep learned about each.
+ *
+ * Kept in SQLite rather than memory because it is roughly seven thousand rows
+ * and a full refresh takes minutes — the page has to render instantly from
+ * what was last known, with live prices layered over only the handful of
+ * symbols actually on screen.
+ *
+ * Fundamentals and quotes share a row because they arrive from the same call.
+ * `quotedAt` being null means the symbol is listed but no sweep has reached it
+ * yet, which is different from a symbol that returned no data.
+ */
+export const instruments = sqliteTable(
+  'instruments',
+  {
+    /** Yahoo's symbol, including any `.TO` suffix. */
+    symbol: text('symbol').primaryKey(),
+    name: text('name').notNull(),
+    exchange: text('exchange').notNull(),
+    country: text('country', { enum: ['US', 'CA'] }).notNull(),
+    sector: text('sector'),
+    /** Whole units of the listing currency, not minor units — these reach $10^12. */
+    marketCap: real('market_cap'),
+    price: real('price'),
+    currency: text('currency'),
+    dayChangePercent: real('day_change_percent'),
+    trailingPe: real('trailing_pe'),
+    forwardPe: real('forward_pe'),
+    priceToBook: real('price_to_book'),
+    dividendYield: real('dividend_yield'),
+    /** Epoch millis of the first trade — how long the company has been listed. */
+    firstTradeMs: integer('first_trade_ms'),
+    quotedAt: text('quoted_at'),
+    listedAt: now(),
+  },
+  (t) => [
+    index('instruments_cap_idx').on(t.marketCap),
+    index('instruments_country_idx').on(t.country),
+    index('instruments_exchange_idx').on(t.exchange),
+  ],
+);
+
 export const priceSnapshots = sqliteTable(
   'price_snapshots',
   {

@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { RefreshCw, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { ResponsiveContainer, Tooltip, Treemap } from 'recharts';
@@ -8,7 +8,9 @@ import { api } from '../lib/api';
 interface MarketRow {
   symbol: string;
   name: string;
-  sector: string;
+  exchange: string;
+  country: string;
+  sector: string | null;
   price: number | null;
   currency: string;
   dayChangePercent: number | null;
@@ -21,11 +23,20 @@ interface MarketRow {
 }
 
 interface Snapshot {
-  asOf: string;
-  covered: number;
-  total: number;
+  asOf: string | null;
+  quoted: number;
+  universe: number;
+  exchanges: string[];
   rows: MarketRow[];
 }
+
+const INDICES: Array<[string, string]> = [
+  ['all', 'US + Canada'],
+  ['us', 'United States'],
+  ['ca', 'Canada'],
+  ['sp500', 'S&P 500'],
+  ['nasdaq100', 'Nasdaq-100'],
+];
 
 /**
  * Heat palette.
@@ -163,6 +174,8 @@ function Select({
 }
 
 export function MarketMap() {
+  const [index, setIndex] = useState('all');
+  const [exchange, setExchange] = useState('all');
   const [sector, setSector] = useState('all');
   const [cap, setCap] = useState<keyof typeof CAP_BANDS>('all');
   const [age, setAge] = useState<keyof typeof AGE_BANDS>('all');
@@ -172,15 +185,24 @@ export function MarketMap() {
   const [asc, setAsc] = useState(false);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['market'],
-    queryFn: () => api.get<Snapshot>('/api/investments/market'),
-    // Matches the server's cache window, so the page stays live without
-    // asking for sweeps the server would only serve from cache anyway.
-    refetchInterval: 60_000,
+    queryKey: ['market', index, exchange],
+    queryFn: () =>
+      api.get<Snapshot>(`/api/investments/market?index=${index}&exchange=${exchange}`),
+  });
+
+  /**
+   * The universe is swept nightly; this re-quotes only the symbols currently
+   * drawn. Asking Yahoo for seven thousand quotes whenever someone opens the
+   * tab would be both slow and a good way to get rate-limited.
+   */
+  const refreshVisible = useMutation({
+    mutationFn: (symbols: string[]) =>
+      api.post<{ refreshed: number }>('/api/investments/market/refresh', { symbols }),
+    onSuccess: () => void refetch(),
   });
 
   const sectors = useMemo(
-    () => [...new Set(data?.rows.map((r) => r.sector) ?? [])].sort(),
+    () => [...new Set((data?.rows ?? []).map((r) => r.sector).filter((x): x is string => !!x))].sort(),
     [data],
   );
 
@@ -250,15 +272,23 @@ export function MarketMap() {
     <>
       <Card className="mb-4 overflow-hidden">
         <CardHeader
-          title="S&P 500"
+          title="Market map"
           subtitle={
             data
-              ? `${filtered.length} of ${data.covered} companies · sized by market cap · live`
-              : 'Loading live quotes…'
+              ? `${filtered.length.toLocaleString()} shown · ${data.quoted.toLocaleString()} of ${data.universe.toLocaleString()} instruments quoted · sized by market cap`
+              : 'Loading…'
           }
           action={
-            <Button size="sm" variant="ghost" onClick={() => void refetch()} disabled={isFetching}>
-              <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} />
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => refreshVisible.mutate(treeData.map((d) => d.name))}
+              disabled={isFetching || refreshVisible.isPending}
+              title="Re-quote the companies currently shown"
+            >
+              <RefreshCw
+                className={cn('size-3.5', (isFetching || refreshVisible.isPending) && 'animate-spin')}
+              />
             </Button>
           }
         />
@@ -273,6 +303,22 @@ export function MarketMap() {
               className="h-8 w-44 rounded-lg border border-border bg-panel pl-7 pr-2 text-xs"
             />
           </div>
+          <Select
+            value={index}
+            onChange={(v) => {
+              setIndex(v);
+              setExchange('all');
+            }}
+            options={INDICES}
+          />
+          <Select
+            value={exchange}
+            onChange={setExchange}
+            options={[
+              ['all', 'All exchanges'],
+              ...((data?.exchanges ?? []).map((e) => [e, e]) as Array<[string, string]>),
+            ]}
+          />
           <Select
             value={sector}
             onChange={setSector}
@@ -335,6 +381,7 @@ export function MarketMap() {
                 {th('symbol', 'Symbol', 'text-left')}
                 <th className="px-2 py-1.5 text-left font-medium">Company</th>
                 <th className="px-2 py-1.5 text-left font-medium">Sector</th>
+                <th className="px-2 py-1.5 text-left font-medium">Exchange</th>
                 <th className="px-2 py-1.5 text-right font-medium">Price</th>
                 {th('dayChangePercent', 'Day')}
                 {th('marketCap', 'Market cap')}
@@ -350,7 +397,8 @@ export function MarketMap() {
                 <tr key={r.symbol} className="hover:bg-bg-subtle">
                   <td className="px-2 py-1.5 font-medium">{r.symbol}</td>
                   <td className="max-w-[200px] truncate px-2 py-1.5 text-muted">{r.name}</td>
-                  <td className="max-w-[150px] truncate px-2 py-1.5 text-faint">{r.sector}</td>
+                  <td className="max-w-[130px] truncate px-2 py-1.5 text-faint">{r.sector ?? '—'}</td>
+                  <td className="px-2 py-1.5 text-faint">{r.exchange}</td>
                   <td className="tnum px-2 py-1.5 text-right">
                     {r.price === null ? '—' : `$${r.price.toFixed(2)}`}
                   </td>

@@ -5,7 +5,8 @@ import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { holdings } from '../db/schema.js';
 import { fetchQuotes, fetchUsdCad, lastKnownPrice, saveQuotes } from '../lib/quotes.js';
-import { getMarket } from '../lib/market.js';
+import { getMarket, refreshSymbols, sweepMarket, type IndexFilter } from '../lib/market.js';
+import { refreshUniverse } from '../lib/universe.js';
 import { newId, nowIso } from '../lib/util.js';
 
 const body = z.object({
@@ -176,8 +177,31 @@ export async function investmentRoutes(app: FastifyInstance): Promise<void> {
    * The S&P 500 with live quotes. `?force=true` bypasses the 60s cache for the
    * refresh button; ordinary page loads share whatever sweep is current.
    */
-  app.get<{ Querystring: { force?: string } }>('/api/investments/market', async (req) => {
-    const snapshot = await getMarket(req.query.force === 'true');
-    return snapshot;
+  app.get<{ Querystring: { index?: string; exchange?: string } }>(
+    '/api/investments/market',
+    async (req) => {
+      const index = ['all', 'sp500', 'nasdaq100', 'us', 'ca'].includes(req.query.index ?? '')
+        ? (req.query.index as IndexFilter)
+        : 'all';
+      return getMarket({ index, exchange: req.query.exchange });
+    },
+  );
+
+  /**
+   * Re-quotes just the symbols a client is displaying. The whole universe is
+   * swept nightly; this is what makes the visible boxes live without asking
+   * Yahoo for seven thousand quotes every time someone opens the tab.
+   */
+  app.post('/api/investments/market/refresh', async (req, reply) => {
+    const parsed = z.object({ symbols: z.array(z.string()).max(250) }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
+    return { refreshed: await refreshSymbols(parsed.data.symbols) };
+  });
+
+  /** Rebuilds the universe and re-quotes it. Minutes; normally the nightly job. */
+  app.post('/api/investments/market/sweep', async () => {
+    const universe = await refreshUniverse();
+    const sweep = await sweepMarket();
+    return { universe, sweep };
   });
 }

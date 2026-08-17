@@ -5,6 +5,8 @@ import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { holdings } from '../db/schema.js';
 import { syncAllFeeds } from './calendarFeeds.js';
+import { sweepMarket } from './market.js';
+import { refreshUniverse } from './universe.js';
 import { syncAllItems, syncIsStale } from './plaid.js';
 import { fetchQuotes, fetchUsdCad, saveQuotes } from './quotes.js';
 
@@ -33,6 +35,7 @@ export interface NightlyResult {
   startedAt: string;
   banks: { items: number; added: number; modified: number; removed: number; categorized: number };
   calendars: { feeds: number; added: number; updated: number; removed: number };
+  market: { universe: number; quoted: number };
   prices: { symbols: number; quoted: number; usdCad: number | null };
   errors: string[];
 }
@@ -42,6 +45,7 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
     startedAt: new Date().toISOString(),
     banks: { items: 0, added: 0, modified: 0, removed: 0, categorized: 0 },
     calendars: { feeds: 0, added: 0, updated: 0, removed: 0 },
+    market: { universe: 0, quoted: 0 },
     prices: { symbols: 0, quoted: 0, usdCad: null },
     errors: [],
   };
@@ -90,6 +94,22 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
         `Calendars: ${result.calendars.added} new, ${result.calendars.updated} updated, ` +
           `${result.calendars.removed} removed across ${result.calendars.feeds} feed(s)`,
       );
+    }
+
+    // --- Market universe ----------------------------------------------------
+    /**
+     * Around seven thousand symbols, roughly fifty seconds. Nightly is the
+     * right cadence: listings change slowly, and market cap, P/E and sector
+     * barely move intraday. The open page re-quotes only what it displays.
+     */
+    try {
+      const universe = await refreshUniverse();
+      const swept = await sweepMarket();
+      result.market = { universe: universe.total, quoted: swept.quoted };
+      log.info(`Market: ${swept.quoted}/${universe.total} instruments quoted`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      result.errors.push(`Market sweep: ${message}`);
     }
 
     // --- Prices -------------------------------------------------------------

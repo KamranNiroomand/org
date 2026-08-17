@@ -1,51 +1,29 @@
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import type { SQL } from 'drizzle-orm';
+import { db } from '../db/index.js';
+import { instruments } from '../db/schema.js';
+import { NASDAQ_100_SET } from '../data/indices.js';
 import { SP500 } from '../data/sp500.js';
+import { nowIso } from './util.js';
 
 /**
- * The S&P 500 market map's data.
+ * The market map's data.
  *
- * Everything shown comes from one batched Yahoo `quote()` call per chunk of
- * symbols — roughly a second per 50, so the whole index lands in about ten.
- * Sector and company name come from the static constituent list, which is why
- * no per-symbol profile lookup is needed.
+ * Roughly seven thousand US and Canadian common stocks. A full sweep is around
+ * a hundred and fifty batched Yahoo calls and takes minutes, so it runs
+ * nightly and lands in SQLite; the page then reads stored rows instantly and
+ * refreshes live prices for only the symbols actually on screen.
  *
- * Yahoo reports `exchangeDataDelayedBy: 0` for the US exchanges, so these are
- * live prices rather than the usual fifteen-minute delay. It remains an
- * unofficial endpoint with no stability guarantee, so a failed chunk degrades
- * to fewer rows rather than an error.
+ * That split is what makes a whole-market map possible without a paid feed:
+ * market cap, P/E and sector barely move intraday, while the hundred or so
+ * boxes a person is looking at can be re-quoted in a single call.
  */
 
 const CHUNK = 50;
+/** Yahoo tolerates a steady stream far better than a burst. */
+const CHUNK_PAUSE_MS = 120;
 
-/**
- * Yahoo is the rate limiter here, and every viewer of the page would otherwise
- * trigger a fresh sweep. Sixty seconds keeps the map live to the eye while
- * collapsing a burst of refreshes into a single upstream fetch.
- */
-const TTL_MS = 60_000;
-
-export interface MarketRow {
-  symbol: string;
-  name: string;
-  sector: string;
-  price: number | null;
-  currency: string;
-  dayChangePercent: number | null;
-  marketCap: number | null;
-  trailingPE: number | null;
-  forwardPE: number | null;
-  priceToBook: number | null;
-  dividendYield: number | null;
-  /** Milliseconds since epoch of the first trade — how long it has been listed. */
-  firstTradeMs: number | null;
-}
-
-export interface MarketSnapshot {
-  asOf: string;
-  /** How many constituents actually returned a quote. */
-  covered: number;
-  total: number;
-  rows: MarketRow[];
-}
+const SP500_SET = new Set(SP500.map(([symbol]) => symbol));
 
 interface RawQuote {
   symbol?: string;
@@ -58,6 +36,7 @@ interface RawQuote {
   priceToBook?: number;
   dividendYield?: number;
   firstTradeDateMilliseconds?: number;
+  sector?: string;
 }
 
 interface YahooClient {
@@ -76,81 +55,180 @@ async function getClient(): Promise<YahooClient> {
 const num = (v: number | undefined): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? v : null;
 
-let cache: MarketSnapshot | null = null;
-let cachedAt = 0;
-/** Collapses concurrent misses onto one upstream sweep. */
-let inFlight: Promise<MarketSnapshot> | null = null;
-
-async function sweep(): Promise<MarketSnapshot> {
-  const meta = new Map(SP500.map(([symbol, name, sector]) => [symbol, { name, sector }]));
-  const symbols = [...meta.keys()];
-  const rows: MarketRow[] = [];
-
+/** Quotes a list of symbols in batches, returning only what came back. */
+async function quoteAll(symbols: string[], pause = CHUNK_PAUSE_MS): Promise<RawQuote[]> {
   let yf: YahooClient;
   try {
     yf = await getClient();
   } catch {
-    return { asOf: new Date().toISOString(), covered: 0, total: symbols.length, rows: [] };
+    return [];
   }
 
+  const out: RawQuote[] = [];
   for (let i = 0; i < symbols.length; i += CHUNK) {
-    const chunk = symbols.slice(i, i + CHUNK);
-    let batch: RawQuote[];
     try {
-      const res = await yf.quote(chunk);
-      batch = (Array.isArray(res) ? res : [res]) as RawQuote[];
+      const res = await yf.quote(symbols.slice(i, i + CHUNK));
+      out.push(...((Array.isArray(res) ? res : [res]) as RawQuote[]));
     } catch {
-      // One bad chunk shouldn't cost the other 450 symbols.
-      continue;
+      // A rejected batch costs fifty symbols, not the sweep.
     }
-
-    for (const q of batch) {
-      const info = q.symbol ? meta.get(q.symbol) : undefined;
-      if (!q.symbol || !info) continue;
-      rows.push({
-        symbol: q.symbol,
-        name: info.name,
-        sector: info.sector,
-        price: num(q.regularMarketPrice),
-        currency: q.currency ?? 'USD',
-        dayChangePercent: num(q.regularMarketChangePercent),
-        marketCap: num(q.marketCap),
-        trailingPE: num(q.trailingPE),
-        forwardPE: num(q.forwardPE),
-        priceToBook: num(q.priceToBook),
-        dividendYield: num(q.dividendYield),
-        firstTradeMs: num(q.firstTradeDateMilliseconds),
-      });
+    if (pause > 0 && i + CHUNK < symbols.length) {
+      await new Promise((r) => setTimeout(r, pause));
     }
   }
-
-  rows.sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0));
-  return {
-    asOf: new Date().toISOString(),
-    covered: rows.length,
-    total: symbols.length,
-    rows,
-  };
+  return out;
 }
 
-/** Returns the snapshot, refreshing it only when the cache has gone cold. */
-export async function getMarket(force = false): Promise<MarketSnapshot> {
-  if (!force && cache && Date.now() - cachedAt < TTL_MS) return cache;
-  if (inFlight) return inFlight;
+function writeQuotes(rows: RawQuote[]): number {
+  const at = nowIso();
+  let written = 0;
 
-  inFlight = sweep()
-    .then((snapshot) => {
-      // A sweep that returned nothing is an upstream outage, not an empty
-      // market — keep serving the last good snapshot if there is one.
-      if (snapshot.rows.length > 0 || !cache) {
-        cache = snapshot;
-        cachedAt = Date.now();
-      }
-      return cache!;
+  db.transaction((tx) => {
+    for (const q of rows) {
+      if (!q.symbol) continue;
+      tx.update(instruments)
+        .set({
+          price: num(q.regularMarketPrice),
+          currency: q.currency ?? null,
+          dayChangePercent: num(q.regularMarketChangePercent),
+          marketCap: num(q.marketCap),
+          trailingPe: num(q.trailingPE),
+          forwardPe: num(q.forwardPE),
+          priceToBook: num(q.priceToBook),
+          dividendYield: num(q.dividendYield),
+          firstTradeMs: num(q.firstTradeDateMilliseconds),
+          // Sector deliberately untouched: it is set by the universe refresh
+          // from Nasdaq's screener, and writing it here would blank every
+          // symbol the quote call knows nothing about — which is all of them.
+          quotedAt: at,
+        })
+        .where(eq(instruments.symbol, q.symbol))
+        .run();
+      written++;
+    }
+  });
+
+  return written;
+}
+
+export interface SweepOutcome {
+  requested: number;
+  quoted: number;
+  finishedAt: string;
+}
+
+/** Re-quotes the entire universe. Minutes, not seconds — nightly work. */
+export async function sweepMarket(): Promise<SweepOutcome> {
+  const symbols = db
+    .select({ symbol: instruments.symbol })
+    .from(instruments)
+    .all()
+    .map((r) => r.symbol);
+
+  const quotes = await quoteAll(symbols);
+  return { requested: symbols.length, quoted: writeQuotes(quotes), finishedAt: nowIso() };
+}
+
+/** Re-quotes a specific handful — what the open page is actually showing. */
+export async function refreshSymbols(symbols: string[]): Promise<number> {
+  if (symbols.length === 0) return 0;
+  const quotes = await quoteAll(symbols.slice(0, 250), 0);
+  return writeQuotes(quotes);
+}
+
+export type IndexFilter = 'all' | 'sp500' | 'nasdaq100' | 'us' | 'ca';
+
+export interface MarketQuery {
+  index?: IndexFilter;
+  exchange?: string;
+  limit?: number;
+}
+
+export interface MarketRow {
+  symbol: string;
+  name: string;
+  exchange: string;
+  country: string;
+  sector: string | null;
+  price: number | null;
+  currency: string | null;
+  dayChangePercent: number | null;
+  marketCap: number | null;
+  trailingPE: number | null;
+  forwardPE: number | null;
+  priceToBook: number | null;
+  dividendYield: number | null;
+  firstTradeMs: number | null;
+}
+
+export interface MarketSnapshot {
+  asOf: string | null;
+  rows: MarketRow[];
+  /** How much of the universe carries a quote at all. */
+  quoted: number;
+  universe: number;
+  exchanges: string[];
+}
+
+/**
+ * Reads the stored universe. Ordered by market cap and capped, because the map
+ * can only draw so many boxes and the table only scrolls so far — the tail of
+ * a seven-thousand-name universe is micro-caps nobody is looking for by eye.
+ */
+export function getMarket(query: MarketQuery = {}): MarketSnapshot {
+  const { index = 'all', exchange, limit = 1500 } = query;
+
+  const filters: SQL[] = [isNotNull(instruments.marketCap)];
+  if (index === 'sp500') filters.push(inArray(instruments.symbol, [...SP500_SET]));
+  if (index === 'nasdaq100') filters.push(inArray(instruments.symbol, [...NASDAQ_100_SET]));
+  if (index === 'us') filters.push(eq(instruments.country, 'US'));
+  if (index === 'ca') filters.push(eq(instruments.country, 'CA'));
+  if (exchange && exchange !== 'all') filters.push(eq(instruments.exchange, exchange));
+
+  const rows = db
+    .select()
+    .from(instruments)
+    .where(and(...filters))
+    .orderBy(desc(instruments.marketCap))
+    .limit(limit)
+    .all();
+
+  const stats = db
+    .select({
+      quoted: sql<number>`sum(case when ${instruments.quotedAt} is not null then 1 else 0 end)`,
+      universe: sql<number>`count(*)`,
+      asOf: sql<string | null>`max(${instruments.quotedAt})`,
     })
-    .finally(() => {
-      inFlight = null;
-    });
+    .from(instruments)
+    .get();
 
-  return inFlight;
+  const exchanges = db
+    .selectDistinct({ exchange: instruments.exchange })
+    .from(instruments)
+    .all()
+    .map((r) => r.exchange)
+    .sort();
+
+  return {
+    asOf: stats?.asOf ?? null,
+    quoted: stats?.quoted ?? 0,
+    universe: stats?.universe ?? 0,
+    exchanges,
+    rows: rows.map((r) => ({
+      symbol: r.symbol,
+      name: r.name,
+      exchange: r.exchange,
+      country: r.country,
+      sector: r.sector,
+      price: r.price,
+      currency: r.currency,
+      dayChangePercent: r.dayChangePercent,
+      marketCap: r.marketCap,
+      trailingPE: r.trailingPe,
+      forwardPE: r.forwardPe,
+      priceToBook: r.priceToBook,
+      dividendYield: r.dividendYield,
+      firstTradeMs: r.firstTradeMs,
+    })),
+  };
 }
