@@ -29,6 +29,25 @@ const EXCHANGES: Record<string, string> = {
   V: 'IEX',
 };
 
+/**
+ * The two sector sources speak different vocabularies — Nasdaq's screener says
+ * "Finance" and "Technology" where GICS, which the index lists follow, says
+ * "Financials" and "Information Technology". Left alone the filter shows both
+ * spellings and each silently hides the other's rows. GICS wins, as the more
+ * standard of the two.
+ */
+const SECTOR_ALIASES: Record<string, string> = {
+  Finance: 'Financials',
+  Technology: 'Information Technology',
+  'Basic Materials': 'Materials',
+  Healthcare: 'Health Care',
+  Telecommunications: 'Communication Services',
+  Miscellaneous: 'Other',
+};
+
+const normalizeSector = (raw: string | null): string | null =>
+  raw === null ? null : (SECTOR_ALIASES[raw] ?? raw);
+
 export interface UniverseRow {
   symbol: string;
   name: string;
@@ -162,14 +181,18 @@ export async function fetchUniverse(): Promise<UniverseRow[]> {
   }
   if (rows.length === 0) throw new Error('Both US symbol directories failed to load');
 
-  for (const [symbol, name] of TSX_COMPOSITE) {
-    rows.push({ symbol, name, exchange: 'TSX', country: 'CA', sector: null });
+  // Canadian rows bring their own sector; Nasdaq's screener covers only the
+  // US tapes, so nothing else would supply one.
+  const canadian = new Set<string>();
+  for (const [symbol, name, sector] of TSX_COMPOSITE) {
+    rows.push({ symbol, name, exchange: 'TSX', country: 'CA', sector });
+    canadian.add(symbol);
   }
 
-  // Sectors are US-only: Nasdaq's screener does not cover Toronto listings.
   const sectors = await fetchSectors();
   for (const row of rows) {
-    row.sector = sectors.get(row.symbol) ?? null;
+    if (!canadian.has(row.symbol)) row.sector = sectors.get(row.symbol) ?? null;
+    row.sector = normalizeSector(row.sector);
   }
 
   // A symbol can appear on more than one tape; first listing wins.
