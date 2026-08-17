@@ -1,0 +1,19 @@
+{
+  "description": "Liquid call rows from a real NVDA chain, 2026-08-17, used as a golden test for our own pricing. If our implied vol and greeks cannot reproduce a broker's for contracts this liquid, every feature and label downstream is suspect. Greeks are in broker display units: vega per vol point, theta per calendar day.",
+  "asOf": "2026-08-17",
+  "underlying": "NVDA",
+  "expiry": "2026-08-19",
+  "type": "call",
+  "spot": 225.05,
+  "assumedRate": 0.0425,
+  "assumedDividendYield": 0.0,
+  "note": "Rate and dividend yield are our assumptions, not the broker's. NVDA's yield is ~0.02% and two days of carry is negligible, so both are near-irrelevant at this tenor — which is precisely why this expiry makes a clean test of the vol solver itself.",
+  "rows": [
+    { "strike": 225.0, "bid": 2.13, "ask": 2.19, "iv": 0.3224, "delta": 0.51, "gamma": 0.074, "theta": -0.547, "vega": 0.066 },
+    { "strike": 227.5, "bid": 1.10, "ask": 1.14, "iv": 0.3160, "delta": 0.33, "gamma": 0.069, "theta": -0.482, "vega": 0.060 },
+    { "strike": 230.0, "bid": 0.52, "ask": 0.55, "iv": 0.3191, "delta": 0.18, "gamma": 0.050, "theta": -0.355, "vega": 0.044 },
+    { "strike": 232.5, "bid": 0.25, "ask": 0.27, "iv": 0.3414, "delta": 0.10, "gamma": 0.031, "theta": -0.254, "vega": 0.030 },
+    { "strike": 235.0, "bid": 0.13, "ask": 0.14, "iv": 0.3627, "delta": 0.06, "gamma": 0.019, "theta": -0.170, "vega": 0.019 },
+    { "strike": 220.0, "bid": 5.55, "ask": 5.80, "iv": 0.3593, "delta": 0.81, "gamma": 0.046, "theta": -0.427, "vega": 0.046 }
+  ]
+}

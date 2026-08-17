@@ -24,6 +24,15 @@ dist/
 build/
 *.tsbuildinfo
 
+# Python sidecar (services/quant). uv.lock IS committed — it pins the
+# training environment, which has to be reproducible on another machine.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
 # Editors & OS
 .DS_Store
 .idea/

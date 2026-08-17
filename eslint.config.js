@@ -2,7 +2,18 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/node_modules/**', '**/drizzle/**', '*.tsbuildinfo'] },
+  {
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/drizzle/**',
+      '**/drizzle-market/**',
+      // The Python sidecar's virtualenv vendors JavaScript (coverage's
+      // HTML report), which is not ours to lint.
+      '**/.venv/**',
+      '*.tsbuildinfo',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
