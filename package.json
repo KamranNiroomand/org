@@ -1,0 +1,36 @@
+{
+  "name": "org",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A personal OS — todos, projects, dual-calendar, finances, investments, ideas",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev -w @org/server",
+    "dev:web": "npm run dev -w @org/web",
+    "build": "npm run build -w @org/web",
+    "start": "npm run start -w @org/server",
+    "typecheck": "tsc -b --pretty",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "npm run db:migrate -w @org/server",
+    "db:seed": "npm run db:seed -w @org/server",
+    "db:studio": "npm run db:studio -w @org/server"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "concurrently": "^10.0.5",
+    "eslint": "^10.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.10"
+  }
+}

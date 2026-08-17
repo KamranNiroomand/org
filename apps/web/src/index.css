@@ -1,0 +1,153 @@
+@import 'tailwindcss';
+
+/**
+ * One palette, defined once as tokens and swapped wholesale for dark mode.
+ * Every colour in the app resolves through these — no component hard-codes a
+ * hex value, so retheming is a single-file change.
+ */
+
+@theme {
+  --font-sans: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  /* Persian text needs a font stack that actually has the glyphs. */
+  --font-fa: 'Vazirmatn', 'IRANSans', 'SF Arabic', 'Geeza Pro', Tahoma, sans-serif;
+}
+
+:root {
+  --bg: oklch(99% 0.003 260);
+  --bg-subtle: oklch(97% 0.004 260);
+  --panel: oklch(100% 0 0);
+  --border: oklch(91% 0.005 260);
+  --border-strong: oklch(84% 0.008 260);
+  --text: oklch(22% 0.012 260);
+  --text-muted: oklch(52% 0.012 260);
+  --text-faint: oklch(66% 0.01 260);
+  --accent: oklch(58% 0.19 275);
+  --accent-soft: oklch(95% 0.03 275);
+  --positive: oklch(58% 0.14 155);
+  --negative: oklch(58% 0.19 22);
+  --warning: oklch(70% 0.15 70);
+  --shadow: 0 1px 2px oklch(20% 0.02 260 / 0.06), 0 4px 12px oklch(20% 0.02 260 / 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: oklch(17% 0.008 265);
+    --bg-subtle: oklch(20% 0.009 265);
+    --panel: oklch(22% 0.01 265);
+    --border: oklch(28% 0.011 265);
+    --border-strong: oklch(36% 0.013 265);
+    --text: oklch(95% 0.006 265);
+    --text-muted: oklch(70% 0.011 265);
+    --text-faint: oklch(55% 0.011 265);
+    --accent: oklch(72% 0.16 275);
+    --accent-soft: oklch(30% 0.06 275);
+    --positive: oklch(72% 0.15 155);
+    --negative: oklch(70% 0.17 22);
+    --warning: oklch(78% 0.14 70);
+    --shadow: 0 1px 2px oklch(0% 0 0 / 0.3), 0 4px 14px oklch(0% 0 0 / 0.22);
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: oklch(17% 0.008 265);
+  --bg-subtle: oklch(20% 0.009 265);
+  --panel: oklch(22% 0.01 265);
+  --border: oklch(28% 0.011 265);
+  --border-strong: oklch(36% 0.013 265);
+  --text: oklch(95% 0.006 265);
+  --text-muted: oklch(70% 0.011 265);
+  --text-faint: oklch(55% 0.011 265);
+  --accent: oklch(72% 0.16 275);
+  --accent-soft: oklch(30% 0.06 275);
+  --positive: oklch(72% 0.15 155);
+  --negative: oklch(70% 0.17 22);
+  --warning: oklch(78% 0.14 70);
+  --shadow: 0 1px 2px oklch(0% 0 0 / 0.3), 0 4px 14px oklch(0% 0 0 / 0.22);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-subtle: var(--bg-subtle);
+  --color-panel: var(--panel);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-warning: var(--warning);
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv02', 'cv03', 'cv04';
+}
+
+/* Tabular figures everywhere money or dates line up in a column. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.fa {
+  font-family: var(--font-fa);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* A scrollbar that doesn't shout, in both themes. */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+  background-clip: content-box;
+  border: 3px solid transparent;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+.animate-in {
+  animation: fade-in 0.18s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

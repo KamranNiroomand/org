@@ -1,0 +1,39 @@
+# Secrets — never commit
+.env
+.env.local
+*.pem
+*.key
+
+# The database lives at ~/.org/org.db, outside this repo by design.
+# These patterns are belt-and-braces in case anyone points DB_PATH here.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Financial exports dropped in for import
+/statements/
+*.ofx
+*.qfx
+
+# Dependencies & build output
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Editors & OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Machine-local Claude Code permission grants
+.claude/settings.local.json
