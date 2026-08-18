@@ -55,6 +55,14 @@ export function marketPragma(statement: string): unknown {
 }
 
 /**
+ * Raw `.exec()`, for statements `pragma()` cannot run — `VACUUM INTO` is a
+ * full statement with a string literal argument, not a pragma.
+ */
+export function rawMarketPragma(sql: string): void {
+  sqlite.exec(sql);
+}
+
+/**
  * Reclaims space after a retention prune. Not run automatically: VACUUM
  * rewrites the whole file and needs room for a second copy, which on a
  * multi-gigabyte database is a decision, not a housekeeping detail.
