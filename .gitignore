@@ -37,3 +37,8 @@ logs/
 
 # Machine-local Claude Code permission grants
 .claude/settings.local.json
+
+# Any copy of the env file is still the env file. A backup taken before an
+# edit carries the same live keys and is not covered by the bare `.env` rule.
+.env.*
+!.env.example

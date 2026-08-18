@@ -48,6 +48,36 @@ const SECTOR_ALIASES: Record<string, string> = {
 const normalizeSector = (raw: string | null): string | null =>
   raw === null ? null : (SECTOR_ALIASES[raw] ?? raw);
 
+/**
+ * Trims the security-type tail off an exchange listing name.
+ *
+ * The directories name the *instrument*, not the company: "NVIDIA Corporation
+ * - Common Stock", "Alphabet Inc. - Class A Common Stock". In a table of
+ * companies that suffix is on nearly every row, so it carries no information
+ * while consuming the width that actually distinguishes one name from another.
+ * Share class does distinguish, so it is kept — just without the boilerplate.
+ */
+function tidyName(raw: string): string {
+  let name = raw.trim();
+
+  const classMatch = name.match(/\bClass\s+([A-Z0-9]+)\b/i);
+
+  // Nasdaq separates the security type with a hyphen; NYSE simply appends it.
+  name = name.replace(/\s+-\s+.*$/, '');
+  name = name.replace(
+    /\s+(Class\s+[A-Z0-9]+\s+)?(Common|Ordinary|Capital|Subordinate\s+Voting|American\s+Depositary)\s+(Stock|Shares?|Share)\b.*$/i,
+    '',
+  );
+
+  // "Berkshire Hathaway Inc. New Common Stock" — the "New" distinguishes the
+  // listing, not the company, and reads as an error in a column of names.
+  name = name.replace(/\s+New$/, '');
+
+  if (classMatch) name += ` Class ${classMatch[1]!.toUpperCase()}`;
+  if (/American Depositary/i.test(raw)) name += ' (ADR)';
+  return name.replace(/[,\s]+$/, '').trim();
+}
+
 export interface UniverseRow {
   symbol: string;
   name: string;
@@ -140,13 +170,25 @@ function parseDirectory(
     if (parts[opts.testIdx]?.trim() === 'Y') continue;
     if (parts[opts.etfIdx]?.trim() === 'Y') continue;
 
-    const symbol = parts[opts.symbolIdx]!.trim();
-    if (!/^[A-Z]{1,5}$/.test(symbol)) continue;
+    const raw = parts[opts.symbolIdx]!.trim();
+
+    /**
+     * A dotted suffix means one of several things and only some are companies.
+     * `.U` is a unit, `.W` a warrant, `.R` a right, `.P*` a preferred series —
+     * none of which have a market cap of their own. `.A` and `.B` are share
+     * classes of a real company, and excluding those quietly dropped Berkshire
+     * Hathaway, Brown-Forman and Heico from a map of the whole US market.
+     */
+    if (/\.(U|W|R|P[A-Z]?)$/i.test(raw)) continue;
+    if (!/^[A-Z]{1,5}(\.[A-Z])?$/.test(raw)) continue;
+
+    // Yahoo writes class shares with a hyphen where the directories use a dot.
+    const symbol = raw.replace('.', '-');
 
     const rawExchange = opts.exchange ?? parts[opts.exchangeIdx!]?.trim() ?? '';
     out.push({
       symbol,
-      name: parts[opts.nameIdx]!.trim(),
+      name: tidyName(parts[opts.nameIdx]!),
       exchange: opts.exchange ?? EXCHANGES[rawExchange] ?? rawExchange,
       country: 'US',
       sector: null,

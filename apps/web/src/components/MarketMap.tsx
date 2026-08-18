@@ -118,6 +118,23 @@ const bn = (v: number | null): string => {
   return `$${(v / 1e6).toFixed(0)}M`;
 };
 
+/**
+ * GICS sector names are written for prospectuses, not for a column that has to
+ * share a row with eleven others. Truncation turns three of them into
+ * "Information ...", which identifies nothing — these abbreviations keep the
+ * distinction visible. Display only; the full name stays in the title and in
+ * the filter.
+ */
+const SECTOR_SHORT: Record<string, string> = {
+  'Information Technology': 'Info Tech',
+  'Consumer Discretionary': 'Cons. Disc.',
+  'Consumer Staples': 'Cons. Staples',
+  'Communication Services': 'Comm. Svcs.',
+  'Health Care': 'Health Care',
+};
+
+const shortSector = (s: string | null): string => (s === null ? '—' : (SECTOR_SHORT[s] ?? s));
+
 const pct = (v: number | null): string => (v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
 const num = (v: number | null, digits = 1): string => (v === null ? '—' : v.toFixed(digits));
 const listedYear = (ms: number | null): number | null =>
@@ -259,13 +276,45 @@ export function MarketMap() {
     }
   };
 
-  const th = (k: SortKey, label: string, align = 'text-right') => (
+  /**
+   * Header cells reserve room for the sort caret whether or not they carry it,
+   * so activating a sort doesn't shift every column beside it.
+   */
+  const th = (k: SortKey, label: string, align: 'left' | 'right' = 'right') => (
     <th
-      className={cn('cursor-pointer select-none px-2 py-1.5 font-medium hover:text-text', align)}
+      scope="col"
+      aria-sort={sortKey === k ? (asc ? 'ascending' : 'descending') : 'none'}
+      className={cn(
+        'group cursor-pointer select-none whitespace-nowrap px-3 py-2.5 font-semibold',
+        'transition-colors hover:text-text',
+        sortKey === k ? 'text-text' : 'text-muted',
+        align === 'left' ? 'text-left' : 'text-right',
+      )}
       onClick={() => toggleSort(k)}
     >
       {label}
-      {sortKey === k && <span className="ml-0.5 text-faint">{asc ? '↑' : '↓'}</span>}
+      <span
+        aria-hidden
+        className={cn(
+          'ml-1 inline-block w-2 text-[9px]',
+          sortKey === k ? 'text-accent' : 'text-transparent group-hover:text-border-strong',
+        )}
+      >
+        {sortKey === k && !asc ? '▼' : '▲'}
+      </span>
+    </th>
+  );
+
+  /** Plain, non-sortable header cell. */
+  const thPlain = (label: string, align: 'left' | 'right' = 'right') => (
+    <th
+      scope="col"
+      className={cn(
+        'whitespace-nowrap px-3 py-2.5 font-semibold text-muted',
+        align === 'left' ? 'text-left' : 'text-right',
+      )}
+    >
+      {label}
     </th>
   );
 
@@ -382,55 +431,82 @@ export function MarketMap() {
             (data?.matched ?? 0) > sorted.length ? ` of ${data!.matched.toLocaleString()} matching` : ''
           }`}
         />
-        <div className="max-h-[520px] overflow-auto">
-          <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-panel text-muted shadow-[0_1px_0_var(--color-border)]">
+        <div className="max-h-[560px] overflow-auto">
+          <table className="w-full border-separate border-spacing-0 text-[13px]">
+            {/**
+             * Header type is small, uppercase and letter-spaced — the
+             * convention in financial tables, and it separates label from
+             * datum by shape rather than by making the labels louder.
+             */}
+            <thead className="sticky top-0 z-10 bg-panel text-[10px] uppercase tracking-[0.07em] [&_th]:border-b [&_th]:border-border">
               <tr>
-                {th('symbol', 'Symbol', 'text-left')}
-                <th className="px-2 py-1.5 text-left font-medium">Company</th>
-                <th className="px-2 py-1.5 text-left font-medium">Sector</th>
-                <th className="px-2 py-1.5 text-left font-medium">Exchange</th>
-                <th className="px-2 py-1.5 text-right font-medium">Price</th>
+                {th('symbol', 'Symbol', 'left')}
+                {thPlain('Company', 'left')}
+                {thPlain('Sector', 'left')}
+                {thPlain('Exchange', 'left')}
+                {thPlain('Price')}
                 {th('dayChangePercent', 'Day')}
                 {th('marketCap', 'Market cap')}
                 {th('trailingPE', 'P/E')}
-                <th className="px-2 py-1.5 text-right font-medium">Fwd P/E</th>
-                <th className="px-2 py-1.5 text-right font-medium">P/B</th>
+                {thPlain('Fwd P/E')}
+                {thPlain('P/B')}
                 {th('dividendYield', 'Yield')}
-                <th className="px-2 py-1.5 text-right font-medium">Listed</th>
+                {thPlain('Listed')}
               </tr>
             </thead>
-            <tbody className="divide-y divide-border">
-              {sorted.map((r) => (
-                <tr key={r.symbol} className="hover:bg-bg-subtle">
-                  <td className="px-2 py-1.5 font-medium">{r.symbol}</td>
-                  <td className="max-w-[200px] truncate px-2 py-1.5 text-muted">{r.name}</td>
-                  <td className="max-w-[130px] truncate px-2 py-1.5 text-faint">{r.sector ?? '—'}</td>
-                  <td className="px-2 py-1.5 text-faint">{r.exchange}</td>
-                  <td className="tnum px-2 py-1.5 text-right">
-                    {r.price === null ? '—' : `$${r.price.toFixed(2)}`}
-                  </td>
-                  <td
-                    className={cn(
-                      'tnum px-2 py-1.5 text-right',
-                      (r.dayChangePercent ?? 0) > 0 && 'text-positive',
-                      (r.dayChangePercent ?? 0) < 0 && 'text-negative',
-                    )}
-                  >
-                    {pct(r.dayChangePercent)}
-                  </td>
-                  <td className="tnum px-2 py-1.5 text-right">{bn(r.marketCap)}</td>
-                  <td className="tnum px-2 py-1.5 text-right">{num(r.trailingPE)}</td>
-                  <td className="tnum px-2 py-1.5 text-right text-muted">{num(r.forwardPE)}</td>
-                  <td className="tnum px-2 py-1.5 text-right text-muted">{num(r.priceToBook)}</td>
-                  <td className="tnum px-2 py-1.5 text-right text-muted">
-                    {r.dividendYield === null ? '—' : `${r.dividendYield.toFixed(2)}%`}
-                  </td>
-                  <td className="tnum px-2 py-1.5 text-right text-faint">
-                    {listedYear(r.firstTradeMs) ?? '—'}
-                  </td>
-                </tr>
-              ))}
+            <tbody className="[&_td]:border-b [&_td]:border-border/60">
+              {sorted.map((r) => {
+                const change = r.dayChangePercent;
+                return (
+                  <tr key={r.symbol} className="transition-colors hover:bg-bg-subtle">
+                    {/* Tickers are codes, not words — monospace makes them scan. */}
+                    <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] font-semibold tracking-tight text-text">
+                      {r.symbol}
+                    </td>
+                    <td className="max-w-[180px] truncate px-3 py-2 text-text" title={r.name}>
+                      {r.name}
+                    </td>
+                    <td
+                      className="max-w-[112px] truncate whitespace-nowrap px-3 py-2 text-muted"
+                      title={r.sector ?? ''}
+                    >
+                      {shortSector(r.sector)}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-muted">{r.exchange}</td>
+                    <td className="tnum whitespace-nowrap px-3 py-2 text-right text-text">
+                      {r.price === null ? '—' : `$${r.price.toFixed(2)}`}
+                    </td>
+                    <td
+                      className={cn(
+                        'tnum whitespace-nowrap px-3 py-2 text-right font-medium',
+                        change === null && 'text-muted',
+                        (change ?? 0) > 0 && 'text-positive',
+                        (change ?? 0) < 0 && 'text-negative',
+                      )}
+                    >
+                      {pct(change)}
+                    </td>
+                    <td className="tnum whitespace-nowrap px-3 py-2 text-right font-medium text-text">
+                      {bn(r.marketCap)}
+                    </td>
+                    <td className="tnum whitespace-nowrap px-3 py-2 text-right text-text">
+                      {num(r.trailingPE)}
+                    </td>
+                    <td className="tnum whitespace-nowrap px-3 py-2 text-right text-muted">
+                      {num(r.forwardPE)}
+                    </td>
+                    <td className="tnum whitespace-nowrap px-3 py-2 text-right text-muted">
+                      {num(r.priceToBook)}
+                    </td>
+                    <td className="tnum whitespace-nowrap px-3 py-2 text-right text-muted">
+                      {r.dividendYield === null ? '—' : `${r.dividendYield.toFixed(2)}%`}
+                    </td>
+                    <td className="tnum whitespace-nowrap px-3 py-2 text-right text-muted">
+                      {listedYear(r.firstTradeMs) ?? '—'}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
