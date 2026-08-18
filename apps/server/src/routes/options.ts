@@ -10,7 +10,8 @@ import {
   runOptionsCapture,
 } from '../lib/scheduler.js';
 import { listUniverse, retierByLiquidity } from '../lib/options/universe.js';
-import { nowIso } from '../lib/util.js';
+import { repriceDay } from '../lib/options/reprice.js';
+import { nowIso, todayKey } from '../lib/util.js';
 import { auditForLeakage } from '../lib/agents/leakageAudit.js';
 import { quantHealthy } from '../lib/quant.js';
 
@@ -104,6 +105,21 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    * once capture has run for a while, which is why it is not automatic.
    */
   app.post('/api/options/retier', async () => retierByLiquidity());
+
+  /**
+   * Recomputes IV/greeks for a day's already-captured quotes that came back
+   * from capture unpriced — a rate-limited provider or a cold quant sidecar
+   * leaves real rows with a null `iv_bps`. Never re-fetches from the vendor.
+   */
+  app.post('/api/options/reprice', async (req, reply) => {
+    if (!config.market.isRunner) {
+      return reply
+        .code(409)
+        .send({ error: 'This machine is a reader; pricing derives from the runner\'s own quotes.' });
+    }
+    const day = (req.query as { day?: string }).day ?? todayKey();
+    return repriceDay(day);
+  });
 
   /**
    * The leakage auditor — an offline critique step, never in the live

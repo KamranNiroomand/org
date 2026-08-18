@@ -34,6 +34,15 @@ export default defineConfig({
       // would open a connection to real bank transactions as a side effect of
       // its own import chain.
       DB_PATH: join(tmpdir(), 'org-vitest-personal', 'org.db'),
+      // Every quant-pricing test assumes the sidecar is unreachable — that's
+      // the honest state of a fresh checkout, and capture/reprice must both
+      // degrade to null vol rather than fail. Left at the default
+      // 127.0.0.1:5175, a developer running `npm run dev` alongside `npm
+      // test` gets a real sidecar answering `quantHealthy()`, and tests that
+      // silently depend on that assumption start passing or failing on
+      // timing rather than logic. Port 1 is privileged and unbound, so the
+      // connection refuses immediately instead of timing out.
+      QUANT_URL: 'http://127.0.0.1:1',
     },
   },
 });
