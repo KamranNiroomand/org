@@ -9,6 +9,7 @@ import { plaidRoutes } from './plaid.js';
 import { ideaRoutes } from './ideas.js';
 import { investmentRoutes } from './investments.js';
 import { optionsRoutes } from './options.js';
+import { paperRoutes } from './paper.js';
 import { projectRoutes } from './projects.js';
 import { stickyRoutes } from './stickies.js';
 import { taskRoutes } from './tasks.js';
@@ -38,6 +39,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(financeRoutes);
   await app.register(investmentRoutes);
   await app.register(optionsRoutes);
+  await app.register(paperRoutes);
   await app.register(ideaRoutes);
   await app.register(claudeRoutes);
   await app.register(plaidRoutes);
