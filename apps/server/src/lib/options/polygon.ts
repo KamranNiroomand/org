@@ -49,6 +49,7 @@ interface SnapshotResult {
     shares_per_contract?: number;
   };
   day?: { volume?: number; close?: number };
+  // Present only with a Quotes entitlement (Advanced tier). Absent on Starter.
   last_quote?: { bid?: number; ask?: number };
   last_trade?: { price?: number };
   open_interest?: number;
@@ -171,14 +172,42 @@ export class PolygonProvider implements OptionsProvider {
     return this.fetchLiveChain(request);
   }
 
+  /**
+   * The underlying's most recent close.
+   *
+   * Taken from equity aggregates rather than the chain snapshot, because
+   * `underlying_asset` carries only a ticker without a quote entitlement —
+   * the price field is gated. Every contract needs a spot to be priced or
+   * measured for moneyness, so this is fetched once per chain rather than
+   * read per row.
+   */
+  private async latestUnderlyingE4(symbol: string, day: string): Promise<number | null> {
+    const from = new Date(Date.parse(`${day}T00:00:00Z`) - 10 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const bars = await this.fetchBars(symbol, from, day);
+    const last = bars.at(-1);
+    return last ? last.closeE4 : null;
+  }
+
   private async fetchLiveChain(request: ChainRequest): Promise<ChainQuote[]> {
     const asOf = new Date().toISOString();
     const tradingDay = asOf.slice(0, 10);
     const underlying = request.underlying.toUpperCase();
 
-    const raw = await getAll<SnapshotResult>(
-      `/v3/snapshot/options/${encodeURIComponent(underlying)}?limit=250`,
-    );
+    const [raw, underlyingE4] = await Promise.all([
+      getAll<SnapshotResult>(`/v3/snapshot/options/${encodeURIComponent(underlying)}?limit=250`),
+      this.latestUnderlyingE4(underlying, tradingDay),
+    ]);
+
+    // Without a spot nothing here can be priced or placed on a moneyness axis,
+    // and inventing one would corrupt every derived value. Better to capture
+    // nothing for this symbol tonight and say so than to store a fiction.
+    if (underlyingE4 === null || underlyingE4 <= 0) {
+      throw new ProviderError(
+        `no recent close for ${underlying} — cannot anchor its chain to a spot price`,
+      );
+    }
 
     const quotes: ChainQuote[] = [];
     for (const r of raw) {
@@ -192,9 +221,6 @@ export class PolygonProvider implements OptionsProvider {
       // ones we model, and every one kept is a row every night forever.
       const dte = daysToExpiry(expiry, tradingDay);
       if (dte < 0 || dte > request.maxDte) continue;
-
-      const underlyingPrice = r.underlying_asset?.price;
-      if (typeof underlyingPrice !== 'number' || underlyingPrice <= 0) continue;
 
       // Prefer the vendor's own ticker, but rebuild the canonical form so
       // every symbol in our corpus is padded and spelled one way.
@@ -213,16 +239,16 @@ export class PolygonProvider implements OptionsProvider {
         type,
         strikeE4: toE4(strike),
         multiplier: d?.shares_per_contract ?? 100,
-        // A missing side is stored as zero, not dropped: the liquidity gate
-        // treats a zero bid as unsellable, which is exactly what it means,
-        // and keeping the row preserves that the contract existed and was
-        // untradeable rather than silently omitting it from history.
-        bidE4: typeof bid === 'number' ? toE4(bid) : 0,
-        askE4: typeof ask === 'number' ? toE4(ask) : 0,
+        // Null, not zero. On a plan without a quote entitlement there is no
+        // market to report, and storing zero would make every contract in the
+        // corpus look permanently unsellable.
+        bidE4: typeof bid === 'number' ? toE4(bid) : null,
+        askE4: typeof ask === 'number' ? toE4(ask) : null,
         lastE4: typeof r.last_trade?.price === 'number' ? toE4(r.last_trade.price) : null,
+        closeE4: typeof r.day?.close === 'number' ? toE4(r.day.close) : null,
         volume: r.day?.volume ?? 0,
         openInterest: r.open_interest ?? 0,
-        underlyingE4: toE4(underlyingPrice),
+        underlyingE4,
         asOf,
         tradingDay,
         vendorIv: typeof r.implied_volatility === 'number' ? r.implied_volatility : null,

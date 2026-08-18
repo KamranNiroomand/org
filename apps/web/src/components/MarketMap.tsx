@@ -118,6 +118,23 @@ const bn = (v: number | null): string => {
   return `$${(v / 1e6).toFixed(0)}M`;
 };
 
+/**
+ * GICS sector names are written for prospectuses, not for a column that has to
+ * share a row with eleven others. Truncation turns three of them into
+ * "Information ...", which identifies nothing — these abbreviations keep the
+ * distinction visible. Display only; the full name stays in the title and in
+ * the filter.
+ */
+const SECTOR_SHORT: Record<string, string> = {
+  'Information Technology': 'Info Tech',
+  'Consumer Discretionary': 'Cons. Disc.',
+  'Consumer Staples': 'Cons. Staples',
+  'Communication Services': 'Comm. Svcs.',
+  'Health Care': 'Health Care',
+};
+
+const shortSector = (s: string | null): string => (s === null ? '—' : (SECTOR_SHORT[s] ?? s));
+
 const pct = (v: number | null): string => (v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
 const num = (v: number | null, digits = 1): string => (v === null ? '—' : v.toFixed(digits));
 const listedYear = (ms: number | null): number | null =>
@@ -446,11 +463,14 @@ export function MarketMap() {
                     <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] font-semibold tracking-tight text-text">
                       {r.symbol}
                     </td>
-                    <td className="max-w-[220px] truncate px-3 py-2 text-text" title={r.name}>
+                    <td className="max-w-[180px] truncate px-3 py-2 text-text" title={r.name}>
                       {r.name}
                     </td>
-                    <td className="max-w-[150px] truncate px-3 py-2 text-muted" title={r.sector ?? ''}>
-                      {r.sector ?? '—'}
+                    <td
+                      className="max-w-[112px] truncate whitespace-nowrap px-3 py-2 text-muted"
+                      title={r.sector ?? ''}
+                    >
+                      {shortSector(r.sector)}
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-muted">{r.exchange}</td>
                     <td className="tnum whitespace-nowrap px-3 py-2 text-right text-text">

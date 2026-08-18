@@ -105,6 +105,7 @@ function persistChain(
       bidE4: q.bidE4,
       askE4: q.askE4,
       lastE4: q.lastE4,
+      closeE4: q.closeE4,
       volume: q.volume,
       openInterest: q.openInterest,
       underlyingE4: q.underlyingE4,
@@ -168,7 +169,18 @@ async function enrichChain(
       },
       thresholds,
     );
-    if (!verdict.liquid || verdict.midE4 === null) continue;
+    if (!verdict.liquid) continue;
+
+    /**
+     * Solve from the mid where a market exists, and from the contract's own
+     * close where it does not. A close is a traded price rather than a
+     * touchable one, so the implied vol it yields is slightly noisier — but it
+     * is a real transaction, which is far better than nothing and far better
+     * than a fabricated mid. The verdict's `basis` already records which
+     * regime a row came from, so nothing downstream has to guess.
+     */
+    const solveFromE4 = verdict.midE4 ?? q.closeE4;
+    if (solveFromE4 === null || solveFromE4 <= 0) continue;
 
     const dte = daysToExpiry(q.expiry, q.tradingDay);
     const rate = interpolateRate(curveFor(q.tradingDay), dte);
@@ -178,7 +190,7 @@ async function enrichChain(
 
     priceRows.push({
       key: `${q.occSymbol}|${q.asOf}`,
-      price: verdict.midE4 / 10_000,
+      price: solveFromE4 / 10_000,
       spot: q.underlyingE4 / 10_000,
       strike: q.strikeE4 / 10_000,
       years: yearsToExpiry(q.expiry, q.tradingDay),

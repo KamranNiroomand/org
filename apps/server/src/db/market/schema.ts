@@ -112,9 +112,30 @@ export const optionQuotes = sqliteTable(
      */
     tradingDay: text('trading_day').notNull(),
 
-    bidE4: integer('bid_e4').notNull(),
-    askE4: integer('ask_e4').notNull(),
+    /**
+     * Bid and ask, **nullable on purpose**.
+     *
+     * Null means "we were not entitled to see a quote"; zero means "there was
+     * no bid" — nobody willing to buy at any price. Those are entirely
+     * different facts and collapsing them would be the exact class of silent
+     * error this schema exists to prevent: a null stored as zero makes every
+     * contract look unsellable, and a zero stored as null makes an untradeable
+     * contract look merely unobserved.
+     *
+     * The current data plan (Massive Options Starter) serves no quotes at all,
+     * so these are null throughout until a quote source is added. Everything
+     * downstream must treat null as "execution cost is modelled, not
+     * measured", and say so wherever a result is reported.
+     */
+    bidE4: integer('bid_e4'),
+    askE4: integer('ask_e4'),
     lastE4: integer('last_e4'),
+    /**
+     * The contract's own daily close, from trade aggregates. This is what we
+     * actually have without a quote entitlement — a traded price rather than a
+     * touchable one, and never a substitute for a mid.
+     */
+    closeE4: integer('close_e4'),
     volume: integer('volume').notNull().default(0),
     openInterest: integer('open_interest').notNull().default(0),
     /** Underlying price at the same instant — needed to reprice historically. */

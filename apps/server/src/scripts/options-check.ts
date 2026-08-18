@@ -76,14 +76,15 @@ async function main(): Promise<void> {
     console.log('    Quotes are an Advanced-tier ($199/mo) entitlement. This is priced in,');
     console.log('    not a failure. What it means concretely:');
     console.log('');
-    console.log('      works now   forecasting the underlying (equity bars), realized vol,');
-    console.log('                  IV levels and term structure from aggregates, and');
-    console.log('                  forward paper trading marked at real bid/ask.');
-    console.log('      deferred    simulating fills on *historical* chains. Any backtest');
-    console.log('                  over backfilled data can only fill at last-traded');
-    console.log('                  prices, which overstates returns — often by more than');
-    console.log('                  the edge being measured. So those results are labelled');
-    console.log('                  indicative, and the paper book is the real evidence.');
+    console.log('      works now   forecasting the underlying — equity bars, realized');
+    console.log('                  vol, return distributions. This is the half of the');
+    console.log('                  system most likely to fail, and it needs no quotes.');
+    console.log('      modelled    every execution cost. With no spread to observe, the');
+    console.log('                  gate falls back to open interest and volume, and fills');
+    console.log('                  price off trades rather than a touchable market. That');
+    console.log('                  overstates returns — often by more than the edge being');
+    console.log('                  measured — so results stay labelled modelled, and no');
+    console.log('                  paper-book mark is evidence until quotes exist.');
     console.log('');
     console.log('    Upgrade when a strategy looks good enough to be worth measuring');
     console.log('    precisely — Advanced at $199/mo, or ThetaData, which the provider');
@@ -100,6 +101,7 @@ async function main(): Promise<void> {
     } else {
       let liquid = 0;
       let zeroBid = 0;
+      let unquoted = 0;
       for (const q of chain) {
         const contract = parseOccSymbol(q.occSymbol);
         if (!contract) continue;
@@ -112,11 +114,21 @@ async function main(): Promise<void> {
           spotE4: q.underlyingE4,
         });
         if (verdict.liquid) liquid += 1;
-        if (q.bidE4 <= 0) zeroBid += 1;
+        if (q.bidE4 === null) unquoted += 1;
+        else if (q.bidE4 <= 0) zeroBid += 1;
       }
       const pct = ((liquid / chain.length) * 100).toFixed(1);
       ok(`${chain.length} contracts within 45 DTE; ${liquid} tradeable (${pct}%)`);
-      console.log(`    ${zeroBid} had no bid at all — unsellable, and excluded.`);
+      if (unquoted > 0) {
+        console.log(
+          `    ${unquoted} carried no quote — this plan has no bid/ask entitlement, so`,
+        );
+        console.log('    the gate falls back to open interest and volume, and every');
+        console.log('    execution cost downstream is modelled rather than measured.');
+      }
+      if (zeroBid > 0) {
+        console.log(`    ${zeroBid} had a real market with no bid — unsellable, excluded.`);
+      }
       console.log(
         `    Gate: mid >= $${fromE4(DEFAULT_LIQUIDITY.minMidE4).toFixed(2)}, ` +
           `spread <= ${(DEFAULT_LIQUIDITY.maxSpreadFraction * 100).toFixed(0)}% of mid, ` +

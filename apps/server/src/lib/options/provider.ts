@@ -25,9 +25,15 @@ export interface ChainQuote {
   readonly strikeE4: number;
   readonly multiplier: number;
 
-  readonly bidE4: number;
-  readonly askE4: number;
+  /**
+   * Null when the plan carries no quote entitlement. Distinct from zero, which
+   * is a real market with nobody bidding — see the gate.
+   */
+  readonly bidE4: number | null;
+  readonly askE4: number | null;
   readonly lastE4: number | null;
+  /** The contract's own daily close, from trade aggregates. */
+  readonly closeE4: number | null;
   readonly volume: number;
   readonly openInterest: number;
   readonly underlyingE4: number;

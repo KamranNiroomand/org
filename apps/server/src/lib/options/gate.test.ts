@@ -137,3 +137,54 @@ describe('liquidity gate — derived quantities', () => {
     ).toBe(true);
   });
 });
+
+describe('liquidity gate — no quote entitlement', () => {
+  /**
+   * The current data plan serves no bid or ask at all. These rows are real and
+   * they trade; excluding them would discard the whole cross-section. So the
+   * gate degrades to participation alone and says so, rather than pretending
+   * either that everything is tradeable or that nothing is.
+   */
+  const base = {
+    contract: contractFor(227.5),
+    bidE4: null,
+    askE4: null,
+    spotE4: toE4(fixture.spot),
+  };
+
+  it('never confuses an unseen market with an empty one', () => {
+    const unseen = evaluateLiquidity({ ...base, openInterest: 5367, volume: 65854 });
+    const empty = evaluateLiquidity({
+      ...base,
+      bidE4: 0,
+      askE4: toE4(0.01),
+      openInterest: 5367,
+      volume: 65854,
+    });
+    expect(unseen.reasons).toContain('no-quote');
+    expect(unseen.reasons).not.toContain('no-bid');
+    expect(empty.reasons).toContain('no-bid');
+    expect(empty.reasons).not.toContain('no-quote');
+  });
+
+  it('marks execution cost as modelled, not measured', () => {
+    const v = evaluateLiquidity({ ...base, openInterest: 5367, volume: 65854 });
+    expect(v.basis).toBe('modelled');
+    expect(v.midE4).toBeNull();
+    expect(v.spreadFraction).toBeNull();
+    // Participation alone is a weaker test, so it passes — but nothing
+    // downstream may report its cost as observed.
+    expect(v.liquid).toBe(true);
+  });
+
+  it('still rejects on participation', () => {
+    const v = evaluateLiquidity({ ...base, openInterest: 1, volume: 9 });
+    expect(v.liquid).toBe(false);
+    expect([...v.reasons].sort()).toEqual(['no-quote', 'thin-open-interest', 'thin-volume']);
+  });
+
+  it('reports measured basis whenever a real market is present', () => {
+    const c = fixture.cases[0]!;
+    expect(evaluateLiquidity(inputFor(c)).basis).toBe('measured');
+  });
+});

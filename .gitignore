@@ -1,6 +1,10 @@
-# Secrets — never commit
-.env
-.env.local
+# Secrets — never commit.
+#
+# Matched by prefix, not by exact name: a backup, a dated copy, or a
+# `.env.bak` written in a hurry carries exactly the same credentials as `.env`
+# itself, and an exact-match rule silently lets every one of them through.
+.env*
+!.env.example
 *.pem
 *.key
 

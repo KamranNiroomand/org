@@ -54,6 +54,7 @@ export const DEFAULT_LIQUIDITY: LiquidityThresholds = {
 };
 
 export type GateReason =
+  | 'no-quote'
   | 'no-bid'
   | 'crossed'
   | 'too-cheap'
@@ -64,8 +65,13 @@ export type GateReason =
 
 export interface GateInput {
   readonly contract: OptionContract;
-  readonly bidE4: number;
-  readonly askE4: number;
+  /**
+   * Null means no quote entitlement — we were not shown a market. That is not
+   * the same as a zero bid, which means nobody was willing to buy at any
+   * price, and the two must never collapse into each other.
+   */
+  readonly bidE4: number | null;
+  readonly askE4: number | null;
   readonly openInterest: number;
   readonly volume: number;
   /** Underlying price at the same instant. Non-positive skips the intrinsic check. */
@@ -79,6 +85,17 @@ export interface GateVerdict {
   /** Null when the quote is unusable, so callers cannot mistake it for a price. */
   readonly midE4: number | null;
   readonly spreadFraction: number | null;
+  /**
+   * Whether execution cost for this row can be **measured** or only
+   * **modelled**.
+   *
+   * With no quote there is no spread, so the gate falls back to open interest
+   * and volume alone — a materially weaker test, since it can admit contracts
+   * whose spreads would have disqualified them. Carried on the verdict rather
+   * than inferred later so that no backtest or ranked candidate can present a
+   * modelled cost as though it were observed.
+   */
+  readonly basis: 'measured' | 'modelled';
 }
 
 export function evaluateLiquidity(
@@ -87,6 +104,23 @@ export function evaluateLiquidity(
 ): GateVerdict {
   const { bidE4, askE4, openInterest, volume, spotE4, contract } = input;
   const reasons: GateReason[] = [];
+
+  /**
+   * No quote at all. Everything that depends on a two-sided market — mid,
+   * spread, the sub-intrinsic check — is unanswerable, so the gate falls back
+   * to participation alone and flags the verdict as modelled. Deliberately not
+   * a rejection: these contracts are real, they trade, and excluding them
+   * would throw away the entire cross-section on a plan without quotes.
+   */
+  if (bidE4 === null || askE4 === null) {
+    if (openInterest < thresholds.minOpenInterest) reasons.push('thin-open-interest');
+    if (volume < thresholds.minVolume) reasons.push('thin-volume');
+    // `liquid` is decided before 'no-quote' joins the list: it records why the
+    // verdict is modelled, not a reason the contract failed.
+    const liquid = reasons.length === 0;
+    reasons.push('no-quote');
+    return { liquid, reasons, midE4: null, spreadFraction: null, basis: 'modelled' };
+  }
 
   // A zero bid is not a cheap contract, it is an unsellable one: there is no
   // resting order to hit. Whatever the ask says, the position cannot be exited.
@@ -126,7 +160,7 @@ export function evaluateLiquidity(
     if (midE4 < intrinsicValueE4(contract, spotE4)) reasons.push('below-intrinsic');
   }
 
-  return { liquid: reasons.length === 0, reasons, midE4, spreadFraction };
+  return { liquid: reasons.length === 0, reasons, midE4, spreadFraction, basis: 'measured' };
 }
 
 /** Convenience for the common case where only the verdict matters. */

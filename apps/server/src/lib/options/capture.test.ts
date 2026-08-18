@@ -51,6 +51,7 @@ function chainFromFixture(): ChainQuote[] {
       bidE4: toE4(c.bid),
       askE4: toE4(c.ask),
       lastE4: null,
+      closeE4: toE4((c.bid + c.ask) / 2),
       volume: c.volume,
       openInterest: c.openInterest,
       underlyingE4: toE4(fixture.spot),
