@@ -20,6 +20,7 @@ import pytest
 from app.pricing import (
     MAX_VOL,
     american_price,
+    years_to_expiry,
     binomial_american_price,
     bivariate_norm_cdf,
     bsm_greeks,
@@ -136,6 +137,26 @@ def test_chain_shows_a_volatility_smile() -> None:
 # ---------------------------------------------------------------------------
 # Internal consistency
 # ---------------------------------------------------------------------------
+
+
+class TestYearsToExpiry:
+    def test_matches_the_real_nvda_fixture(self) -> None:
+        # The same two-day gap used throughout this file: 2026-08-17 to
+        # 2026-08-19, validated against a real broker's chain.
+        assert years_to_expiry("2026-08-19", "2026-08-17") == pytest.approx(2 / 365)
+
+    def test_zero_on_expiry_day_itself(self) -> None:
+        assert years_to_expiry("2026-08-17", "2026-08-17") == 0.0
+
+    def test_accepts_a_full_instant_for_as_of_day(self) -> None:
+        # capture stores `as_of` as a full ISO instant; callers should not
+        # have to slice it themselves before this function is usable.
+        assert years_to_expiry("2026-08-19", "2026-08-17T21:30:00.000Z") == pytest.approx(2 / 365)
+
+    def test_negative_past_expiry(self) -> None:
+        # Not clamped — a caller asking about an already-expired contract
+        # gets an honest negative number, not a silently floored zero.
+        assert years_to_expiry("2026-08-16", "2026-08-17") == pytest.approx(-1 / 365)
 
 
 def test_put_call_parity() -> None:
