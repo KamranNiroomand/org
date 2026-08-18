@@ -787,19 +787,17 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "lightgbm" },
     { name = "numpy" },
     { name = "polars" },
     { name = "pyarrow" },
     { name = "pydantic" },
+    { name = "scikit-learn" },
     { name = "scipy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.optional-dependencies]
-ml = [
-    { name = "lightgbm" },
-    { name = "scikit-learn" },
-]
 text = [
     { name = "sentence-transformers" },
 ]
@@ -814,17 +812,17 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "lightgbm", marker = "extra == 'ml'", specifier = ">=4.5" },
+    { name = "lightgbm", specifier = ">=4.5" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "polars", specifier = ">=1.17" },
     { name = "pyarrow", specifier = ">=18.0" },
     { name = "pydantic", specifier = ">=2.10" },
-    { name = "scikit-learn", marker = "extra == 'ml'", specifier = ">=1.6" },
+    { name = "scikit-learn", specifier = ">=1.6" },
     { name = "scipy", specifier = ">=1.14" },
     { name = "sentence-transformers", marker = "extra == 'text'", specifier = ">=3.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
-provides-extras = ["ml", "text"]
+provides-extras = ["text"]
 
 [package.metadata.requires-dev]
 dev = [

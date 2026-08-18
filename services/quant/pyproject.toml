@@ -4,8 +4,23 @@ version = "0.1.0"
 description = "Options pricing, features, training and backtesting sidecar for Org"
 requires-python = ">=3.12"
 
-# Kept deliberately lean. The machine this runs on has ~20 GB of free disk, so
-# heavyweight extras are opt-in rather than pulled on first install.
+# `uv sync --project services/quant`, no extra flags, must produce a complete
+# environment on any machine — including the runner Mac, where a training run
+# failing on a missing package is a training run that quietly never happens.
+# Training is active, not deferred, so lightgbm and scikit-learn are base
+# dependencies rather than an opt-in extra: a plain `uv sync` used to skip
+# them, which is exactly the gap that let this machine run for a while
+# without them before anyone noticed.
+#
+# lightgbm needs the OpenMP runtime as a **system** library — `uv`/`pip`
+# cannot install it, because it is not a Python package. On macOS:
+#
+#   brew install libomp
+#
+# Its absence surfaces as `OSError: ... Library not loaded: @rpath/libomp.dylib`
+# on the first call into lightgbm, not at import time and not at `uv sync`
+# time — so this needs doing on every machine that trains, including the
+# runner, before the first training run rather than after it fails.
 dependencies = [
     "numpy>=2.1",
     "scipy>=1.14",
@@ -14,13 +29,15 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "pydantic>=2.10",
+    "lightgbm>=4.5",
+    "scikit-learn>=1.6",
 ]
 
 [project.optional-dependencies]
-# Model training. Installed when M2 starts.
-ml = ["lightgbm>=4.5", "scikit-learn>=1.6"]
 # Text embeddings. Pulls torch, roughly 2 GB — install only when M4 starts,
-# and check free disk first.
+# and check free disk first. Kept opt-in because unlike ML training, nothing
+# in the current pipeline needs it yet, so a machine that never runs the text
+# pipeline is not silently missing a dependency it will hit later.
 text = ["sentence-transformers>=3.3"]
 
 [dependency-groups]
