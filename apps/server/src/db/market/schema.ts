@@ -374,6 +374,64 @@ export const paperEquity = sqliteTable(
   (t) => [uniqueIndex('paper_equity_day_uq').on(t.day)],
 );
 
+/**
+ * Trained model artifacts, registered — one row per training run.
+ *
+ * The row is metadata only; the artifact itself (`model.txt`, `features.json`)
+ * lives as files under `models/<run_id>/`, written by `train.py`. Python is
+ * read-only on this database throughout the project, so it never writes this
+ * row directly — a Node script (`models-register.ts`) reads the manifest
+ * `train.py` produced and inserts it here, the same division of labour as
+ * capture: Python computes, Node persists.
+ *
+ * **Registered on the runner only.** `market:pull` replaces the reader's
+ * entire local `market.db` with the runner's snapshot — correct for the
+ * corpus, where the runner is the single source of truth, but it means any
+ * row written *only* on the reader is silently destroyed by the next pull.
+ * Registering here only ever happens on the machine that trained, so the row
+ * travels to the reader through the same snapshot the corpus already uses,
+ * rather than risking being wiped by it.
+ *
+ * (The identical risk applies to `paper_orders` today, and is not yet fixed —
+ * a paper trade placed on a reader would be destroyed by a future pull. Left
+ * as a known gap rather than patched hastily: the real fix is separating
+ * locally-owned tables from the pulled corpus, which is its own piece of
+ * work, not a quick change to this file.)
+ */
+export const modelRuns = sqliteTable(
+  'model_runs',
+  {
+    /** Matches train.py's own run_id, e.g. "2026-08-18-dir-h5-1e0f0b03a947". */
+    runId: text('run_id').primaryKey(),
+    target: text('target').notNull(),
+    horizon: integer('horizon').notNull(),
+    gitSha: text('git_sha'),
+    trainDaysFirst: text('train_days_first').notNull(),
+    trainDaysLast: text('train_days_last').notNull(),
+    trainDaysCount: integer('train_days_count').notNull(),
+    nSplits: integer('n_splits').notNull(),
+    embargo: integer('embargo').notNull(),
+    /** RMSE, baseline RMSE, beats_baseline, IC, fold/row counts — see train.py. */
+    metrics: text('metrics', { mode: 'json' }).$type<Record<string, unknown>>().notNull(),
+    /** Directory name under modelsDir, e.g. the run_id itself. */
+    artifactDir: text('artifact_dir').notNull(),
+    registeredAt: text('registered_at').notNull(),
+    /**
+     * A run starts as a challenger. Promotion to champion is manual — see
+     * the project plan's champion/shadow/promote policy — never automatic on
+     * a good in-sample metric.
+     */
+    status: text('status', { enum: ['challenger', 'champion', 'retired'] })
+      .notNull()
+      .default('challenger'),
+    promotedAt: text('promoted_at'),
+  },
+  (t) => [
+    index('model_runs_target_idx').on(t.target),
+    index('model_runs_status_idx').on(t.status),
+  ],
+);
+
 export const captureRuns = sqliteTable(
   'capture_runs',
   {

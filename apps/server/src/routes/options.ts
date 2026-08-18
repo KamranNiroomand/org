@@ -1,14 +1,17 @@
 import type { FastifyInstance } from 'fastify';
-import { desc, sql } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
+import { z } from 'zod';
 import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
-import { captureRuns, optionQuotes, trackedUnderlyings } from '../db/market/schema.js';
+import { captureRuns, modelRuns, optionQuotes, trackedUnderlyings } from '../db/market/schema.js';
 import {
   getLastCaptureResult,
   getNextCaptureRun,
   runOptionsCapture,
 } from '../lib/scheduler.js';
 import { listUniverse, retierByLiquidity } from '../lib/options/universe.js';
+import { nowIso } from '../lib/util.js';
+import { auditForLeakage } from '../lib/agents/leakageAudit.js';
 import { quantHealthy } from '../lib/quant.js';
 
 /**
@@ -101,4 +104,68 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    * once capture has run for a while, which is why it is not automatic.
    */
   app.post('/api/options/retier', async () => retierByLiquidity());
+
+  /**
+   * The leakage auditor — an offline critique step, never in the live
+   * prediction path. Reviews a feature, label, or backtest config for
+   * lookahead, survivorship, and cost-optimism risk before a human trusts a
+   * result trained on it. See lib/agents/leakageAudit.ts.
+   */
+  app.post('/api/quant/audit', async (req, reply) => {
+    const parsed = z
+      .object({
+        name: z.string().min(1),
+        kind: z.enum(['feature', 'label', 'backtest_config', 'cv_config', 'other']),
+        sourceCode: z.string().min(1),
+        description: z.string().optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
+
+    if (!config.anthropic.configured) {
+      return reply.code(503).send({ error: 'ANTHROPIC_API_KEY is not set — the leakage auditor cannot run.' });
+    }
+
+    try {
+      return await auditForLeakage(parsed.data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      app.log.error({ err }, 'Leakage audit failed');
+      return reply.code(502).send({ error: message });
+    }
+  });
+
+  /** Trained runs — challenger vs champion, per target. */
+  app.get('/api/quant/runs', async (req) => {
+    const target = (req.query as { target?: string }).target;
+    return marketDb
+      .select()
+      .from(modelRuns)
+      .where(target ? eq(modelRuns.target, target) : undefined)
+      .orderBy(desc(modelRuns.registeredAt))
+      .all();
+  });
+
+  /**
+   * Manual promotion — a run becomes champion only when a person says so,
+   * per the project plan's champion/shadow/promote policy. Never automatic
+   * on an in-sample metric.
+   */
+  app.post<{ Params: { runId: string } }>('/api/quant/runs/:runId/promote', async (req, reply) => {
+    const run = marketDb.select().from(modelRuns).where(eq(modelRuns.runId, req.params.runId)).get();
+    if (!run) return reply.code(404).send({ error: 'Unknown run' });
+
+    marketDb.transaction((tx) => {
+      // Only one champion per target at a time.
+      tx.update(modelRuns)
+        .set({ status: 'retired' })
+        .where(sql`${modelRuns.target} = ${run.target} and ${modelRuns.status} = 'champion'`)
+        .run();
+      tx.update(modelRuns)
+        .set({ status: 'champion', promotedAt: nowIso() })
+        .where(eq(modelRuns.runId, req.params.runId))
+        .run();
+    });
+    return { ok: true };
+  });
 }
