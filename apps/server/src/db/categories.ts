@@ -13,14 +13,17 @@ import { categories } from './schema.js';
  */
 const SYSTEM_CATEGORIES: Array<{
   name: string;
-  kind: 'expense' | 'income' | 'transfer';
+  kind: 'expense' | 'income' | 'transfer' | 'payment' | 'refund';
   color: string;
   icon: string;
 }> = [
   // Income
   { name: 'Salary', kind: 'income', color: 'emerald', icon: 'banknote' },
   { name: 'Interest & Dividends', kind: 'income', color: 'emerald', icon: 'trending-up' },
-  { name: 'Refunds', kind: 'income', color: 'emerald', icon: 'undo-2' },
+  // Real money back, but not earnings — crediting it as income would
+  // overstate what came in. Kept separate from every other bucket so it
+  // is visible without inflating any of them; see the summary endpoint.
+  { name: 'Refunds', kind: 'refund', color: 'emerald', icon: 'undo-2' },
   { name: 'Other Income', kind: 'income', color: 'emerald', icon: 'plus-circle' },
 
   // Everyday
@@ -62,36 +65,60 @@ const SYSTEM_CATEGORIES: Array<{
   // Money arriving from a person rather than earned. Transfer-kind, so it is
   // visible in the ledger without inflating income.
   { name: 'E-Transfer Received', kind: 'transfer', color: 'slate', icon: 'move-down-left' },
-  { name: 'Credit Card Payment', kind: 'transfer', color: 'slate', icon: 'credit-card' },
+  // Not a transfer in the excluded-from-everything sense: the paying
+  // account usually is not synced, so there is nothing to net this
+  // against, and hiding it the way an ordinary transfer is hidden would
+  // make real money disappear from every dashboard total silently.
+  { name: 'Credit Card Payment', kind: 'payment', color: 'slate', icon: 'credit-card' },
 ];
 
-/** Inserts any missing system categories. Safe to run on every startup. */
+/**
+ * Inserts any missing system category, and reconciles `kind` on ones that
+ * already exist. Safe to run on every startup.
+ *
+ * Only `kind` is reconciled, never name/color/icon — those are cosmetic and
+ * fair game for a user to change by hand, but `kind` decides which dashboard
+ * total a transaction lands in, and a category defined here as `payment`
+ * that was seeded before that value existed (as `transfer`) would otherwise
+ * stay wrong forever. Existing transactions already tagged with that
+ * category are unaffected by name — only the category row's own `kind`
+ * changes, and every transaction pointing at it is reclassified for free.
+ */
 export function seedCategories(): number {
-  const existing = new Set(
-    db.select({ name: categories.name }).from(categories).all().map((c) => c.name),
+  const existing = new Map(
+    db.select({ name: categories.name, kind: categories.kind }).from(categories).all().map((c) => [c.name, c.kind]),
   );
 
   const missing = SYSTEM_CATEGORIES.filter((c) => !existing.has(c.name));
-  if (missing.length === 0) return 0;
+  if (missing.length > 0) {
+    db.insert(categories)
+      .values(
+        missing.map((c) => ({
+          id: randomUUID(),
+          name: c.name,
+          parentId: null,
+          kind: c.kind,
+          color: c.color,
+          icon: c.icon,
+          isSystem: true,
+        })),
+      )
+      // The unique index on name is the real guard; this keeps a concurrent
+      // seed — two server processes overlapping on restart — from throwing.
+      .onConflictDoNothing()
+      .run();
+  }
 
-  db.insert(categories)
-    .values(
-      missing.map((c) => ({
-        id: randomUUID(),
-        name: c.name,
-        parentId: null,
-        kind: c.kind,
-        color: c.color,
-        icon: c.icon,
-        isSystem: true,
-      })),
-    )
-    // The unique index on name is the real guard; this keeps a concurrent
-    // seed — two server processes overlapping on restart — from throwing.
-    .onConflictDoNothing()
-    .run();
+  let reconciled = 0;
+  for (const c of SYSTEM_CATEGORIES) {
+    const currentKind = existing.get(c.name);
+    if (currentKind !== undefined && currentKind !== c.kind) {
+      db.update(categories).set({ kind: c.kind }).where(sql`${categories.name} = ${c.name}`).run();
+      reconciled++;
+    }
+  }
 
-  return missing.length;
+  return missing.length + reconciled;
 }
 
 /** Looks up a category id by name — used by the importer and rule engine. */

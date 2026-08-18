@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { accounts, budgets, categories, categoryRules, transactions } from '../db/schema.js';
 import { categorizeUncategorized, learnRule } from '../lib/categorize.js';
+import { accountBucket, computeSummaryTiles } from '../lib/financeSummary.js';
 import { newId, nowIso, todayKey } from '../lib/util.js';
 
 /**
@@ -368,14 +369,30 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
   // Summary
   // -------------------------------------------------------------------------
 
-  /** Income, spending, and category breakdown for a month. */
+  /**
+   * Income, spending, and category breakdown for a month.
+   *
+   * The four incoming-money tiles are each present only when an included
+   * account of the matching type actually exists — see computeSummaryTiles
+   * for why `null` and `0` mean different things here, and why a chequing
+   * account and a credit card selected together surface separate tiles
+   * rather than one blended figure.
+   */
   app.get<{ Querystring: { month?: string } }>('/api/finance/summary', async (req) => {
     const month = req.query.month ?? todayKey().slice(0, 7);
     const from = `${month}-01`;
     const to = `${month}-31`;
 
+    const includedAccounts = db
+      .select({ id: accounts.id, type: accounts.type, subtype: accounts.subtype })
+      .from(accounts)
+      .where(eq(accounts.includeInStats, true))
+      .all();
+    const bucketByAccount = new Map(includedAccounts.map((a) => [a.id, accountBucket(a.type, a.subtype)]));
+
     const rows = db
       .select({
+        accountId: transactions.accountId,
         amount: transactions.amount,
         categoryId: transactions.categoryId,
         categoryName: categories.name,
@@ -395,40 +412,9 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
       )
       .all();
 
-    let income = 0;
-    let expense = 0;
-    const byCategory = new Map<
-      string,
-      { id: string | null; name: string; color: string; total: number }
-    >();
+    const tiles = computeSummaryTiles(rows, bucketByAccount);
 
-    for (const r of rows) {
-      // Transfers are already excluded, so anything positive is genuinely money
-      // arriving and anything negative genuinely money leaving.
-      if (r.amount > 0) income += r.amount;
-      else expense += -r.amount;
-
-      if (r.amount < 0) {
-        const key = r.categoryId ?? 'uncategorized';
-        const entry = byCategory.get(key) ?? {
-          id: r.categoryId,
-          name: r.categoryName ?? 'Uncategorized',
-          color: r.categoryColor ?? 'slate',
-          total: 0,
-        };
-        entry.total += -r.amount;
-        byCategory.set(key, entry);
-      }
-    }
-
-    return {
-      month,
-      income,
-      expense,
-      net: income - expense,
-      transactionCount: rows.length,
-      byCategory: [...byCategory.values()].sort((a, b) => b.total - a.total),
-    };
+    return { month, ...tiles, transactionCount: rows.length };
   });
 
   /** Income vs. expense per month, for the cashflow chart. */

@@ -1,6 +1,6 @@
 import { asc, eq, isNull } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { categoryRules, categories, transactions } from '../db/schema.js';
+import { accounts, categoryRules, categories, transactions } from '../db/schema.js';
 import { categoryIdByName } from '../db/categories.js';
 import { newId, nowIso, normalizeDescription } from './util.js';
 
@@ -54,6 +54,74 @@ export interface Categorizable {
   amount?: number;
 }
 
+/**
+ * A positive amount means money arrived, but *why* depends entirely on what
+ * kind of account it arrived in, and no amount of merchant-text matching can
+ * tell the difference — "AMEX" appearing in a description means one thing on
+ * a chequing account (a fee, an annual charge) and something else entirely on
+ * the Amex card itself (a payment or a refund). This runs first, before the
+ * merchant-pattern rules, specifically for that reason: it looks at the
+ * account, not the text.
+ */
+export interface AccountAwareCategorizable extends Categorizable {
+  accountType: string;
+  accountSubtype: string | null;
+  personalFinanceCategory: string | null;
+}
+
+/**
+ * A credit card structurally has only two sources of incoming money: you
+ * paying it down, or a merchant reversing a charge. Plaid's own
+ * `personal_finance_category` is checked first — its `LOAN_PAYMENTS` primary
+ * category is a reliable, bank-independent signal — and falls back to
+ * matching common wording only for transactions synced before that field
+ * existed. Refunds get no positive pattern to match against: a refund
+ * carries the same merchant text as the purchase it reverses ("AMAZON.CA"
+ * either way), so "not identified as a payment" is treated as the refund
+ * case by elimination rather than by a pattern that could not exist.
+ */
+const PAYMENT_TEXT_PATTERNS = [
+  'payment thank you', 'paiement', 'autopay', 'auto payment',
+  'online payment', 'web payment', 'bill payment', 'preauthorized payment',
+];
+
+/**
+ * Interest postings are near-universally labelled by the bank itself — this
+ * is the one case where matching on text is *more* reliable than guessing,
+ * because "interest paid" or "intérêt" is standard banking language rather
+ * than a merchant's own inconsistent wording. Anything else positive on a
+ * savings account (an e-transfer in, a manual top-up) is a deposit by
+ * elimination — there is no third case a savings account can produce.
+ */
+const INTEREST_TEXT_PATTERNS = ['interest', 'intérêt', 'intere'];
+
+/**
+ * Returns a category *name* (not id — resolved by the caller, which already
+ * has the id lookup wired for rule-based categories) for the account-context
+ * cases this function owns, or null to fall through to the merchant-pattern
+ * rules. Only ever consulted for positive amounts: a purchase or a
+ * withdrawal is unambiguous regardless of account type, so this has nothing
+ * to add there.
+ */
+export function classifyByAccountContext(tx: AccountAwareCategorizable): string | null {
+  if (!(tx.amount && tx.amount > 0)) return null;
+  const haystack = normalizeDescription(`${tx.merchantName ?? ''} ${tx.name}`);
+
+  if (tx.accountType === 'credit') {
+    const isPayment =
+      tx.personalFinanceCategory === 'LOAN_PAYMENTS' ||
+      PAYMENT_TEXT_PATTERNS.some((p) => haystack.includes(p));
+    return isPayment ? 'Credit Card Payment' : 'Refunds';
+  }
+
+  if (tx.accountType === 'depository' && tx.accountSubtype === 'savings') {
+    const isInterest = INTEREST_TEXT_PATTERNS.some((p) => haystack.includes(p));
+    return isInterest ? 'Interest & Dividends' : null; // null: see summary.ts's Deposit bucket
+  }
+
+  return null;
+}
+
 /** Returns the category id for a transaction, or null when nothing matches. */
 export function categorizeOne(tx: Categorizable, rules: CompiledRule[]): string | null {
   const haystack = normalizeDescription(`${tx.merchantName ?? ''} ${tx.name}`);
@@ -83,7 +151,6 @@ export function categorizeOne(tx: Categorizable, rules: CompiledRule[]): string 
  */
 export function categorizeUncategorized(): number {
   const rules = loadRules();
-  if (rules.length === 0) return 0;
 
   const pending = db
     .select({
@@ -91,15 +158,32 @@ export function categorizeUncategorized(): number {
       name: transactions.name,
       merchantName: transactions.merchantName,
       amount: transactions.amount,
+      personalFinanceCategory: transactions.personalFinanceCategory,
+      accountType: accounts.type,
+      accountSubtype: accounts.subtype,
     })
     .from(transactions)
+    .innerJoin(accounts, eq(transactions.accountId, accounts.id))
     .where(isNull(transactions.categoryId))
     .all();
+
+  if (pending.length === 0) return 0;
+
+  // Resolved once, not per row: classifyByAccountContext returns a name from
+  // a fixed, known set, so there is no reason to hit categoryIdByName's
+  // lookup — a full table scan under the hood — inside the loop.
+  const accountContextIds = new Map(
+    ['Credit Card Payment', 'Refunds', 'Interest & Dividends'].map((name) => [
+      name,
+      categoryIdByName(name),
+    ]),
+  );
 
   let assigned = 0;
   db.transaction((tx) => {
     for (const row of pending) {
-      const categoryId = categorizeOne(row, rules);
+      const contextName = classifyByAccountContext(row);
+      const categoryId = contextName ? accountContextIds.get(contextName) : categorizeOne(row, rules);
       if (!categoryId) continue;
       tx.update(transactions)
         .set({ categoryId })

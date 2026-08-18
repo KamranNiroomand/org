@@ -144,6 +144,7 @@ function writeTransactions(added: PlaidTransaction[], modified: PlaidTransaction
       currency: t.iso_currency_code ?? config.baseCurrency,
       name: t.name,
       merchantName: t.merchant_name ?? null,
+      personalFinanceCategory: t.personal_finance_category?.primary ?? null,
       pending: t.pending,
       pendingTransactionId: t.pending_transaction_id ?? null,
       source: 'plaid' as const,

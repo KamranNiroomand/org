@@ -113,8 +113,32 @@ export function FinancesPage() {
       <Page>
         <BankSync />
 
+        {/*
+          Each incoming-money tile is rendered only when the summary actually
+          returns a value for it — `null` means no included account can
+          produce that figure (e.g. Income with only credit cards selected),
+          and rendering a $0.00 box for money that structurally cannot arrive
+          there would misrepresent the account mix rather than describe it.
+          Selecting a chequing account and a credit card together is exactly
+          what makes both an Income tile and Payments/Refunds tiles appear
+          side by side, instead of one blended figure.
+        */}
         <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatTile label="Income" value={m(summary?.income ?? 0)} tone="positive" />
+          {summary?.income !== null && summary?.income !== undefined && (
+            <StatTile label="Income" value={m(summary.income)} tone="positive" />
+          )}
+          {summary?.payments !== null && summary?.payments !== undefined && (
+            <StatTile label="Payments" value={m(summary.payments)} />
+          )}
+          {summary?.refunds !== null && summary?.refunds !== undefined && (
+            <StatTile label="Refunds" value={m(summary.refunds)} tone="positive" />
+          )}
+          {summary?.interest !== null && summary?.interest !== undefined && (
+            <StatTile label="Interest" value={m(summary.interest)} tone="positive" />
+          )}
+          {summary?.deposits !== null && summary?.deposits !== undefined && (
+            <StatTile label="Deposits" value={m(summary.deposits)} tone="positive" />
+          )}
           <StatTile label="Spent" value={m(summary?.expense ?? 0)} />
           <StatTile
             label="Net"
