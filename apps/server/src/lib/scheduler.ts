@@ -14,6 +14,8 @@ import { PolygonProvider } from './options/polygon.js';
 import { captureChains } from './options/capture.js';
 import { listUniverse, seedUniverse, toVendorSymbol } from './options/universe.js';
 import { syncRates } from './options/rates.js';
+import { snapshotMarketDb } from '../db/market/snapshot.js';
+import { isRunner } from './options/role.js';
 
 /**
  * The nightly job.
@@ -240,6 +242,20 @@ export async function runOptionsCapture(
       `Options: ${summary.quotesWritten} quotes across ${summary.symbolsDone} symbols, ` +
         `${summary.liquidWritten} tradeable, ${summary.pricedWritten} priced`,
     );
+
+    // A snapshot only matters if there is somewhere to pull it from — never
+    // taken on a reader, which has no runner-scheduled capture to follow
+    // anyway, but guarded explicitly rather than relying on that being true.
+    if (isRunner()) {
+      try {
+        const path = snapshotMarketDb();
+        log.info(`Snapshot written to ${path}`);
+      } catch (err) {
+        result.errors.push(
+          `Snapshot: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     result.errors.push(message);

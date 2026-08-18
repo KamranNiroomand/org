@@ -32,6 +32,10 @@ const schema = z.object({
   MARKET_DATA_DIR: z.string().optional(),
   // runner = produces the corpus. reader = displays it. See config.market.role.
   MARKET_ROLE: z.enum(['runner', 'reader']).default('runner'),
+  // Reader only: SSH target the corpus is pulled from, e.g. "user@host.local".
+  RUNNER_SSH_HOST: z.string().optional(),
+  // Path to MARKET_DATA_DIR on the runner, if different from this machine's.
+  RUNNER_DATA_DIR: z.string().optional(),
   MARKET_DB_PATH: z.string().optional(),
   POLYGON_API_KEY: z.string().optional(),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
@@ -138,6 +142,8 @@ export const config = {
      */
     role: env.MARKET_ROLE,
     isRunner: env.MARKET_ROLE === 'runner',
+    runnerSshHost: env.RUNNER_SSH_HOST ?? null,
+    runnerDataDir: env.RUNNER_DATA_DIR ?? null,
     polygonKey: env.POLYGON_API_KEY ?? null,
     configured: Boolean(env.POLYGON_API_KEY),
     /**
