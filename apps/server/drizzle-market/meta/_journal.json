@@ -15,6 +15,20 @@
       "when": 1787060066903,
       "tag": "0001_breezy_mikhail_rasputin",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787083762544,
+      "tag": "0002_steady_stryfe",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787084013878,
+      "tag": "0003_sleepy_dreaming_celestial",
+      "breakpoints": true
     }
   ]
 }

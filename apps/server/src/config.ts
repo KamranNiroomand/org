@@ -40,6 +40,8 @@ const schema = z.object({
   POLYGON_API_KEY: z.string().optional(),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
   OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
+  // Artificial starting balance for the paper book, in whole dollars.
+  PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
 
   DEFAULT_CALENDAR: z.enum(['miladi', 'shamsi']).default('miladi'),
   BASE_CURRENCY: z.string().default('CAD'),
@@ -167,6 +169,8 @@ export const config = {
      */
     captureCron: env.OPTIONS_CAPTURE_CRON,
     captureTimezone: 'America/New_York',
+    /** E4 — same unit as every other dollar figure in this database. */
+    paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
   },
 
   syncCron: env.SYNC_CRON,

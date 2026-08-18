@@ -16,6 +16,7 @@ import { listUniverse, seedUniverse, toVendorSymbol } from './options/universe.j
 import { syncRates } from './options/rates.js';
 import { snapshotMarketDb } from '../db/market/snapshot.js';
 import { isRunner } from './options/role.js';
+import { markOpenPositions, computeDailyEquity } from './paper.js';
 
 /**
  * The nightly job.
@@ -242,6 +243,21 @@ export async function runOptionsCapture(
       `Options: ${summary.quotesWritten} quotes across ${summary.symbolsDone} symbols, ` +
         `${summary.liquidWritten} tradeable, ${summary.pricedWritten} priced`,
     );
+
+    // Marking runs on the runner, right after capture, so a position opened
+    // today is marked against tonight's own quotes rather than waiting for
+    // tomorrow's job — the whole point of an equity curve is that it moves
+    // every day capture runs, not every day someone happens to look at it.
+    if (isRunner()) {
+      try {
+        const tradingDay = new Date().toISOString().slice(0, 10);
+        const marks = markOpenPositions(tradingDay);
+        computeDailyEquity(tradingDay);
+        log.info(`Paper book: ${marks.marked} position(s) marked, ${marks.skipped.length} skipped`);
+      } catch (err) {
+        result.errors.push(`Paper marking: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     // A snapshot only matters if there is somewhere to pull it from — never
     // taken on a reader, which has no runner-scheduled capture to follow
