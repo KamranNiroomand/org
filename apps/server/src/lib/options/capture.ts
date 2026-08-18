@@ -149,7 +149,7 @@ function persistChain(
  * determine no volatility anyway — a penny mid or a stale two-sided market —
  * so solving them would spend time to produce nulls.
  */
-async function enrichChain(
+export async function enrichChain(
   chain: readonly ChainQuote[],
   thresholds: LiquidityThresholds,
   dividendYield: (symbol: string) => number,
