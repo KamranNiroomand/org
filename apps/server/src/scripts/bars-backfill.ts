@@ -12,6 +12,7 @@ import { listUniverse, seedUniverse, toVendorSymbol } from '../lib/options/unive
  * restates prior bars after a split.
  *
  *   npm run bars:backfill -w @org/server -- --years 2
+ *   npm run bars:backfill -w @org/server -- --years 2 --resume
  */
 runMarketMigrations();
 
@@ -32,14 +33,35 @@ seedUniverse();
 // `--symbols SPY,AAPL` restricts the run, for a first look before committing
 // to hundreds of requests.
 const symbolsArg = process.argv.indexOf('--symbols');
-const symbols =
+const requested =
   symbolsArg >= 0
     ? (process.argv[symbolsArg + 1] ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
     : listUniverse({ activeOnly: true }).map((u) => toVendorSymbol(u.symbol));
 
-if (symbols.length === 0) {
+if (requested.length === 0) {
   console.error('\n  No symbols to backfill.\n');
   process.exit(1);
+}
+
+/**
+ * `--resume` skips symbols that already have a full window of bars.
+ *
+ * Worth having as an explicit flag rather than the default: the first real
+ * run of this script hit a vendor rate limit partway through, and resuming
+ * it by re-requesting the whole universe wasted a meaningful share of a
+ * limited per-minute quota re-fetching two hundred symbols already saved.
+ * "Full" is judged against the requested year count with a few days of
+ * slack for holidays and early closes, not an exact day count — the vendor's
+ * calendar and ours will never agree to the day.
+ */
+const resume = process.argv.includes('--resume');
+let symbols = requested;
+if (resume) {
+  const coverage = new Map(barCoverage().map((c) => [c.symbol, c.days]));
+  const minDays = Math.round(years * 252 * 0.9);
+  const before = symbols.length;
+  symbols = symbols.filter((s) => (coverage.get(s) ?? 0) < minDays);
+  console.log(`  --resume: ${before - symbols.length} already-covered symbol(s) skipped`);
 }
 
 const to = new Date().toISOString().slice(0, 10);
