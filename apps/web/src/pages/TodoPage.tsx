@@ -1,78 +1,30 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Flag, Inbox, Trash2 } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { Inbox } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { parseQuickAdd, todayCivil, civilKey, type Priority } from '@org/shared';
-import { DualDate } from '../components/DualDate';
+import { todayCivil, civilKey, type Task } from '@org/shared';
 import { Page, PageHeader } from '../components/PageHeader';
-import { Badge, Card, Empty, Input, Skeleton, cn } from '../components/ui';
+import { StickyBoard } from '../components/StickyBoard';
+import { TaskComposer } from '../components/TaskComposer';
+import { TaskEditDialog } from '../components/TaskEditDialog';
+import { TaskRow } from '../components/TaskRow';
+import { Card, Empty, Skeleton, cn } from '../components/ui';
 import { api } from '../lib/api';
+import { taskKeys } from '../lib/tasks';
 
-interface Task {
-  id: string;
-  title: string;
-  notes: string | null;
-  status: 'open' | 'done' | 'dropped';
-  priority: Priority;
-  dueOn: string | null;
-  projectId: string | null;
-  tags: string[];
-}
-
-const PRIORITY_TONE: Record<Priority, 'neutral' | 'accent' | 'warning' | 'negative'> = {
-  none: 'neutral',
-  low: 'neutral',
-  medium: 'accent',
-  high: 'warning',
-  urgent: 'negative',
-};
-
+/**
+ * The Todo tab is the *inbox*: loose tasks that belong to no project. Project
+ * work lives on its project page, where it can be ordered and estimated against
+ * the rest of that project — mixing the two here would make both lists worse.
+ */
 export function TodoPage() {
   const [filter, setFilter] = useState<'open' | 'done' | 'all'>('open');
-  const [draft, setDraft] = useState('');
-  const qc = useQueryClient();
+  const [editing, setEditing] = useState<Task | null>(null);
   const today = civilKey(todayCivil());
 
   const { data: tasks, isLoading } = useQuery({
-    queryKey: ['tasks', filter],
-    queryFn: () => api.get<Task[]>(`/api/tasks?status=${filter}`),
+    queryKey: taskKeys.inbox(filter),
+    queryFn: () => api.get<Task[]>(`/api/tasks?status=${filter}&projectId=none`),
   });
-
-  const invalidate = () => {
-    void qc.invalidateQueries({ queryKey: ['tasks'] });
-    void qc.invalidateQueries({ queryKey: ['agenda'] });
-    void qc.invalidateQueries({ queryKey: ['projects'] });
-  };
-
-  const create = useMutation({
-    mutationFn: (line: string) => {
-      const p = parseQuickAdd(line);
-      return api.post('/api/tasks', {
-        title: p.title,
-        dueOn: p.dueOn,
-        priority: p.priority,
-        tags: p.tags,
-      });
-    },
-    onSuccess: () => {
-      setDraft('');
-      invalidate();
-    },
-  });
-
-  const toggle = useMutation({
-    mutationFn: (t: Task) =>
-      api.patch(`/api/tasks/${t.id}`, { status: t.status === 'done' ? 'open' : 'done' }),
-    onSuccess: invalidate,
-  });
-
-  const remove = useMutation({
-    mutationFn: (id: string) => api.del(`/api/tasks/${id}`),
-    onSuccess: invalidate,
-  });
-
-  // Live preview of what the quick-add line will produce, so the syntax is
-  // discoverable by using it rather than by reading documentation.
-  const preview = useMemo(() => (draft.trim() ? parseQuickAdd(draft) : null), [draft]);
 
   const groups = useMemo(() => {
     if (!tasks) return [];
@@ -115,136 +67,62 @@ export function TodoPage() {
       />
 
       <Page>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (draft.trim()) create.mutate(draft);
-          }}
-          className="mb-5"
-        >
-          <Input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="pay hydro bill friday !high #home"
-            className="h-11"
-            autoFocus
-          />
-          {preview && (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5 px-1 text-xs text-muted">
-              <span className="text-text">{preview.title || '…'}</span>
-              {preview.dueOn && (
-                <Badge tone="accent">
-                  <DualDate date={preview.dueOn} style="short" />
-                </Badge>
-              )}
-              {preview.priority !== 'none' && (
-                <Badge tone={PRIORITY_TONE[preview.priority]}>{preview.priority}</Badge>
-              )}
-              {preview.tags.map((t) => (
-                <Badge key={t}>#{t}</Badge>
+        {/* The notes rail sits beside the list on a wide screen and stacks
+            underneath it on anything narrower, rather than squeezing both. */}
+        <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_22rem] xl:items-start xl:gap-6">
+          <div className="min-w-0">
+            <TaskComposer autoFocus className="mb-5" />
+
+            {isLoading && (
+              <div className="space-y-2">
+                {[0, 1, 2].map((i) => (
+                  <Skeleton key={i} className="h-12" />
+                ))}
+              </div>
+            )}
+
+            {tasks?.length === 0 && (
+              <Card>
+                <Empty
+                  icon={<Inbox className="size-7" />}
+                  title="Nothing here"
+                  hint="Type above to add your first task. Try “review budget friday !high #money”."
+                />
+              </Card>
+            )}
+
+            <div className="space-y-6">
+              {groups.map(([label, items]) => (
+                <section key={label}>
+                  <h2
+                    className={cn(
+                      'mb-1.5 px-1 text-[11px] font-semibold tracking-wide uppercase',
+                      label === 'Overdue' ? 'text-negative' : 'text-faint',
+                    )}
+                  >
+                    {label} <span className="font-normal opacity-60">{items.length}</span>
+                  </h2>
+
+                  <Card className="divide-y divide-border overflow-hidden">
+                    {items.map((t) => (
+                      // No drag handle here on purpose: this list is grouped by
+                      // date, and a manual order that reshuffles itself at
+                      // midnight is worse than no manual order at all.
+                      <TaskRow key={t.id} task={t} today={today} onEdit={setEditing} />
+                    ))}
+                  </Card>
+                </section>
               ))}
             </div>
-          )}
-        </form>
-
-        {isLoading && (
-          <div className="space-y-2">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="h-12" />
-            ))}
           </div>
-        )}
 
-        {tasks?.length === 0 && (
-          <Card>
-            <Empty
-              icon={<Inbox className="size-7" />}
-              title="Nothing here"
-              hint="Type above to add your first task. Try “review budget friday !high #money”."
-            />
-          </Card>
-        )}
-
-        <div className="space-y-6">
-          {groups.map(([label, items]) => (
-            <section key={label}>
-              <h2
-                className={cn(
-                  'mb-1.5 px-1 text-[11px] font-semibold tracking-wide uppercase',
-                  label === 'Overdue' ? 'text-negative' : 'text-faint',
-                )}
-              >
-                {label} <span className="font-normal opacity-60">{items.length}</span>
-              </h2>
-
-              <Card className="divide-y divide-border overflow-hidden">
-                {items.map((t) => (
-                  <div key={t.id} className="group flex items-center gap-3 px-3 py-2.5">
-                    <button
-                      onClick={() => toggle.mutate(t)}
-                      className={cn(
-                        'flex size-[18px] shrink-0 items-center justify-center rounded-[6px] border transition-colors',
-                        t.status === 'done'
-                          ? 'border-accent bg-accent text-white'
-                          : 'border-border-strong hover:border-accent',
-                      )}
-                      aria-label={t.status === 'done' ? 'Mark as open' : 'Mark as done'}
-                    >
-                      {t.status === 'done' && <Check className="size-3" strokeWidth={3} />}
-                    </button>
-
-                    <div className="min-w-0 flex-1">
-                      <div
-                        className={cn(
-                          'truncate text-sm',
-                          t.status === 'done' && 'text-faint line-through',
-                        )}
-                      >
-                        {t.title}
-                      </div>
-                      {t.tags.length > 0 && (
-                        <div className="mt-1 flex gap-1">
-                          {t.tags.map((tag) => (
-                            <span key={tag} className="text-[11px] text-faint">
-                              #{tag}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {t.priority !== 'none' && (
-                      <Badge tone={PRIORITY_TONE[t.priority]}>
-                        <Flag className="mr-0.5 size-2.5" />
-                        {t.priority}
-                      </Badge>
-                    )}
-
-                    {t.dueOn && (
-                      <span
-                        className={cn(
-                          'shrink-0 text-xs',
-                          t.dueOn < today && t.status === 'open' ? 'text-negative' : 'text-muted',
-                        )}
-                      >
-                        <DualDate date={t.dueOn} style="short" />
-                      </span>
-                    )}
-
-                    <button
-                      onClick={() => remove.mutate(t.id)}
-                      className="shrink-0 rounded p-1 text-faint opacity-0 transition-opacity group-hover:opacity-100 hover:text-negative"
-                      aria-label="Delete task"
-                    >
-                      <Trash2 className="size-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </Card>
-            </section>
-          ))}
+          <div className="mt-8 xl:mt-0">
+            <StickyBoard />
+          </div>
         </div>
       </Page>
+
+      <TaskEditDialog task={editing} onClose={() => setEditing(null)} />
     </>
   );
 }

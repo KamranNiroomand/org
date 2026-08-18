@@ -3,6 +3,10 @@
 # Matched by prefix, not by exact name: a backup, a dated copy, or a
 # `.env.bak` written in a hurry carries exactly the same credentials as `.env`
 # itself, and an exact-match rule silently lets every one of them through.
+# Two branches hit this independently, each committing a pre-edit backup of
+# `.env` locally and catching it before it reached the remote, so the rule is
+# deliberately wider than either incident needed. `.env*` also covers bare
+# `.env`, which a `.env.*` rule does not.
 .env*
 !.env.example
 *.pem
@@ -50,3 +54,4 @@ logs/
 
 # Machine-local Claude Code permission grants
 .claude/settings.local.json
+

@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { parseQuickAdd } from '@org/shared';
 import { api } from '../lib/api';
+import { invalidateTasks } from '../lib/tasks';
 import { cn } from './ui';
 
 interface Command {
@@ -72,8 +73,7 @@ export function CommandPalette({
       });
     },
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ['tasks'] });
-      void qc.invalidateQueries({ queryKey: ['agenda'] });
+      invalidateTasks(qc);
       onOpenChange(false);
       navigate('/todo');
     },

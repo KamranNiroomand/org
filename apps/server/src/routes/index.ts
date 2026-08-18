@@ -8,7 +8,9 @@ import { claudeRoutes } from './claude.js';
 import { plaidRoutes } from './plaid.js';
 import { ideaRoutes } from './ideas.js';
 import { investmentRoutes } from './investments.js';
-import { projectRoutes, taskRoutes } from './tasks.js';
+import { projectRoutes } from './projects.js';
+import { stickyRoutes } from './stickies.js';
+import { taskRoutes } from './tasks.js';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   seedDefaultRules();
@@ -30,6 +32,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   await app.register(taskRoutes);
   await app.register(projectRoutes);
+  await app.register(stickyRoutes);
   await app.register(calendarRoutes);
   await app.register(financeRoutes);
   await app.register(investmentRoutes);
