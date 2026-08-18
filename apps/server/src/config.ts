@@ -30,6 +30,8 @@ const schema = z.object({
   // Options research. Market data lives in its own directory tree, separate
   // from org.db — see src/db/market/schema.ts for why.
   MARKET_DATA_DIR: z.string().optional(),
+  // runner = produces the corpus. reader = displays it. See config.market.role.
+  MARKET_ROLE: z.enum(['runner', 'reader']).default('runner'),
   MARKET_DB_PATH: z.string().optional(),
   POLYGON_API_KEY: z.string().optional(),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
@@ -114,6 +116,28 @@ export const config = {
     modelsDir: join(marketDataDir, 'models'),
     /** Days of quotes kept in SQLite before archival moves them to Parquet. */
     hotWindowDays: 90,
+
+    /**
+     * Which side of a two-machine setup this process is.
+     *
+     * The corpus can live in a synced folder — Google Drive, iCloud, Dropbox —
+     * shared between a machine that produces it and one that displays it. That
+     * arrangement has exactly one rule, and breaking it is silent and
+     * expensive: **one writer, many readers.** Two machines writing the same
+     * synced files produce conflicted copies, and a Parquet file caught
+     * mid-sync is simply corrupt.
+     *
+     *   runner  captures chains, trains, writes the corpus. One machine only.
+     *   reader  reads the corpus and renders it. Never writes to the shared
+     *           directory, and never schedules a capture.
+     *
+     * A reader still writes its *own* local SQLite, which is a cache rebuilt
+     * from the Parquet rather than shared state. That distinction is the whole
+     * reason the corpus is Parquet-first: the file two machines both touch has
+     * to be one that tolerates being copied whole.
+     */
+    role: env.MARKET_ROLE,
+    isRunner: env.MARKET_ROLE === 'runner',
     polygonKey: env.POLYGON_API_KEY ?? null,
     configured: Boolean(env.POLYGON_API_KEY),
     /**

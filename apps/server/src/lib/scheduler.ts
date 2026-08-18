@@ -293,7 +293,12 @@ export function startScheduler(log: FastifyBaseLogger): void {
   const next = getNextRun();
   log.info(`Nightly sync scheduled (${config.syncCron}), next run ${next ?? 'unknown'}`);
 
-  if (config.market.configured) {
+  if (!config.market.isRunner) {
+    log.info(
+      'Option capture not scheduled — MARKET_ROLE=reader. This machine displays ' +
+        'a corpus produced elsewhere.',
+    );
+  } else if (config.market.configured) {
     if (!cron.validate(config.market.captureCron)) {
       log.error(
         `OPTIONS_CAPTURE_CRON is not valid: "${config.market.captureCron}" — capture disabled`,

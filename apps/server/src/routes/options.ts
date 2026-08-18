@@ -61,6 +61,7 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
 
     return {
       configured: config.market.configured,
+      role: config.market.role,
       dataDir: config.market.dataDir,
       quantUp: await quantHealthy(),
       nextCapture: getNextCaptureRun(),
@@ -84,6 +85,11 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
 
   /** Manual capture, for a first run or to fill in after the machine slept. */
   app.post('/api/options/capture', async (_req, reply) => {
+    if (!config.market.isRunner) {
+      return reply
+        .code(409)
+        .send({ error: 'This machine is a reader; capture runs on the runner machine.' });
+    }
     if (!config.market.configured) {
       return reply.code(400).send({ error: 'POLYGON_API_KEY is not set' });
     }
