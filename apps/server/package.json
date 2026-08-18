@@ -17,7 +17,8 @@
     "db:migrate:market": "tsx --env-file-if-exists=../../.env src/db/market/migrate.ts",
     "options:check": "tsx --env-file-if-exists=../../.env src/scripts/options-check.ts",
     "options:seed": "tsx --env-file-if-exists=../../.env src/scripts/options-seed.ts",
-    "rates:sync": "tsx --env-file-if-exists=../../.env src/scripts/rates-sync.ts"
+    "rates:sync": "tsx --env-file-if-exists=../../.env src/scripts/rates-sync.ts",
+    "bars:backfill": "tsx --env-file-if-exists=../../.env src/scripts/bars-backfill.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
