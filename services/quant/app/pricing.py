@@ -36,6 +36,26 @@ _INV_SQRT_2PI = 1.0 / _SQRT_2PI
 _EPS = 1e-12
 
 
+def years_to_expiry(expiry: str, as_of_day: str) -> float:
+    """Calendar days over 365, from `as_of_day` to `expiry` (both YYYY-MM-DD).
+
+    Mirrors `yearsToExpiry` in `@org/shared`'s `options.ts` exactly — same
+    convention, same reasoning, kept as one decision rather than two
+    languages independently guessing the same rule. That convention was
+    settled empirically, not assumed: solving a real broker's chain under
+    competing time bases, calendar-days-over-365 matched published implied
+    vols within about 3 vol points total across six strikes, while every
+    trading-day alternative disagreed by 24 or more. See
+    `test_pricing.py::test_calendar_day_time_basis_is_the_one_the_chain_agrees_with`.
+    """
+    from datetime import date
+
+    y, m, d = (int(x) for x in expiry.split("-"))
+    ay, am, ad = (int(x) for x in as_of_day[:10].split("-"))
+    days = (date(y, m, d) - date(ay, am, ad)).days
+    return days / 365.0
+
+
 def norm_cdf(x: float) -> float:
     """Standard normal CDF.
 
