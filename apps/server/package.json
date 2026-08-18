@@ -20,7 +20,8 @@
     "rates:sync": "tsx --env-file-if-exists=../../.env src/scripts/rates-sync.ts",
     "bars:backfill": "tsx --env-file-if-exists=../../.env src/scripts/bars-backfill.ts",
     "market:snapshot": "tsx --env-file-if-exists=../../.env src/scripts/market-snapshot.ts",
-    "market:pull": "tsx --env-file-if-exists=../../.env src/scripts/market-pull.ts"
+    "market:pull": "tsx --env-file-if-exists=../../.env src/scripts/market-pull.ts",
+    "models:pull": "tsx --env-file-if-exists=../../.env src/scripts/models-pull.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
