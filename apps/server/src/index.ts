@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import Fastify from 'fastify';
 import { config } from './config.js';
 import { runMigrations } from './db/migrate.js';
+import { runMarketMigrations } from './db/market/migrate.js';
 import { registerAuth } from './auth.js';
 import { registerRoutes } from './routes/index.js';
 import { startScheduler } from './lib/scheduler.js';
@@ -16,6 +17,10 @@ const app = Fastify({
 
 async function main() {
   runMigrations();
+  // Every migration up to this point had been applied by hand during
+  // development — this was the one call missing to make that automatic, the
+  // same way the personal database already works.
+  runMarketMigrations();
 
   await app.register(cookie);
   await app.register(cors, {
