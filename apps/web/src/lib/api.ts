@@ -87,7 +87,16 @@ export interface TransactionRow {
 
 export interface MonthSummary {
   month: string;
-  income: number;
+  /**
+   * `null` means "not applicable" — no included account can produce this
+   * figure, e.g. `income` when only credit cards are selected — never
+   * "zero this month". A `null` tile should be hidden, not rendered as $0.
+   */
+  income: number | null;
+  payments: number | null;
+  refunds: number | null;
+  interest: number | null;
+  deposits: number | null;
   expense: number;
   net: number;
   transactionCount: number;

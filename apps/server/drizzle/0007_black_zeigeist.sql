@@ -1,0 +1,1 @@
+ALTER TABLE `transactions` ADD `personal_finance_category` text;

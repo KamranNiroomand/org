@@ -219,7 +219,19 @@ export const categories = sqliteTable(
     id: id(),
     name: text('name').notNull(),
     parentId: text('parent_id'),
-    kind: text('kind', { enum: ['expense', 'income', 'transfer'] })
+    /**
+     * 'payment' and 'refund' exist alongside income/expense/transfer because
+     * neither behaves like the other three. A card payment is not spending
+     * (the spend was already counted when the purchase happened) and it is
+     * not a transfer in the excluded-from-everything sense either — the
+     * counterparty account usually is not synced, so there is nothing to net
+     * it against, and it deserves to be visible as its own figure rather than
+     * silently discarded. A refund is real money back, but crediting it as
+     * income would overstate what you earned, and netting it against the
+     * original purchase's category was deliberately rejected in favour of a
+     * separate, visible total — see the finance summary endpoint.
+     */
+    kind: text('kind', { enum: ['expense', 'income', 'transfer', 'payment', 'refund'] })
       .notNull()
       .default('expense'),
     color: text('color').notNull().default('slate'),
@@ -248,6 +260,16 @@ export const transactions = sqliteTable(
     /** Minor units, normalized: negative = money out, positive = money in. */
     amount: integer('amount').notNull(),
     currency: text('currency').notNull().default('CAD'),
+    /**
+     * Plaid's own classification (the `primary` field of
+     * `personal_finance_category`, e.g. "LOAN_PAYMENTS", "INCOME",
+     * "TRANSFER_IN"). Far more reliable than guessing from merchant text —
+     * a bank's own wording for "you paid your card" varies, Plaid's category
+     * for it does not. Only present on transactions synced after this field
+     * was added; older rows fall back to a text-pattern heuristic. See
+     * classifyByAccountContext in categorize.ts.
+     */
+    personalFinanceCategory: text('personal_finance_category'),
     name: text('name').notNull(),
     merchantName: text('merchant_name'),
     categoryId: text('category_id').references(() => categories.id, { onDelete: 'set null' }),

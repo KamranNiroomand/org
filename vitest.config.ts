@@ -26,6 +26,14 @@ export default defineConfig({
       // real research corpus, which by then holds years of captured quotes that
       // cannot be re-fetched.
       MARKET_DATA_DIR: join(tmpdir(), 'org-vitest-market'),
+      // The same hazard applies to the personal database — anything that
+      // imports src/db/index.ts (categorize.ts, most of routes/) opens a
+      // handle to it at import time, with no test ever having exercised that
+      // path before this redirect existed. Left unredirected, a test as
+      // innocuous-looking as "assert this function returns a category name"
+      // would open a connection to real bank transactions as a side effect of
+      // its own import chain.
+      DB_PATH: join(tmpdir(), 'org-vitest-personal', 'org.db'),
     },
   },
 });
