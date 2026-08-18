@@ -33,7 +33,7 @@ const schema = z.object({
   MARKET_DB_PATH: z.string().optional(),
   POLYGON_API_KEY: z.string().optional(),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
-  OPTIONS_CAPTURE_CRON: z.string().default('30 17 * * 1-5'),
+  OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
 
   DEFAULT_CALENDAR: z.enum(['miladi', 'shamsi']).default('miladi'),
   BASE_CURRENCY: z.string().default('CAD'),
@@ -123,11 +123,20 @@ export const config = {
     quantUrl: env.QUANT_URL,
     /**
      * Chains are captured after the US close, not at 06:00 with the rest of
-     * the nightly job — a snapshot taken the next morning would carry the
-     * following day's underlying price against the previous day's quotes.
-     * 17:30 on weekdays, local time, is comfortably after 16:00 ET.
+     * the nightly job — a snapshot taken next morning would pair tomorrow's
+     * underlying price with yesterday's quotes.
+     *
+     * **Interpreted in US Eastern, not the host's local time.** This schedule
+     * belongs to the market's clock rather than yours: the same wall-clock
+     * time is 45 minutes after the close in Toronto and exactly on the bell in
+     * Newfoundland. The 06:00 bank sync is correctly local, because that one
+     * is about your morning; this one is about the closing auction.
+     *
+     * 16:45 Eastern leaves room for the closing prints and for the 15-minute
+     * delay on the data plan.
      */
     captureCron: env.OPTIONS_CAPTURE_CRON,
+    captureTimezone: 'America/New_York',
   },
 
   syncCron: env.SYNC_CRON,
