@@ -20,7 +20,15 @@ import type { OptionsProvider } from './provider.js';
  * validated long before the execution half has data worth trusting.
  */
 
-const CONCURRENCY = 6;
+/**
+ * Deliberately low. The vendor's pricing page advertises "Unlimited API
+ * Calls" on this plan, which turns out to mean no monthly cap — it says
+ * nothing about a per-minute one, and there is an undisclosed per-minute
+ * ceiling underneath it regardless. The first real backfill run, at 6, hit
+ * sustained 429s across dozens of symbols within minutes, on a plan whose
+ * marketing page implies no such limit exists.
+ */
+const CONCURRENCY = 2;
 /** Polygon caps an aggregates response at 50k rows; a decade of days is ~2.5k. */
 const CHUNK_YEARS = 2;
 
