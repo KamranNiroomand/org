@@ -2,7 +2,7 @@
   "name": "org",
   "private": true,
   "version": "0.1.0",
-  "description": "A personal OS — todos, projects, dual-calendar, finances, investments, ideas",
+  "description": "A personal OS \u2014 todos, projects, dual-calendar, finances, investments, ideas",
   "type": "module",
   "workspaces": [
     "packages/*",
@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev": "concurrently -n server,web,quant -c cyan,magenta,yellow \"npm:dev:server\" \"npm:dev:web\" \"npm:dev:quant\"",
     "dev:server": "npm run dev -w @org/server",
     "dev:web": "npm run dev -w @org/web",
     "build": "npm run build -w @org/web",
@@ -25,7 +25,9 @@
     "db:seed": "npm run db:seed -w @org/server",
     "db:studio": "npm run db:studio -w @org/server",
     "plaid:check": "npm run plaid:check -w @org/server",
-    "backup": "npm run backup -w @org/server"
+    "backup": "npm run backup -w @org/server",
+    "dev:quant": "uv run --project services/quant uvicorn app.main:app --host 127.0.0.1 --port 5175 --reload --app-dir services/quant",
+    "test:quant": "uv run --project services/quant pytest -q"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

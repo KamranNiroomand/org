@@ -12,7 +12,12 @@
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio",
     "plaid:check": "tsx --env-file-if-exists=../../.env src/scripts/plaid-check.ts",
-    "backup": "tsx --env-file-if-exists=../../.env src/scripts/backup.ts"
+    "backup": "tsx --env-file-if-exists=../../.env src/scripts/backup.ts",
+    "db:generate:market": "drizzle-kit generate --config drizzle.market.config.ts",
+    "db:migrate:market": "tsx --env-file-if-exists=../../.env src/db/market/migrate.ts",
+    "options:check": "tsx --env-file-if-exists=../../.env src/scripts/options-check.ts",
+    "options:seed": "tsx --env-file-if-exists=../../.env src/scripts/options-seed.ts",
+    "rates:sync": "tsx --env-file-if-exists=../../.env src/scripts/rates-sync.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

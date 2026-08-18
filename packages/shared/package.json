@@ -10,7 +10,8 @@
     "./date": "./src/date/index.ts",
     "./money": "./src/money.ts",
     "./duration": "./src/duration.ts",
-    "./types": "./src/types.ts"
+    "./types": "./src/types.ts",
+    "./options": "./src/options.ts"
   },
   "scripts": {
     "typecheck": "tsc -b"
