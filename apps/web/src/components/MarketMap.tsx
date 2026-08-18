@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { RefreshCw, Search } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ResponsiveContainer, Tooltip, Treemap } from 'recharts';
 import { Button, Card, CardHeader, Skeleton, cn } from './ui';
 import { api } from '../lib/api';
@@ -163,8 +163,104 @@ const PE_BANDS: Array<[string, string]> = [
   ['none', 'No P/E (loss-making)'],
 ];
 
-/** Boxes below this share of the canvas cannot fit a legible label. */
+/**
+ * A treemap box only carries information if it can be read. Below the size the
+ * `Box` renderer needs for a symbol, a rectangle conveys nothing but colour —
+ * and a field of unlabelled rectangles reads as a rendering fault rather than
+ * as "these companies are small".
+ *
+ * `MAX_BOXES` is the ceiling; the count actually drawn is derived from the
+ * canvas, because 120 boxes are legible on a wide desktop and are not on a
+ * narrow window. See `labelableBoxCount`.
+ */
 const MAX_BOXES = 120;
+
+/**
+ * Must match the thresholds in `Box`, which is what decides to draw a label.
+ *
+ * Measured rather than guessed. On a 971x372 canvas the treemap lays boxes out
+ * in bands of roughly constant height — 60px at the small end — so the binding
+ * constraint is *width*, not area: a 19x60 box has plenty of area and still
+ * cannot hold a ticker. At the old 42px threshold only 51 of 121 boxes carried
+ * a label; at 28px, 95 do, and a four-character symbol at 8px still reads
+ * cleanly in 28px.
+ */
+const MIN_LABEL_WIDTH = 28;
+const MIN_LABEL_HEIGHT = 14;
+/**
+ * Area needed to imply the width above. Using `MIN_LABEL_WIDTH x
+ * MIN_LABEL_HEIGHT` is far too generous — a 19x41 box clears it on area and
+ * still cannot hold a ticker — so this multiplies the width by a
+ * representative band height instead.
+ *
+ * 45 is measured, not assumed: across a full render the boxes that failed the
+ * width test were 28 to 45 pixels tall. Taking the tallest band (60) instead
+ * over-corrects badly, cutting the map from 120 boxes to 58 and throwing away
+ * half its breadth to eliminate a handful of blanks.
+ */
+const TYPICAL_BAND = 45;
+const MIN_LABEL_AREA = MIN_LABEL_WIDTH * TYPICAL_BAND;
+
+/**
+ * How many of `values` (descending) can be drawn and still be labelled.
+ *
+ * A treemap gives each box an area proportional to its share of the total
+ * drawn, so the smallest box of the first N is `area * v[N-1] / sum(v[0..N-1])`.
+ * Adding a box both shrinks the smallest value and grows the denominator, so
+ * that quantity falls monotonically and the largest workable N is found by
+ * walking until it drops under the threshold.
+ *
+ * Area is a fair proxy here because squarified treemaps keep boxes close to
+ * square; a long thin box of sufficient area is possible but rare.
+ */
+function labelableBoxCount(values: readonly number[], width: number, height: number): number {
+  const ceiling = Math.min(values.length, MAX_BOXES);
+  // Before the first measurement, draw the ceiling rather than nothing — one
+  // frame of over-drawing beats a visibly empty panel on load.
+  if (width <= 0 || height <= 0) return ceiling;
+
+  const area = width * height;
+  let total = 0;
+  let count = 0;
+  for (let i = 0; i < ceiling; i += 1) {
+    const v = values[i] ?? 0;
+    if (v <= 0) break;
+    total += v;
+    if ((area * v) / total < MIN_LABEL_AREA) break;
+    count = i + 1;
+  }
+  // Always show something, even on a canvas too small for the rule.
+  return Math.max(count, Math.min(ceiling, 1));
+}
+
+/**
+ * Tracks an element's rendered size, so the box count can follow the window.
+ *
+ * A **callback ref** rather than `useRef` + `useLayoutEffect`. The chart only
+ * mounts once the query resolves, so an effect with an empty dependency list
+ * runs while the node is still absent, bails, and never retries — leaving the
+ * size permanently at zero and the box count permanently at its ceiling. A
+ * callback ref fires on attach and detach, whenever those happen.
+ */
+function useElementSize<T extends HTMLElement>() {
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const observerRef = useRef<ResizeObserver | null>(null);
+
+  const ref = useCallback((node: T | null) => {
+    observerRef.current?.disconnect();
+    if (!node) return;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) setSize({ width: rect.width, height: rect.height });
+    });
+    observer.observe(node);
+    observerRef.current = observer;
+  }, []);
+
+  useEffect(() => () => observerRef.current?.disconnect(), []);
+
+  return [ref, size] as const;
+}
 
 type SortKey = 'marketCap' | 'trailingPE' | 'dayChangePercent' | 'symbol' | 'dividendYield';
 
@@ -239,10 +335,20 @@ export function MarketMap() {
 
   const dark = isDark();
 
+  const [mapRef, mapSize] = useElementSize<HTMLDivElement>();
+
+  const byCap = useMemo(
+    () => [...filtered].sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0)),
+    [filtered],
+  );
+
+  const boxCount = useMemo(
+    () => labelableBoxCount(byCap.map((r) => r.marketCap ?? 0), mapSize.width, mapSize.height),
+    [byCap, mapSize.width, mapSize.height],
+  );
+
   const treeData = useMemo(() => {
-    const top = [...filtered]
-      .sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0))
-      .slice(0, MAX_BOXES);
+    const top = byCap.slice(0, boxCount);
     return top.map((r) => {
       const fill = heatColor(r.dayChangePercent, dark);
       return {
@@ -255,7 +361,7 @@ export function MarketMap() {
         label: labelColor(fill),
       };
     });
-  }, [filtered, dark]);
+  }, [byCap, boxCount, dark]);
 
   const sorted = useMemo(() => {
     const rows = [...filtered];
@@ -399,7 +505,7 @@ export function MarketMap() {
           </div>
         ) : (
           <>
-            <div className="h-[380px] px-2 pt-2">
+            <div ref={mapRef} className="h-[380px] px-2 pt-2">
               <ResponsiveContainer width="100%" height="100%">
                 <Treemap
                   data={treeData}
@@ -412,9 +518,9 @@ export function MarketMap() {
                 </Treemap>
               </ResponsiveContainer>
             </div>
-            {(data?.matched ?? 0) > MAX_BOXES && (
+            {(data?.matched ?? 0) > boxCount && (
               <p className="px-4 pb-2 pt-1 text-[11px] text-faint">
-                Drawing the {MAX_BOXES} largest of {data!.matched.toLocaleString()} matches — smaller
+                Drawing the {boxCount} largest of {data!.matched.toLocaleString()} matches — smaller
                 boxes would be unreadable.
                 {data!.matched > filtered.length &&
                   ` The table lists the largest ${filtered.length.toLocaleString()}.`}
@@ -528,7 +634,8 @@ interface BoxProps {
 
 /** One company. Label and percentage appear only where they actually fit. */
 function Box({ x = 0, y = 0, width = 0, height = 0, name, change, fill, label = '#ffffff' }: BoxProps) {
-  const showSymbol = width > 42 && height > 24;
+  const showSymbol = width > MIN_LABEL_WIDTH && height > MIN_LABEL_HEIGHT;
+  // The percentage needs a second line, so it asks for meaningfully more room.
   const showChange = width > 52 && height > 38;
   return (
     <g>
@@ -540,7 +647,9 @@ function Box({ x = 0, y = 0, width = 0, height = 0, name, change, fill, label = 
           textAnchor="middle"
           dominantBaseline="middle"
           fill={label}
-          fontSize={Math.min(13, width / 4.2)}
+          // Floored at 8px: below that a ticker is present but unreadable,
+          // which is worse than the honest blank it replaced.
+          fontSize={Math.max(8, Math.min(13, width / 4.2))}
           fontWeight={600}
         >
           {name}
