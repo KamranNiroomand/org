@@ -6,6 +6,7 @@ import { newId, nowIso } from '../util.js';
 import { priceBatch, quantHealthy, type PriceRow } from '../quant.js';
 import { evaluateLiquidity, type LiquidityThresholds, DEFAULT_LIQUIDITY } from './gate.js';
 import { curveFor, interpolateRate } from './rates.js';
+import { assertRunner } from './role.js';
 import type { ChainQuote, OptionsProvider } from './provider.js';
 
 /**
@@ -236,6 +237,9 @@ export async function captureChains(
   const maxDte = options.maxDte ?? MAX_DTE;
   const thresholds = options.thresholds ?? DEFAULT_LIQUIDITY;
   const dividendYield = options.dividendYield ?? (() => 0);
+
+  // Fail before touching anything, not halfway through a chain.
+  assertRunner('capture option chains');
 
   const runId = newId();
   const startedAt = nowIso();

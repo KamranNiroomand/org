@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import type { FastifyBaseLogger } from 'fastify';
 import { asc } from 'drizzle-orm';
 import { config } from '../config.js';
+import { nowIso } from './util.js';
 import { db } from '../db/index.js';
 import { holdings } from '../db/schema.js';
 import { syncAllFeeds } from './calendarFeeds.js';
@@ -9,6 +10,10 @@ import { sweepMarket } from './market.js';
 import { refreshUniverse } from './universe.js';
 import { syncAllItems, syncIsStale } from './plaid.js';
 import { fetchQuotes, fetchUsdCad, saveQuotes } from './quotes.js';
+import { PolygonProvider } from './options/polygon.js';
+import { captureChains } from './options/capture.js';
+import { listUniverse, seedUniverse, toVendorSymbol } from './options/universe.js';
+import { syncRates } from './options/rates.js';
 
 /**
  * The nightly job.
@@ -139,10 +144,127 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Option chain capture
+// ---------------------------------------------------------------------------
+
+/**
+ * Chains are captured on their own schedule, deliberately not folded into the
+ * 06:00 nightly job.
+ *
+ * A snapshot taken the next morning would pair tomorrow's underlying price
+ * with yesterday's contract prices, and every implied vol derived from that
+ * pairing would be wrong in a way nothing downstream could detect. So capture
+ * runs after the US close instead — 17:30 local by default, comfortably past
+ * 16:00 Eastern.
+ *
+ * There is no backfilling a missed evening. Contract quotes are the one thing
+ * in this system that cannot be re-fetched at any price, so a night the
+ * machine sleeps is a night permanently absent from the corpus. That is why
+ * this runs on a fixed schedule rather than on demand, and why a catch-up
+ * fires shortly after boot.
+ */
+let capturing = false;
+
+export interface CaptureJobResult {
+  startedAt: string;
+  finishedAt: string;
+  universe: number;
+  symbols: number;
+  contracts: number;
+  quotes: number;
+  liquid: number;
+  priced: number;
+  rateRows: number;
+  quantAvailable: boolean;
+  errors: string[];
+}
+
+export async function runOptionsCapture(
+  log: FastifyBaseLogger,
+  reason: string,
+): Promise<CaptureJobResult> {
+  const startedAt = nowIso();
+  const result: CaptureJobResult = {
+    startedAt,
+    finishedAt: startedAt,
+    universe: 0,
+    symbols: 0,
+    contracts: 0,
+    quotes: 0,
+    liquid: 0,
+    priced: 0,
+    rateRows: 0,
+    quantAvailable: false,
+    errors: [],
+  };
+
+  if (!config.market.configured) {
+    result.errors.push('POLYGON_API_KEY is not set — chain capture skipped.');
+    return result;
+  }
+  if (capturing) {
+    result.errors.push('A capture was already in progress; skipped this run.');
+    return result;
+  }
+  capturing = true;
+  log.info(`Option capture starting (${reason})`);
+
+  try {
+    // Idempotent, and cheap when already populated. Keeps a fresh checkout
+    // from silently capturing nothing because no universe was ever seeded.
+    const seeded = seedUniverse();
+    result.universe = seeded.total;
+
+    try {
+      const rates = await syncRates([new Date().getUTCFullYear()]);
+      result.rateRows = rates.rows;
+    } catch (err) {
+      // Without a curve, implied vol is left null rather than solved against a
+      // made-up rate. Capture still proceeds: the quotes are what matter.
+      result.errors.push(`Rate curve: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const symbols = listUniverse({ activeOnly: true }).map((u) => toVendorSymbol(u.symbol));
+    result.symbols = symbols.length;
+
+    const summary = await captureChains(new PolygonProvider(), symbols);
+    result.contracts = summary.contractsSeen;
+    result.quotes = summary.quotesWritten;
+    result.liquid = summary.liquidWritten;
+    result.priced = summary.pricedWritten;
+    result.quantAvailable = summary.quantAvailable;
+    result.errors.push(...summary.errors);
+
+    log.info(
+      `Options: ${summary.quotesWritten} quotes across ${summary.symbolsDone} symbols, ` +
+        `${summary.liquidWritten} tradeable, ${summary.pricedWritten} priced`,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    result.errors.push(message);
+    log.error({ err }, 'Option capture failed');
+  } finally {
+    capturing = false;
+  }
+
+  result.finishedAt = nowIso();
+  return result;
+}
+
 let task: ReturnType<typeof cron.schedule> | null = null;
+let captureTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
+let lastCaptureResult: CaptureJobResult | null = null;
 
 export const getLastNightlyResult = (): NightlyResult | null => lastResult;
+export const getLastCaptureResult = (): CaptureJobResult | null => lastCaptureResult;
+
+/** Next scheduled chain capture, for the UI to show. */
+export function getNextCaptureRun(): string | null {
+  const next = captureTask?.getNextRun();
+  return next ? new Date(next).toISOString() : null;
+}
 
 /** Returns the next scheduled fire time, for display in the UI. */
 export function getNextRun(): string | null {
@@ -171,6 +293,36 @@ export function startScheduler(log: FastifyBaseLogger): void {
   const next = getNextRun();
   log.info(`Nightly sync scheduled (${config.syncCron}), next run ${next ?? 'unknown'}`);
 
+  if (!config.market.isRunner) {
+    log.info(
+      'Option capture not scheduled — MARKET_ROLE=reader. This machine displays ' +
+        'a corpus produced elsewhere.',
+    );
+  } else if (config.market.configured) {
+    if (!cron.validate(config.market.captureCron)) {
+      log.error(
+        `OPTIONS_CAPTURE_CRON is not valid: "${config.market.captureCron}" — capture disabled`,
+      );
+    } else {
+      captureTask = cron.schedule(
+        config.market.captureCron,
+        () => {
+          void runOptionsCapture(log, 'scheduled').then((r) => {
+            lastCaptureResult = r;
+          });
+        },
+        // Eastern, not local — see config.market.captureCron.
+        { timezone: config.market.captureTimezone },
+      );
+      log.info(
+        `Option capture scheduled (${config.market.captureCron} ` +
+          `${config.market.captureTimezone}), next run ${getNextCaptureRun() ?? 'unknown'}`,
+      );
+    }
+  } else {
+    log.info('Option capture disabled — POLYGON_API_KEY is not set');
+  }
+
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
   // delay keeps startup fast and avoids racing the first request.
   setTimeout(() => {
@@ -185,4 +337,6 @@ export function startScheduler(log: FastifyBaseLogger): void {
 export function stopScheduler(): void {
   task?.stop();
   task = null;
+  captureTask?.stop();
+  captureTask = null;
 }
