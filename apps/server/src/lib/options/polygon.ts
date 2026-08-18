@@ -28,8 +28,17 @@ import {
 
 const BASE = 'https://api.polygon.io';
 
-/** Polite ceiling on in-flight requests. Unlimited-call plans still throttle. */
-const MAX_CONCURRENCY = 8;
+/**
+ * Polite ceiling on in-flight requests.
+ *
+ * "Unlimited API Calls" on this plan means no monthly cap, not no rate limit
+ * — confirmed the hard way when a backfill at concurrency 6 drew sustained
+ * 429s within minutes. Currently unused as a default (`capture.ts` fetches
+ * one symbol at a time on purpose, and `backfill.ts` sets its own limit)
+ * but kept here as the one place a future caller should look before
+ * assuming more concurrency is free.
+ */
+const MAX_CONCURRENCY = 2;
 const MAX_RETRIES = 4;
 
 interface PolygonEnvelope<T> {
