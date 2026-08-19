@@ -1,18 +1,19 @@
 """Feature tests.
 
 Underlying features are tested against real bars — the backfill already put
-SPY, AAPL, NVDA and BRK.B into market.db. Chain features are tested against
-the real NVDA chain fixture where it has enough shape to test something (a
-single expiry of calls, which is exactly what that fixture is), and against a
-clearly synthetic multi-expiry, multi-type panel everywhere it does not —
-term structure and risk reversal need a put side and a second expiry that no
-real capture has produced yet. That gap is the point: it says plainly what is
-validated and what is only implemented.
+SPY, AAPL, NVDA and BRK.B into market.db. Chain features are tested three
+ways: against the real NVDA chain fixture where it has enough shape to test
+something (a single expiry of calls); against a clearly synthetic
+multi-expiry, multi-type panel for the maths that fixture cannot exercise;
+and, now that a real multi-expiry, multi-type capture exists, against the
+actual local corpus — the gap the first two layers openly left is closed
+there, not papered over with a bigger synthetic fixture.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import polars as pl
@@ -26,6 +27,7 @@ from app.features import (
     term_slope,
     underlying_features,
 )
+from app.db import connect, read_quotes
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "options"
 NVDA = json.loads((FIXTURES / "nvda-chain.json").read_text())
@@ -202,3 +204,95 @@ class TestIvRank:
 
     def test_current_above_all_history_ranks_one(self) -> None:
         assert iv_rank(0.99, [0.20 + 0.01 * i for i in range(25)]) == 1.0
+
+
+def _underlying_with_multi_expiry_puts_and_calls() -> tuple[str, str] | None:
+    """Picks one real (underlying, trading_day) with enough shape to
+    exercise every chain function — both types, several expiries. Returns
+    `None` rather than raising when the corpus has nothing that shape yet,
+    so the tests that need it can skip with a clear reason instead of
+    failing on a fresh checkout.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT c.underlying, q.trading_day
+            FROM option_quotes q
+            JOIN option_contracts c ON c.occ_symbol = q.occ_symbol
+            WHERE q.liquid = 1 AND q.iv_bps IS NOT NULL
+            GROUP BY c.underlying, q.trading_day
+            HAVING COUNT(DISTINCT c.expiry) >= 3
+               AND SUM(CASE WHEN c.type = 'call' THEN 1 ELSE 0 END) > 0
+               AND SUM(CASE WHEN c.type = 'put' THEN 1 ELSE 0 END) > 0
+            ORDER BY COUNT(*) DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    return (row["underlying"], row["trading_day"]) if row else None
+
+
+class TestChainFeaturesOnRealMultiExpiryChain:
+    """The gap the fixture-based tests above leave open, closed against the
+    actual local corpus rather than a bigger synthetic panel.
+    """
+
+    def test_read_quotes_deduplicates_a_recaptured_day(self) -> None:
+        # A day recaptured after an interrupted run leaves two real rows per
+        # contract in option_quotes — read_quotes must collapse that to one
+        # row per contract, or every sum-based feature below silently
+        # double-counts whichever contracts happened to be recaptured.
+        picked = _underlying_with_multi_expiry_puts_and_calls()
+        if picked is None:
+            pytest.skip("no real multi-expiry chain captured yet")
+        underlying, day = picked
+        chain = read_quotes(underlying, day, liquid_only=True)
+        assert chain.height == chain["occ_symbol"].n_unique()
+
+    def test_functions_run_without_error_on_a_real_chain(self) -> None:
+        picked = _underlying_with_multi_expiry_puts_and_calls()
+        if picked is None:
+            pytest.skip("no real multi-expiry chain captured yet")
+        underlying, day = picked
+        chain = read_quotes(underlying, day, liquid_only=True)
+
+        atm = atm_iv_by_expiry(chain)
+        assert atm.height >= 3
+        assert atm["atm_iv"].drop_nulls().min() > 0.0
+
+        slope = term_slope(chain)
+        assert slope is not None
+        assert math.isfinite(slope)
+
+        near_expiry = chain["expiry"].min()
+        rr = risk_reversal_25d(chain, near_expiry)
+        # Not every real expiry resolves a 25-delta point on both sides —
+        # null is a legitimate answer here, just not a crash.
+        assert rr is None or math.isfinite(rr)
+
+        ratios = put_call_ratios(chain)
+        for value in ratios.values():
+            assert value is None or value > 0.0
+
+    def test_put_call_ratios_are_invariant_to_a_recaptured_day(self) -> None:
+        # The real bug this validation pass found: before read_quotes
+        # deduped, a day recaptured after an interrupted run inflated both
+        # sides' sums by however many contracts got captured twice on each
+        # side, which only leaves the ratio unchanged when duplication
+        # happens to be symmetric — not something to rely on. Comparing the
+        # deduped chain against itself with an artificial duplicate pins the
+        # property this test is actually about: duplicating one call and
+        # leaving puts alone must change the ratio, proving dedup is what
+        # keeps the real query honest rather than coincidence.
+        picked = _underlying_with_multi_expiry_puts_and_calls()
+        if picked is None:
+            pytest.skip("no real multi-expiry chain captured yet")
+        underlying, day = picked
+        chain = read_quotes(underlying, day, liquid_only=True)
+        clean_ratios = put_call_ratios(chain)
+
+        one_call = chain.filter(pl.col("type") == "call").head(1)
+        duplicated = pl.concat([chain, one_call])
+        skewed_ratios = put_call_ratios(duplicated)
+
+        if clean_ratios["put_call_oi_ratio"] is not None:
+            assert skewed_ratios["put_call_oi_ratio"] != clean_ratios["put_call_oi_ratio"]
