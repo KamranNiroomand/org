@@ -95,14 +95,46 @@ export interface PaperEquityResponse {
   orders: PaperOrder[];
 }
 
+export interface RankedContract {
+  occ_symbol: string;
+  underlying: string;
+  expiry: string;
+  type: string;
+  strike: number;
+  dte: number;
+  market_price: number;
+  market_iv: number | null;
+  forecast_vol: number;
+  forecast_drift: number;
+  forecast_value: number;
+  ev: number;
+  ev_per_risk: number;
+  prob_profit: number;
+}
+
+export interface RankResponse {
+  model_run_id: string;
+  /** See rank.py's own module docstring — this is the fact that must never be hidden. */
+  model_beats_baseline: boolean;
+  model_information_coefficient: number;
+  contracts: RankedContract[];
+}
+
 export const optionsApi = {
   status: () => api.get<OptionsStatus>('/api/options/status'),
   triggerCapture: () => api.post<CaptureJobResult>('/api/options/capture'),
 
   paperEquity: () => api.get<PaperEquityResponse>('/api/paper/equity'),
-  openOrder: (body: { occSymbol: string; quantity: number; entryPriceE4?: number; notes?: string }) =>
-    api.post<{ id: string }>('/api/paper/orders', body),
+  openOrder: (body: {
+    occSymbol: string;
+    quantity: number;
+    entryPriceE4?: number;
+    notes?: string;
+    source?: 'manual' | 'model';
+  }) => api.post<{ id: string }>('/api/paper/orders', body),
   closeOrder: (id: string, exitPriceE4?: number) =>
     api.post<{ ok: true }>(`/api/paper/orders/${id}/close`, exitPriceE4 !== undefined ? { exitPriceE4 } : {}),
   markNow: () => api.post<{ tradingDay: string; marked: number; skipped: unknown[] }>('/api/paper/mark'),
+
+  rank: (day: string, top = 25) => api.get<RankResponse>(`/api/quant/rank?day=${day}&top=${top}`),
 };

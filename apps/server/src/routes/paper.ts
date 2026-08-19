@@ -9,11 +9,9 @@ import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperErro
 /**
  * Paper trading with artificial money.
  *
- * There is no ranked signal yet, so orders are opened by calling this API
- * directly. That is the actual intended use during this phase, not a
- * workaround — it is how the mechanics (fills, marks, the equity curve) get
- * proven correct on real captured quotes before anything automated is
- * allowed to open a position on its own.
+ * Orders open two ways — typed by hand, or one click off the ranked signal
+ * board — distinguished only by `source`; the mechanics below (fills, marks,
+ * the equity curve) are identical either way.
  */
 
 const openBody = z.object({
@@ -21,6 +19,7 @@ const openBody = z.object({
   quantity: z.number().int().positive(),
   entryPriceE4: z.number().positive().optional(),
   notes: z.string().max(500).optional(),
+  source: z.enum(['manual', 'model']).optional(),
 });
 
 const closeBody = z.object({

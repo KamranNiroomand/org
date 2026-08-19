@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.pricing import american_price, bsm_greeks, implied_vol
+from app.rank import RankedContract, latest_model_dir, load_model, rank_day
 
 app = FastAPI(title="org-quant", version="0.1.0")
 
@@ -166,3 +167,80 @@ def theoretical(request: TheoreticalRequest) -> dict[str, float]:
         "vega": g.vega,
         "theta": g.theta,
     }
+
+
+class RankRequest(BaseModel):
+    """Ranks gate-passing contracts by expected value under the current
+    forecast model — see rank.py's own module docstring for the full
+    scope and honest limitations of what that forecast actually is.
+    """
+
+    day: str = Field(description="Trading day, YYYY-MM-DD.")
+    top: int = 25
+    #: rank_day refuses to run against a model that hasn't beaten its own
+    #: baseline out-of-fold, unless told to anyway — see rank.py. Defaults
+    #: to True here because the caller (the UI) always needs a response to
+    #: show, with the model's real metrics surfaced in it rather than
+    #: hidden, not a silent refusal.
+    force: bool = True
+
+
+class RankedContractResponse(BaseModel):
+    occ_symbol: str
+    underlying: str
+    expiry: str
+    type: str
+    strike: float
+    dte: int
+    market_price: float
+    market_iv: float | None
+    forecast_vol: float
+    forecast_drift: float
+    forecast_value: float
+    ev: float
+    ev_per_risk: float
+    prob_profit: float
+
+    @classmethod
+    def from_ranked(cls, c: RankedContract) -> "RankedContractResponse":
+        return cls(
+            occ_symbol=c.occ_symbol, underlying=c.underlying, expiry=c.expiry, type=c.type,
+            strike=c.strike, dte=c.dte, market_price=c.market_price, market_iv=c.market_iv,
+            forecast_vol=c.forecast_vol, forecast_drift=c.forecast_drift,
+            forecast_value=c.forecast_value, ev=c.ev, ev_per_risk=c.ev_per_risk,
+            prob_profit=c.prob_profit,
+        )
+
+
+class RankResponse(BaseModel):
+    model_run_id: str
+    #: The single most important field in this response — see rank.py's
+    #: own refusal-by-default design. A caller that only reads `contracts`
+    #: and ignores this is exactly the mistake the whole harness exists to
+    #: prevent.
+    model_beats_baseline: bool
+    model_information_coefficient: float
+    contracts: list[RankedContractResponse]
+
+
+@app.post("/rank", response_model=RankResponse)
+def rank(request: RankRequest) -> RankResponse:
+    try:
+        model_dir = latest_model_dir()
+        _, manifest = load_model(model_dir)
+        ranked = rank_day(request.day, model_dir, top=request.top, force=request.force)
+    except SystemExit as e:
+        # rank_day and latest_model_dir raise SystemExit for every refusal
+        # (no trained model, no bars, no rate curve, model doesn't beat
+        # baseline) — the right behaviour for a CLI script exiting cleanly,
+        # but SystemExit inherits from BaseException, not Exception, and
+        # would otherwise escape straight past FastAPI's handling and take
+        # this whole shared sidecar process down with it.
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    return RankResponse(
+        model_run_id=manifest["run_id"],
+        model_beats_baseline=manifest["metrics"]["beats_baseline"],
+        model_information_coefficient=manifest["metrics"]["information_coefficient"],
+        contracts=[RankedContractResponse.from_ranked(c) for c in ranked],
+    )

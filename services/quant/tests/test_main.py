@@ -10,9 +10,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import lightgbm as lgb
+import numpy as np
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.rank import RankedContract
+from app.train import FEATURE_COLS
 
 client = TestClient(app)
 
@@ -148,3 +152,117 @@ def test_theoretical_round_trips_against_the_solver() -> None:
         },
     ).json()["results"][0]
     assert back["iv_bps"] == 3200
+
+
+def _write_fake_model(run_dir: Path, beats_baseline: bool) -> None:
+    """A real, tiny, trained booster — `load_model` runs unmocked in the
+    /rank handler before rank_day is ever reached, so this needs to be a
+    file LightGBM will actually load, not a placeholder.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    booster = lgb.LGBMRegressor(n_estimators=5, max_depth=2, verbosity=-1)
+    booster.fit(
+        np.random.default_rng(0).normal(size=(50, len(FEATURE_COLS))),
+        np.random.default_rng(1).normal(size=50),
+    )
+    booster.booster_.save_model(str(run_dir / "model.txt"))
+    (run_dir / "features.json").write_text(json.dumps({"feature_cols": FEATURE_COLS}))
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "metrics": {
+                    "beats_baseline": beats_baseline,
+                    "model_rmse": 0.05,
+                    "baseline_rmse": 0.04,
+                    "information_coefficient": -0.01,
+                },
+            }
+        )
+    )
+
+
+_FAKE_CONTRACT = RankedContract(
+    occ_symbol="AAPL260116C00150000",
+    underlying="AAPL",
+    expiry="2026-01-16",
+    type="call",
+    strike=150.0,
+    dte=30,
+    market_price=5.0,
+    market_iv=0.30,
+    forecast_vol=0.28,
+    forecast_drift=0.05,
+    forecast_value=5.5,
+    ev=0.5,
+    ev_per_risk=0.1,
+    prob_profit=0.55,
+)
+
+
+class TestRank:
+    """The gate a bad model would otherwise hide behind must survive the wire
+    too — see rank.py's own module docstring on why this is the one place a
+    metric that says "no edge" must not quietly become a recommendation.
+    """
+
+    def test_no_trained_model_is_a_409_not_a_crash(self, tmp_path, monkeypatch) -> None:
+        def _raise():
+            raise SystemExit(f"No trained models found under {tmp_path / 'empty'}")
+
+        monkeypatch.setattr("app.main.latest_model_dir", _raise)
+        r = client.post("/rank", json={"day": "2026-01-01"})
+        assert r.status_code == 409
+        assert "No trained models" in r.json()["detail"]
+
+    def test_refuses_a_model_that_does_not_beat_baseline_without_force(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        def _refuse(*args, **kwargs):
+            raise SystemExit("does not beat the mean baseline")
+
+        monkeypatch.setattr("app.main.rank_day", _refuse)
+        r = client.post("/rank", json={"day": "2026-01-01", "force": False})
+        assert r.status_code == 409
+        assert "does not beat" in r.json()["detail"]
+
+    def test_returns_ranked_contracts_with_the_models_own_metrics_attached(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [_FAKE_CONTRACT])
+
+        r = client.post("/rank", json={"day": "2026-01-01", "top": 10, "force": True})
+        assert r.status_code == 200
+        body = r.json()
+
+        # The caveat must be visible in the payload itself — a UI reading
+        # only `contracts` and never this field is exactly the mistake the
+        # whole harness exists to prevent.
+        assert body["model_beats_baseline"] is False
+        assert body["model_information_coefficient"] == -0.01
+        assert body["model_run_id"] == "weak"
+
+        assert len(body["contracts"]) == 1
+        c = body["contracts"][0]
+        assert c["occ_symbol"] == "AAPL260116C00150000"
+        assert c["ev"] == 0.5
+        assert c["prob_profit"] == 0.55
+
+    def test_force_defaults_to_true_so_the_ui_always_gets_a_response(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        seen_force = {}
+
+        def _capture(day, model_dir, top=25, force=False):
+            seen_force["force"] = force
+            return []
+
+        monkeypatch.setattr("app.main.rank_day", _capture)
+        r = client.post("/rank", json={"day": "2026-01-01"})
+        assert r.status_code == 200
+        assert seen_force["force"] is True

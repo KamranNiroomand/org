@@ -31,6 +31,40 @@ export interface PriceResult {
   skipped: string | null;
 }
 
+export interface RankedContract {
+  occ_symbol: string;
+  underlying: string;
+  expiry: string;
+  type: string;
+  strike: number;
+  dte: number;
+  market_price: number;
+  market_iv: number | null;
+  forecast_vol: number;
+  forecast_drift: number;
+  forecast_value: number;
+  ev: number;
+  ev_per_risk: number;
+  prob_profit: number;
+}
+
+export interface RankResult {
+  model_run_id: string;
+  model_beats_baseline: boolean;
+  model_information_coefficient: number;
+  contracts: RankedContract[];
+}
+
+export class QuantRefusal extends Error {
+  constructor(detail: string) {
+    // rank_day's own refusal (no trained model, no bars, model doesn't beat
+    // baseline unless forced) — distinct from QuantUnavailable so callers
+    // can render this as "the model says X", not "the service is down".
+    super(detail);
+    this.name = 'QuantRefusal';
+  }
+}
+
 export class QuantUnavailable extends Error {
   constructor(cause: string) {
     super(
@@ -78,4 +112,31 @@ export async function priceBatch(rows: PriceRow[], chunkSize = 2000): Promise<Pr
     out.push(...body.results);
   }
   return out;
+}
+
+/**
+ * Ranks gate-passing contracts by expected value for one trading day. See
+ * `services/quant/app/rank.py`'s own module docstring for what this forecast
+ * actually is and, just as importantly, what it is not.
+ */
+export async function rankDay(day: string, top = 25, force = true): Promise<RankResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/rank`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ day, top, force }),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (res.status === 409) {
+    const body = (await res.json()) as { detail: string };
+    throw new QuantRefusal(body.detail);
+  }
+  if (!res.ok) {
+    throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as RankResult;
 }

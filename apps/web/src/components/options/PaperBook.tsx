@@ -9,11 +9,9 @@ import { e4ToUsd, optionsApi, type PaperOrder } from '../../lib/optionsApi';
 /**
  * Artificial money, real accounting.
  *
- * No ranked signal exists yet, so a position is opened here by hand — that
- * is the intended way to use this screen right now, not a placeholder for a
- * missing feature. It is how the mechanics (fills, marks, the equity curve)
- * get proven correct against real captured quotes before anything automated
- * is trusted to open a position on its own.
+ * Positions opened from the Signals tab and positions typed in by hand below
+ * both land here, distinguished only by the `manual`/`model` badge on each
+ * row — the form below stays for a symbol the ranked board didn't surface.
  *
  * Two returns are shown everywhere money moves, deliberately: the
  * account-level return (this screen's headline number) and each trade's own
@@ -170,7 +168,7 @@ function OrderRow({ order, onClosed }: { order: PaperOrder; onClosed: () => void
         <div className="flex items-center gap-2">
           <span className="truncate font-mono">{order.occSymbol}</span>
           <Badge tone={order.status === 'open' ? 'accent' : 'neutral'}>{order.status}</Badge>
-          {order.source === 'manual' && <Badge>manual</Badge>}
+          <Badge tone={order.source === 'model' ? 'accent' : 'neutral'}>{order.source}</Badge>
         </div>
         <div className="tnum mt-0.5 text-muted">
           {order.quantity} @ {usd(order.entryPriceE4)}
