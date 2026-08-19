@@ -21,9 +21,14 @@ import pytest
 
 from app.features import (
     atm_iv_by_expiry,
+    close_location_value,
     iv_rank,
+    max_daily_return,
+    overnight_intraday_returns,
     put_call_ratios,
+    residual_momentum,
     risk_reversal_25d,
+    signed_volume_imbalance,
     term_slope,
     underlying_features,
 )
@@ -296,3 +301,227 @@ class TestChainFeaturesOnRealMultiExpiryChain:
 
         if clean_ratios["put_call_oi_ratio"] is not None:
             assert skewed_ratios["put_call_oi_ratio"] != clean_ratios["put_call_oi_ratio"]
+
+
+def _bars(symbol: str, rows: list[dict]) -> pl.DataFrame:
+    """`rows` need only open/high/low/close/volume; day and adj_close fill
+    in automatically so hand-computed test cases stay short.
+    """
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * len(rows),
+            "day": [f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(len(rows))],
+            "open": [r["open"] for r in rows],
+            "high": [r.get("high", max(r["open"], r["close"])) for r in rows],
+            "low": [r.get("low", min(r["open"], r["close"])) for r in rows],
+            "close": [r["close"] for r in rows],
+            "adj_close": [r["close"] for r in rows],
+            "volume": [r.get("volume", 1_000_000) for r in rows],
+        },
+        schema={
+            "symbol": pl.Utf8, "day": pl.Utf8, "open": pl.Float64, "high": pl.Float64,
+            "low": pl.Float64, "close": pl.Float64, "adj_close": pl.Float64, "volume": pl.Int64,
+        },
+    )
+
+
+class TestOvernightIntradayReturns:
+    def test_matches_hand_computed_components(self) -> None:
+        bars = _bars("X", [
+            {"open": 100.0, "close": 101.0},
+            {"open": 103.0, "close": 100.0},  # overnight: 103/101-1; intraday: 100/103-1
+            {"open": 99.0, "close": 103.0},   # overnight: 99/100-1; intraday: 103/99-1
+        ])
+        out = overnight_intraday_returns(bars, windows=(2,))
+        row = out.filter(pl.col("day") == bars["day"][-1])
+        assert row.height == 1
+
+        overnight_2d = (103.0 / 101.0 - 1.0) + (99.0 / 100.0 - 1.0)
+        intraday_2d = (100.0 / 103.0 - 1.0) + (103.0 / 99.0 - 1.0)
+        assert row["overnight_ret_2d"][0] == pytest.approx(overnight_2d, abs=1e-9)
+        assert row["intraday_ret_2d"][0] == pytest.approx(intraday_2d, abs=1e-9)
+
+    def test_drops_rows_without_a_full_window(self) -> None:
+        bars = _bars("X", [{"open": 100.0, "close": 101.0}, {"open": 100.0, "close": 101.0}])
+        out = overnight_intraday_returns(bars, windows=(5,))
+        assert out.height == 0
+
+    def test_empty_input_is_empty_but_typed(self) -> None:
+        out = overnight_intraday_returns(pl.DataFrame(schema={
+            "symbol": pl.Utf8, "day": pl.Utf8, "open": pl.Float64, "high": pl.Float64,
+            "low": pl.Float64, "close": pl.Float64, "adj_close": pl.Float64, "volume": pl.Int64,
+        }))
+        assert out.height == 0
+        assert "overnight_ret_5d" in out.columns
+
+
+class TestCloseLocationValue:
+    def test_matches_hand_computed_value(self) -> None:
+        bars = _bars("X", [
+            {"open": 100.0, "close": 108.0, "high": 110.0, "low": 100.0},  # clv = (108-100)/(110-100) = 0.8
+            {"open": 100.0, "close": 102.0, "high": 105.0, "low": 95.0},   # clv = (102-95)/(105-95) = 0.7
+        ])
+        out = close_location_value(bars, windows=(2,))
+        row = out.filter(pl.col("day") == bars["day"][-1])
+        assert row["close_location_value_2d"][0] == pytest.approx((0.8 + 0.7) / 2, abs=1e-9)
+
+    def test_zero_range_day_reads_as_the_midpoint_not_an_error(self) -> None:
+        bars = _bars("X", [{"open": 100.0, "close": 100.0, "high": 100.0, "low": 100.0}] * 2)
+        out = close_location_value(bars, windows=(2,))
+        row = out.filter(pl.col("day") == bars["day"][-1])
+        assert row["close_location_value_2d"][0] == pytest.approx(0.5, abs=1e-9)
+
+
+class TestMaxDailyReturn:
+    def test_matches_the_largest_return_in_the_window(self) -> None:
+        closes = [100.0, 103.0, 95.0, 110.0]  # returns: -, +0.03, -0.07767, +0.15789
+        bars = _bars("X", [{"open": c, "close": c} for c in closes])
+        out = max_daily_return(bars, window=3)
+        row = out.filter(pl.col("day") == bars["day"][-1])
+        expected = max(103.0 / 100.0 - 1.0, 95.0 / 103.0 - 1.0, 110.0 / 95.0 - 1.0)
+        assert row["max_daily_return_3d"][0] == pytest.approx(expected, abs=1e-9)
+
+    def test_is_orthogonal_in_sign_to_plain_momentum(self) -> None:
+        # A steady grind and a single jackpot day reaching the same total
+        # return must not look identical to this feature, even though
+        # momentum_Xd cannot tell them apart.
+        steady = _bars("STEADY", [{"open": c, "close": c} for c in [100.0, 105.0, 110.0, 115.0, 120.0]])
+        jackpot = _bars("JACKPOT", [{"open": c, "close": c} for c in [100.0, 100.0, 100.0, 100.0, 120.0]])
+        steady_max = max_daily_return(steady, window=4).filter(pl.col("day") == steady["day"][-1])
+        jackpot_max = max_daily_return(jackpot, window=4).filter(pl.col("day") == jackpot["day"][-1])
+        assert jackpot_max["max_daily_return_4d"][0] > steady_max["max_daily_return_4d"][0]
+
+
+class TestSignedVolumeImbalance:
+    def test_matches_hand_computed_value(self) -> None:
+        bars = _bars("X", [
+            # day1: close near the high on strong volume -> positive contribution
+            {"open": 100.0, "close": 108.0, "high": 110.0, "low": 100.0, "volume": 1000},
+            # day2: close near the low on lighter volume -> negative contribution
+            {"open": 100.0, "close": 92.0, "high": 100.0, "low": 90.0, "volume": 500},
+        ])
+        out = signed_volume_imbalance(bars, windows=(2,))
+        row = out.filter(pl.col("day") == bars["day"][-1])
+
+        signed1 = ((108.0 - 100.0) / (110.0 - 100.0)) * 1000
+        signed2 = ((92.0 - 100.0) / (100.0 - 90.0)) * 500
+        expected = (signed1 + signed2) / (1000 + 500)
+        assert row["signed_volume_imbalance_2d"][0] == pytest.approx(expected, abs=1e-9)
+
+    def test_zero_range_day_contributes_zero_not_an_error(self) -> None:
+        bars = _bars("X", [
+            {"open": 100.0, "close": 100.0, "high": 100.0, "low": 100.0, "volume": 1000},
+            {"open": 100.0, "close": 105.0, "high": 108.0, "low": 100.0, "volume": 500},
+        ])
+        out = signed_volume_imbalance(bars, windows=(2,))
+        row = out.filter(pl.col("day") == bars["day"][-1])
+        expected = (0.0 + ((105.0 - 100.0) / (108.0 - 100.0)) * 500) / (1000 + 500)
+        assert row["signed_volume_imbalance_2d"][0] == pytest.approx(expected, abs=1e-9)
+
+
+class TestResidualMomentum:
+    def _panel(self, n_days: int, seed: int = 0) -> pl.DataFrame:
+        import random
+
+        rng = random.Random(seed)
+        rows = []
+        for symbol in ("A", "B", "C", "D"):
+            price = 100.0
+            for i in range(n_days):
+                day = f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}"
+                o = price
+                c = price * (1 + rng.uniform(-0.02, 0.02))
+                rows.append(
+                    {
+                        "symbol": symbol, "day": day, "open": o,
+                        "high": max(o, c) * 1.01, "low": min(o, c) * 0.99,
+                        "close": c, "adj_close": c, "volume": rng.randint(100_000, 500_000),
+                    }
+                )
+                price = c
+        return pl.DataFrame(rows)
+
+    def test_a_symbol_identical_to_the_market_has_beta_one_and_zero_residual(self) -> None:
+        # Every symbol shares the exact same return sequence, so each one
+        # *is* the equal-weighted market — mathematically, beta=1 and
+        # residual=0 exactly for all of them, regardless of which window or
+        # day is checked. This is the core regression mechanism's
+        # correctness property, without needing to hand-align indices
+        # between two different representations of the same computation.
+        import random
+
+        rng = random.Random(3)
+        shared_returns = [rng.uniform(-0.02, 0.02) for _ in range(140)]
+        rows = []
+        for symbol in ("A", "B", "C"):
+            price = 100.0
+            rows.append({
+                "symbol": symbol, "day": "2026-01-01", "open": price, "close": price,
+                "high": price, "low": price, "adj_close": price, "volume": 100_000,
+            })
+            for i, r in enumerate(shared_returns):
+                price *= 1 + r
+                day = f"2026-{1 + (i + 1) // 28:02d}-{1 + (i + 1) % 28:02d}"
+                rows.append({
+                    "symbol": symbol, "day": day, "open": price, "close": price,
+                    "high": price, "low": price, "adj_close": price, "volume": 100_000,
+                })
+        bars = pl.DataFrame(rows)
+
+        out = residual_momentum(bars, beta_window=30, mom_window=10, idio_window=10)
+        assert out.height > 0
+        assert out["residual_momentum_10d"].abs().max() < 1e-9
+
+    def test_a_return_uncorrelated_with_the_market_gets_beta_zero(self) -> None:
+        # CONST's own return is a fixed constant every day: Cov(constant,
+        # anything) is exactly zero regardless of self-inclusion in the
+        # market average, so beta must be exactly zero and the residual
+        # must equal CONST's own raw return, unchanged. A little jitter is
+        # added on top of the constant drift — a literally zero-variance
+        # return correctly makes idio_vol_ratio's denominator zero too (its
+        # own, separate, correctly-tested null case), which would filter
+        # this row out entirely and defeat the point of this test. M1/M2
+        # carry real day-to-day variance so the market has something to
+        # regress against.
+        import random
+
+        rng = random.Random(7)
+        panel_rows = []
+        price = {"CONST": 100.0, "M1": 100.0, "M2": 100.0}
+        const_daily_returns = []
+        for i in range(120):
+            day = f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}"
+            const_ret = 0.001 + rng.uniform(-0.0001, 0.0001)
+            const_daily_returns.append(const_ret)
+            price["CONST"] *= 1 + const_ret
+            for sym in ("CONST", "M1", "M2"):
+                if sym != "CONST":
+                    price[sym] *= 1 + rng.uniform(-0.03, 0.03)
+                panel_rows.append({
+                    "symbol": sym, "day": day, "open": price[sym], "close": price[sym],
+                    "high": price[sym] * 1.01, "low": price[sym] * 0.99,
+                    "adj_close": price[sym], "volume": 200_000,
+                })
+        bars = pl.DataFrame(panel_rows)
+
+        out = residual_momentum(bars, beta_window=30, mom_window=10, idio_window=10)
+        const_rows = out.filter(pl.col("symbol") == "CONST").sort("day")
+        assert const_rows.height > 0
+        # beta ~= 0 (Cov(near-constant, anything) ~= 0), so residual ~=
+        # CONST's own return — the last 10 days' worth, summed.
+        expected = sum(const_daily_returns[-10:])
+        assert const_rows["residual_momentum_10d"][-1] == pytest.approx(expected, abs=5e-4)
+
+    def test_insufficient_history_returns_nothing(self) -> None:
+        bars = self._panel(n_days=20, seed=2)
+        out = residual_momentum(bars, beta_window=126, mom_window=63, idio_window=21)
+        assert out.height == 0
+
+    def test_empty_input_is_empty_but_typed(self) -> None:
+        out = residual_momentum(pl.DataFrame(schema={
+            "symbol": pl.Utf8, "day": pl.Utf8, "open": pl.Float64, "high": pl.Float64,
+            "low": pl.Float64, "close": pl.Float64, "adj_close": pl.Float64, "volume": pl.Int64,
+        }))
+        assert out.height == 0
+        assert "residual_momentum_63d" in out.columns
+        assert "idio_vol_ratio_21d" in out.columns

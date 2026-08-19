@@ -46,7 +46,7 @@ import lightgbm as lgb
 import polars as pl
 
 from .db import read_bars, read_quotes, read_risk_free_curve
-from .features import underlying_features
+from .features import build_feature_panel
 from .pricing import norm_cdf
 from .vol import rolling_realized_vol
 
@@ -331,7 +331,7 @@ def rank_day(
     if bars.height == 0:
         raise SystemExit("No bars in market.db.")
 
-    all_features = underlying_features(bars).filter(pl.col("day") <= trading_day)
+    all_features = build_feature_panel(bars).filter(pl.col("day") <= trading_day)
     latest_features = all_features.sort("day").group_by("symbol", maintain_order=True).last()
     if latest_features.height == 0:
         raise SystemExit(f"No features available on or before {trading_day} — not enough trailing bars yet.")

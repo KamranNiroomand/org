@@ -38,7 +38,7 @@ import polars as pl
 
 from .cv import purged_walk_forward_splits
 from .db import read_bars
-from .features import underlying_features
+from .features import build_feature_panel
 from .labels import direction_bucket, forward_return
 from .metrics import information_coefficient, rmse
 from .models import beats_baseline, mean_baseline, train_lgbm_regressor
@@ -50,6 +50,20 @@ FEATURE_COLS = [
     "momentum_21d",
     "momentum_63d",
     "volume_zscore_21d",
+    # Second-generation features — see the module docstring above
+    # features.py's residual_momentum for why the original six sit at
+    # IC ~0.01: raw momentum on a 566-name panel is mostly a beta loading.
+    "overnight_ret_5d",
+    "overnight_ret_21d",
+    "intraday_ret_5d",
+    "intraday_ret_21d",
+    "close_location_value_1d",
+    "close_location_value_5d",
+    "max_daily_return_21d",
+    "signed_volume_imbalance_10d",
+    "signed_volume_imbalance_21d",
+    "residual_momentum_63d",
+    "idio_vol_ratio_21d",
 ]
 
 
@@ -74,7 +88,8 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
     if bars.height == 0:
         raise SystemExit("No bars in market.db — run bars:backfill first.")
 
-    features = underlying_features(bars)
+    features = build_feature_panel(bars)
+
     if target == "dir":
         labels = forward_return(bars, horizon)
         label_col = f"fwd_ret_{horizon}d"
