@@ -136,5 +136,8 @@ export const optionsApi = {
     api.post<{ ok: true }>(`/api/paper/orders/${id}/close`, exitPriceE4 !== undefined ? { exitPriceE4 } : {}),
   markNow: () => api.post<{ tradingDay: string; marked: number; skipped: unknown[] }>('/api/paper/mark'),
 
-  rank: (day: string, top = 25) => api.get<RankResponse>(`/api/quant/rank?day=${day}&top=${top}`),
+  rank: (day: string, top = 25, maxCapital?: number) =>
+    api.get<RankResponse>(
+      `/api/quant/rank?day=${day}&top=${top}${maxCapital !== undefined ? `&maxCapital=${maxCapital}` : ''}`,
+    ),
 };

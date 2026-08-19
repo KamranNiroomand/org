@@ -30,6 +30,16 @@ function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Every option contract covers 100 shares — matches rank.py's own
+// DEFAULT_MULTIPLIER. `market_price` from the API is quoted per share, which
+// reads as far cheaper than what buying one contract actually costs; this is
+// the number that answers "how much do I actually spend".
+const CONTRACT_MULTIPLIER = 100;
+
+function contractCost(contract: RankedContract): number {
+  return contract.market_price * CONTRACT_MULTIPLIER;
+}
+
 function SignalRow({ contract, onOpened }: { contract: RankedContract; onOpened: () => void }) {
   const [quantity, setQuantity] = useState('1');
   const [opened, setOpened] = useState(false);
@@ -63,7 +73,8 @@ function SignalRow({ contract, onOpened }: { contract: RankedContract; onOpened:
           <span className="tnum text-muted">{contract.dte}d</span>
         </div>
         <div className="tnum mt-0.5 text-muted">
-          {contract.underlying} strike {usd(contract.strike)} · mkt {usd(contract.market_price)}
+          {contract.underlying} strike {usd(contract.strike)} · costs {usd(contractCost(contract))}
+          <span className="text-faint"> ({usd(contract.market_price)}/share)</span>
           {contract.market_iv !== null && ` · IV ${(contract.market_iv * 100).toFixed(0)}%`}
         </div>
       </div>
@@ -101,16 +112,24 @@ export function SignalBoard() {
   // captured day below, not today, because tonight's capture usually
   // hasn't run yet when this loads and today would just be empty.
   const [day, setDay] = useState<string | null>(null);
+  // Filters out any contract costing more than this to buy one of — the
+  // ranked list is sorted by *absolute* dollar EV, which structurally
+  // favours expensive contracts (EV scales with the same 100-share
+  // multiplier the cost does), so without this an affordable contract
+  // would rarely make the top 25 regardless of how good a deal it is
+  // relative to its own cost. Empty string means "no cap".
+  const [maxCapital, setMaxCapital] = useState('200');
 
   const { data: status } = useQuery({
     queryKey: ['options-status'],
     queryFn: () => optionsApi.status(),
   });
   const effectiveDay = day ?? status?.totals.lastDay ?? todayKey();
+  const maxCapitalNum = maxCapital.trim() ? Number(maxCapital) : undefined;
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ['quant-rank', effectiveDay],
-    queryFn: () => optionsApi.rank(effectiveDay),
+    queryKey: ['quant-rank', effectiveDay, maxCapitalNum],
+    queryFn: () => optionsApi.rank(effectiveDay, 25, maxCapitalNum),
     retry: false,
   });
 
@@ -126,6 +145,16 @@ export function SignalBoard() {
           subtitle="Every gate-passing contract for one day, priced under the current forecast and sorted by expected value"
           action={
             <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-xs text-muted">
+                Max $/contract
+                <Input
+                  value={maxCapital}
+                  onChange={(e) => setMaxCapital(e.target.value)}
+                  placeholder="No limit"
+                  inputMode="decimal"
+                  className="h-7 w-20 text-xs"
+                />
+              </label>
               <Input
                 type="date"
                 value={effectiveDay}
@@ -169,7 +198,14 @@ export function SignalBoard() {
         )}
 
         {data && data.contracts.length === 0 && (
-          <Empty title="No gate-passing contracts for this day" hint="Try a different trading day, or check the corpus status tab." />
+          <Empty
+            title="No gate-passing contracts for this day"
+            hint={
+              maxCapitalNum !== undefined
+                ? `Nothing in the top 25 by expected value costs $${maxCapitalNum} or less per contract — try raising the cap, or a different trading day.`
+                : 'Try a different trading day, or check the corpus status tab.'
+            }
+          />
         )}
 
         {data && data.contracts.length > 0 && (

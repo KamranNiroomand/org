@@ -263,6 +263,22 @@ class TestRankUnderlying:
         assert c.dte > 0
         assert 0.0 <= c.prob_profit <= 1.0
 
+    def test_max_capital_drops_a_contract_costing_more_than_the_cap(self) -> None:
+        # price=5.0 * the default 100 multiplier = $500 to buy one contract.
+        quotes = _quotes_frame([_quote_row(price=5.0)])
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)], max_capital=400.0)
+        assert ranked == []
+
+    def test_max_capital_keeps_a_contract_at_or_under_the_cap(self) -> None:
+        quotes = _quotes_frame([_quote_row(price=2.0)])  # $200 to buy one contract
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)], max_capital=200.0)
+        assert len(ranked) == 1
+
+    def test_max_capital_none_never_drops_anything(self) -> None:
+        quotes = _quotes_frame([_quote_row(price=500.0)])
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)], max_capital=None)
+        assert len(ranked) == 1
+
 
 def _write_fake_model(run_dir, beats_baseline: bool) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)

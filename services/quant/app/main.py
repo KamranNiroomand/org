@@ -183,6 +183,10 @@ class RankRequest(BaseModel):
     #: show, with the model's real metrics surfaced in it rather than
     #: hidden, not a silent refusal.
     force: bool = True
+    #: Drops any contract costing more than this to buy one of, before
+    #: ranking — see rank_underlying's own docstring for why this can't be
+    #: a post-hoc filter on the response instead.
+    max_capital: float | None = Field(default=None, gt=0)
 
 
 class RankedContractResponse(BaseModel):
@@ -228,7 +232,9 @@ def rank(request: RankRequest) -> RankResponse:
     try:
         model_dir = latest_model_dir()
         _, manifest = load_model(model_dir)
-        ranked = rank_day(request.day, model_dir, top=request.top, force=request.force)
+        ranked = rank_day(
+            request.day, model_dir, top=request.top, force=request.force, max_capital=request.max_capital
+        )
     except SystemExit as e:
         # rank_day and latest_model_dir raise SystemExit for every refusal
         # (no trained model, no bars, no rate curve, model doesn't beat
