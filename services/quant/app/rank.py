@@ -437,6 +437,18 @@ def rank_day(
 
     ranked: list[RankedContract] = []
     for symbol, drift in drift_by_symbol.items():
+        # A drift that landed exactly on the cap isn't a large-but-real
+        # signal — it's the clamp itself firing, which only happens when
+        # the raw extrapolation broke (see _annualize_horizon_return's
+        # docstring). Live case that caught this: IEF, a Treasury bond ETF
+        # with ~4-5% real IV, got a clamped +100%/year drift and combined
+        # with its own near-zero volatility that made several of its calls
+        # look like a mathematical certainty (prob_profit rounding to
+        # 1.0) — an artifact of the extrapolation breaking, not a real
+        # edge. Skipping the whole underlying rather than trusting a
+        # number the model's own safety valve had to intervene on.
+        if abs(drift) >= MAX_ANNUALIZED_DRIFT:
+            continue
         vol = vol_by_symbol.get(symbol)
         if vol is None or vol <= 0:
             continue

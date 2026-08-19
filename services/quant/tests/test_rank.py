@@ -22,6 +22,7 @@ import pytest
 from app.db import connect
 from app.pricing import bsm_price
 from app.rank import (
+    MAX_ANNUALIZED_DRIFT,
     RankedContract,
     _annualize_horizon_return,
     _interpolate_rate,
@@ -419,3 +420,31 @@ class TestRankDayEndToEnd:
         # Sorted descending by expected value.
         evs = [c.ev for c in ranked]
         assert evs == sorted(evs, reverse=True)
+
+    def test_no_ranked_contract_carries_a_clamped_drift(self) -> None:
+        """Regression test for a live incident: IEF (a Treasury bond ETF
+        with ~4-5% real IV) got an annualized drift pinned exactly at the
+        safety cap, and combined with its own near-zero volatility that
+        made several of its calls look like a mathematical certainty
+        (prob_profit rounding to 1.0). The clamp firing at all is evidence
+        the extrapolation broke for that underlying, not a large-but-real
+        signal — see the exclusion in rank_day's own loop.
+        """
+        from app.db import read_bars
+
+        if read_bars().height == 0:
+            pytest.skip("no bars in market.db yet — run bars:backfill first")
+        day = _latest_priced_liquid_day()
+        if day is None:
+            pytest.skip("no liquid, priced option quotes captured yet")
+        try:
+            model_dir = latest_model_dir()
+        except SystemExit:
+            pytest.skip("no trained model yet — run app.train first")
+
+        # top is generously large so this actually exercises every
+        # gate-passing underlying, not just whichever few would have made
+        # a small top-N cut.
+        ranked = rank_day(day, model_dir, top=5000, force=True)
+        for c in ranked:
+            assert abs(c.forecast_drift) < MAX_ANNUALIZED_DRIFT, c.occ_symbol
