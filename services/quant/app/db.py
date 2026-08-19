@@ -134,6 +134,8 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
         "bid": pl.Float64,
         "ask": pl.Float64,
         "mid": pl.Float64,
+        "close": pl.Float64,
+        "price": pl.Float64,
         "volume": pl.Int64,
         "open_interest": pl.Int64,
         "underlying_price": pl.Float64,
@@ -146,7 +148,7 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
     }
     query = """
         SELECT c.underlying, c.expiry, c.type, c.strike_e4,
-               q.occ_symbol, q.bid_e4, q.ask_e4, q.volume, q.open_interest,
+               q.occ_symbol, q.bid_e4, q.ask_e4, q.close_e4, q.volume, q.open_interest,
                q.underlying_e4, q.iv_bps, q.delta, q.gamma, q.vega, q.theta, q.liquid
         FROM option_quotes q
         JOIN option_contracts c ON c.occ_symbol = q.occ_symbol
@@ -167,6 +169,15 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
             return None
         return (bid_e4 + ask_e4) / (2 * _E4)
 
+    mids = [mid(r["bid_e4"], r["ask_e4"]) for r in rows]
+    closes = [(r["close_e4"] / _E4) if r["close_e4"] is not None else None for r in rows]
+    # The same basis `enrichChain` (apps/server) solves implied vol from: mid
+    # where a two-sided quote exists, the contract's own close otherwise.
+    # Callers that price against `iv`/greeks must compare to *this* price,
+    # not an independently-chosen one, or a rate mismatch masquerades as a
+    # forecast disagreement.
+    prices = [m if m is not None else c for m, c in zip(mids, closes)]
+
     return pl.DataFrame(
         {
             "occ_symbol": [r["occ_symbol"] for r in rows],
@@ -176,7 +187,9 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
             "strike": [r["strike_e4"] / _E4 for r in rows],
             "bid": [(r["bid_e4"] / _E4) if r["bid_e4"] is not None else None for r in rows],
             "ask": [(r["ask_e4"] / _E4) if r["ask_e4"] is not None else None for r in rows],
-            "mid": [mid(r["bid_e4"], r["ask_e4"]) for r in rows],
+            "mid": mids,
+            "close": closes,
+            "price": prices,
             "volume": [r["volume"] for r in rows],
             "open_interest": [r["open_interest"] for r in rows],
             "underlying_price": [r["underlying_e4"] / _E4 for r in rows],
@@ -189,3 +202,25 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
         },
         schema=schema,
     )
+
+
+def read_risk_free_curve(day: str) -> list[tuple[int, float]]:
+    """The published curve on or before `day`, as (tenor_days, rate) pairs.
+
+    Mirrors `curveFor` in `apps/server/src/lib/options/rates.ts` — same
+    "latest day on or before" lookup, same tenor-sorted output — because
+    Python has no import path into the TS side and re-deriving the query is
+    cheaper and safer than sharing a schema module across languages here.
+    """
+    with connect() as conn:
+        latest = conn.execute(
+            "SELECT day FROM risk_free_rates WHERE day <= ? ORDER BY day DESC LIMIT 1",
+            [day],
+        ).fetchone()
+        if latest is None:
+            return []
+        rows = conn.execute(
+            "SELECT tenor_days, rate_bps FROM risk_free_rates WHERE day = ? ORDER BY tenor_days",
+            [latest["day"]],
+        ).fetchall()
+    return [(r["tenor_days"], r["rate_bps"] / 10_000.0) for r in rows]
