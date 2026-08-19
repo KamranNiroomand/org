@@ -1,7 +1,9 @@
 import { and, desc, eq, lte, sql } from 'drizzle-orm';
 import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
-import { optionContracts, optionQuotes, paperEquity, paperMarks, paperOrders } from '../db/market/schema.js';
+import { optionContracts, optionQuotes } from '../db/market/schema.js';
+import { paperDb } from '../db/paper/index.js';
+import { paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { newId, nowIso } from './util.js';
 
 /**
@@ -95,7 +97,7 @@ export function openOrder(input: OpenOrderInput): string {
   }
 
   const id = newId();
-  marketDb
+  paperDb
     .insert(paperOrders)
     .values({
       id,
@@ -120,7 +122,7 @@ export interface CloseOrderInput {
 
 /** Closes an open position, at the **bid** — what it would actually fetch. */
 export function closeOrder(input: CloseOrderInput): void {
-  const order = marketDb.select().from(paperOrders).where(eq(paperOrders.id, input.orderId)).get();
+  const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, input.orderId)).get();
   if (!order) throw new PaperError(`Unknown order: ${input.orderId}`);
   if (order.status === 'closed') throw new PaperError(`Order ${input.orderId} is already closed`);
 
@@ -142,7 +144,7 @@ export function closeOrder(input: CloseOrderInput): void {
     exitBasis = 'measured';
   }
 
-  marketDb
+  paperDb
     .update(paperOrders)
     .set({ status: 'closed', exitPriceE4, exitBasis, closedAt: nowIso() })
     .where(eq(paperOrders.id, input.orderId))
@@ -169,7 +171,7 @@ export interface MarkResult {
  * would silently corrupt the equity curve it feeds.
  */
 export function markOpenPositions(tradingDay: string): MarkResult {
-  const open = marketDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all();
+  const open = paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all();
   const result: MarkResult = { tradingDay, marked: 0, skipped: [] };
 
   for (const order of open) {
@@ -196,7 +198,7 @@ export function markOpenPositions(tradingDay: string): MarkResult {
     const { multiplier } = contractMultiplier(order.occSymbol);
     const unrealizedPlE4 = (markPriceE4 - order.entryPriceE4) * order.quantity * multiplier;
 
-    marketDb
+    paperDb
       .insert(paperMarks)
       .values({
         orderId: order.id,
@@ -227,7 +229,7 @@ export function markOpenPositions(tradingDay: string): MarkResult {
  * called for, not only at inception. Tested directly rather than assumed.
  */
 export function computeDailyEquity(day: string): void {
-  const allOrders = marketDb.select().from(paperOrders).where(lte(paperOrders.openedAt, `${day}T23:59:59.999Z`)).all();
+  const allOrders = paperDb.select().from(paperOrders).where(lte(paperOrders.openedAt, `${day}T23:59:59.999Z`)).all();
 
   let cashE4 = config.market.paperStartingBalanceE4;
   let realizedPlToDateE4 = 0;
@@ -245,7 +247,7 @@ export function computeDailyEquity(day: string): void {
   );
   let openPositionsValueE4 = 0;
   for (const o of openOnDay) {
-    const mark = marketDb
+    const mark = paperDb
       .select()
       .from(paperMarks)
       .where(and(eq(paperMarks.orderId, o.id), lte(paperMarks.tradingDay, day)))
@@ -261,7 +263,7 @@ export function computeDailyEquity(day: string): void {
   const cumulativeReturnPct =
     ((totalEquityE4 - config.market.paperStartingBalanceE4) / config.market.paperStartingBalanceE4) * 100;
 
-  const prior = marketDb
+  const prior = paperDb
     .select({ totalEquityE4: paperEquity.totalEquityE4 })
     .from(paperEquity)
     .where(sql`${paperEquity.day} < ${day}`)
@@ -270,7 +272,7 @@ export function computeDailyEquity(day: string): void {
     .get();
   const dayReturnPct = prior ? ((totalEquityE4 - prior.totalEquityE4) / prior.totalEquityE4) * 100 : null;
 
-  marketDb
+  paperDb
     .insert(paperEquity)
     .values({ day, cashE4, openPositionsValueE4, totalEquityE4, realizedPlToDateE4, dayReturnPct, cumulativeReturnPct })
     .onConflictDoUpdate({

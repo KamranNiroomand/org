@@ -15,6 +15,8 @@
     "backup": "tsx --env-file-if-exists=../../.env src/scripts/backup.ts",
     "db:generate:market": "drizzle-kit generate --config drizzle.market.config.ts",
     "db:migrate:market": "tsx --env-file-if-exists=../../.env src/db/market/migrate.ts",
+    "db:generate:paper": "drizzle-kit generate --config drizzle.paper.config.ts",
+    "db:migrate:paper": "tsx --env-file-if-exists=../../.env src/db/paper/migrate.ts",
     "options:check": "tsx --env-file-if-exists=../../.env src/scripts/options-check.ts",
     "options:seed": "tsx --env-file-if-exists=../../.env src/scripts/options-seed.ts",
     "rates:sync": "tsx --env-file-if-exists=../../.env src/scripts/rates-sync.ts",
