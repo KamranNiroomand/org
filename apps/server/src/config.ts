@@ -42,6 +42,12 @@ const schema = z.object({
   POLYGON_API_KEY: z.string().optional(),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
   OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
+  // Weekly, Sunday morning — capture only runs weekdays (see
+  // OPTIONS_CAPTURE_CRON's 1-5), so by Sunday the corpus already has
+  // Friday's close as its latest day; no reason to wait further into the
+  // week. Local time, like the nightly bank sync: a quiet moment on the
+  // runner's own clock, not the market's.
+  RETRAIN_CRON: z.string().default('0 8 * * 0'),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
 
@@ -180,6 +186,13 @@ export const config = {
      */
     captureCron: env.OPTIONS_CAPTURE_CRON,
     captureTimezone: 'America/New_York',
+    /**
+     * Weekly retrain — runs `train.py` on an expanding window and registers
+     * the result as a new challenger. Never promotes anything automatically;
+     * see the `model_runs` doc comment and the manual
+     * `/api/quant/runs/:id/promote` route for why.
+     */
+    retrainCron: env.RETRAIN_CRON,
     /** E4 — same unit as every other dollar figure in this database. */
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
   },

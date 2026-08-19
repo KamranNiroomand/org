@@ -7,7 +7,10 @@ import { captureRuns, modelRuns, optionQuotes, trackedUnderlyings } from '../db/
 import {
   getLastCaptureResult,
   getNextCaptureRun,
+  getLastRetrainResult,
+  getNextRetrainRun,
   runOptionsCapture,
+  runRetrain,
 } from '../lib/scheduler.js';
 import { listUniverse, retierByLiquidity } from '../lib/options/universe.js';
 import { repriceDay } from '../lib/options/reprice.js';
@@ -72,6 +75,8 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       quantUp: await quantHealthy(),
       nextCapture: getNextCaptureRun(),
       lastCapture: getLastCaptureResult(),
+      nextRetrain: getNextRetrainRun(),
+      lastRetrain: getLastRetrainResult(),
       lastRun: lastRun ?? null,
       universe: Object.fromEntries(universe.map((u) => [u.tier, u.n])),
       /**
@@ -100,6 +105,16 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: 'POLYGON_API_KEY is not set' });
     }
     return runOptionsCapture(app.log, 'manual');
+  });
+
+  /** Manual retrain — the weekly cron calls the same function. */
+  app.post('/api/quant/retrain', async (_req, reply) => {
+    if (!config.market.isRunner) {
+      return reply
+        .code(409)
+        .send({ error: 'This machine is a reader; training runs on the runner, which holds the corpus.' });
+    }
+    return runRetrain(app.log, 'manual');
   });
 
   /**

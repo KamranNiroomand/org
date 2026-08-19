@@ -1,4 +1,7 @@
 import cron from 'node-cron';
+import { spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { FastifyBaseLogger } from 'fastify';
 import { asc } from 'drizzle-orm';
 import { config } from '../config.js';
@@ -17,6 +20,7 @@ import { syncRates } from './options/rates.js';
 import { snapshotMarketDb } from '../db/market/snapshot.js';
 import { isRunner } from './options/role.js';
 import { markOpenPositions, computeDailyEquity } from './paper.js';
+import { registerModelRun } from './options/modelRegistry.js';
 
 /**
  * The nightly job.
@@ -284,17 +288,141 @@ export async function runOptionsCapture(
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Weekly model retraining
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrains on an expanding window and registers the result — never
+ * promotes it. `registerModelRun` always inserts a fresh run as
+ * `'challenger'` (see modelRegistry.ts); it becomes `'champion'` only
+ * through the manual `/api/quant/runs/:id/promote` route, exactly the
+ * champion/shadow/promote policy the project plan calls for. A cron job
+ * that could put an unreviewed model in front of a ranking decision on its
+ * own is the one automation this project's whole validation posture exists
+ * to refuse.
+ *
+ * Only `--target dir` runs today. `--target vrp` needs a real trailing
+ * history of *captured* implied vol to mean anything and `train.py` itself
+ * refuses it with a clear error until then (see its module docstring) —
+ * adding it here is a one-line change to `TARGETS` once that history
+ * exists, not a redesign.
+ */
+let retraining = false;
+
+const TARGETS: ReadonlyArray<{ target: string; horizon: number }> = [{ target: 'dir', horizon: 5 }];
+
+const here = dirname(fileURLToPath(import.meta.url));
+// scheduler.ts lives at apps/server/src/lib/ — four levels up is the repo
+// root, where services/quant lives alongside apps/server.
+const repoRoot = join(here, '..', '..', '..', '..');
+const quantDir = join(repoRoot, 'services', 'quant');
+
+export interface RetrainRunOutcome {
+  target: string;
+  horizon: number;
+  runId: string | null;
+  registered: boolean;
+  error: string | null;
+}
+
+export interface RetrainJobResult {
+  startedAt: string;
+  finishedAt: string;
+  runs: RetrainRunOutcome[];
+  errors: string[];
+}
+
+/** Pulls the `artifact: <path>` line train.py prints on success. */
+function parseArtifactPath(stdout: string): string | null {
+  const matches = [...stdout.matchAll(/artifact:\s*(.+)/g)];
+  return matches.length > 0 ? matches[matches.length - 1]![1]!.trim() : null;
+}
+
+export async function runRetrain(log: FastifyBaseLogger, reason: string): Promise<RetrainJobResult> {
+  const startedAt = nowIso();
+  const result: RetrainJobResult = { startedAt, finishedAt: startedAt, runs: [], errors: [] };
+
+  if (!isRunner()) {
+    result.errors.push('This machine is a reader; training runs on the runner, which holds the corpus.');
+    return result;
+  }
+  if (retraining) {
+    result.errors.push('A retrain was already in progress; skipped this run.');
+    return result;
+  }
+  retraining = true;
+  log.info(`Weekly retrain starting (${reason})`);
+
+  try {
+    for (const { target, horizon } of TARGETS) {
+      const outcome: RetrainRunOutcome = { target, horizon, runId: null, registered: false, error: null };
+
+      const proc = spawnSync(
+        'uv',
+        ['run', '--project', quantDir, 'python', '-m', 'app.train', '--target', target, '--horizon', String(horizon)],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 30 * 60_000 },
+      );
+
+      if (proc.status !== 0) {
+        outcome.error = (proc.stderr || proc.stdout || `exit ${proc.status}`).trim().slice(-2000);
+        result.runs.push(outcome);
+        result.errors.push(`${target}: ${outcome.error}`);
+        continue;
+      }
+
+      const artifactDir = parseArtifactPath(proc.stdout);
+      if (!artifactDir) {
+        outcome.error = 'Training succeeded but no artifact path was found in its output.';
+        result.runs.push(outcome);
+        result.errors.push(`${target}: ${outcome.error}`);
+        continue;
+      }
+
+      try {
+        const registered = registerModelRun(join(artifactDir, 'manifest.json'));
+        outcome.runId = registered.runId;
+        outcome.registered = true;
+        log.info(`Retrain: registered ${registered.runId} (${registered.created ? 'new' : 'updated'}, target=${target})`);
+      } catch (err) {
+        outcome.error = err instanceof Error ? err.message : String(err);
+        result.errors.push(`${target}: register failed — ${outcome.error}`);
+      }
+
+      result.runs.push(outcome);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    result.errors.push(message);
+    log.error({ err }, 'Weekly retrain failed');
+  } finally {
+    retraining = false;
+  }
+
+  result.finishedAt = nowIso();
+  return result;
+}
+
 let task: ReturnType<typeof cron.schedule> | null = null;
 let captureTask: ReturnType<typeof cron.schedule> | null = null;
+let retrainTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
+let lastRetrainResult: RetrainJobResult | null = null;
 
 export const getLastNightlyResult = (): NightlyResult | null => lastResult;
 export const getLastCaptureResult = (): CaptureJobResult | null => lastCaptureResult;
+export const getLastRetrainResult = (): RetrainJobResult | null => lastRetrainResult;
 
 /** Next scheduled chain capture, for the UI to show. */
 export function getNextCaptureRun(): string | null {
   const next = captureTask?.getNextRun();
+  return next ? new Date(next).toISOString() : null;
+}
+
+/** Next scheduled retrain, for the UI to show. */
+export function getNextRetrainRun(): string | null {
+  const next = retrainTask?.getNextRun();
   return next ? new Date(next).toISOString() : null;
 }
 
@@ -355,6 +483,23 @@ export function startScheduler(log: FastifyBaseLogger): void {
     log.info('Option capture disabled — POLYGON_API_KEY is not set');
   }
 
+  if (!config.market.isRunner) {
+    log.info('Weekly retrain not scheduled — MARKET_ROLE=reader. Training runs on the runner.');
+  } else if (!cron.validate(config.market.retrainCron)) {
+    log.error(`RETRAIN_CRON is not valid: "${config.market.retrainCron}" — retrain disabled`);
+  } else {
+    retrainTask = cron.schedule(
+      config.market.retrainCron,
+      () => {
+        void runRetrain(log, 'scheduled').then((r) => {
+          lastRetrainResult = r;
+        });
+      },
+      { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    );
+    log.info(`Weekly retrain scheduled (${config.market.retrainCron}), next run ${getNextRetrainRun() ?? 'unknown'}`);
+  }
+
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
   // delay keeps startup fast and avoids racing the first request.
   setTimeout(() => {
@@ -371,4 +516,6 @@ export function stopScheduler(): void {
   task = null;
   captureTask?.stop();
   captureTask = null;
+  retrainTask?.stop();
+  retrainTask = null;
 }
