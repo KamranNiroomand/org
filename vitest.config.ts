@@ -49,6 +49,14 @@ export default defineConfig({
       // timing rather than logic. Port 1 is privileged and unbound, so the
       // connection refuses immediately instead of timing out.
       QUANT_URL: 'http://127.0.0.1:1',
+      // news.ts/edgar.ts guard on these being present before doing anything,
+      // same as every other provider key in this project — but their tests
+      // exercise the persist/cutoff logic through an injected fetcher that
+      // never makes a real request, so the guard only needs a truthy value
+      // here, not a real credential. The one test that exercises the guard
+      // itself (edgar.test.ts) overrides this to '' via vi.stubEnv.
+      POLYGON_API_KEY: 'test-polygon-key',
+      SEC_EDGAR_USER_AGENT: 'OrgTest test@example.com',
     },
   },
 });

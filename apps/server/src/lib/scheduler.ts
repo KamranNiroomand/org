@@ -21,6 +21,9 @@ import { snapshotMarketDb } from '../db/market/snapshot.js';
 import { isRunner } from './options/role.js';
 import { markOpenPositions, computeDailyEquity } from './paper.js';
 import { registerModelRun } from './options/modelRegistry.js';
+import { ingestNewsForUniverse } from './text/news.js';
+import { ingestEdgarForUniverse } from './text/edgar.js';
+import { classifyUnclassifiedDocuments } from './text/classify.js';
 
 /**
  * The nightly job.
@@ -260,6 +263,43 @@ export async function runOptionsCapture(
         log.info(`Paper book: ${marks.marked} position(s) marked, ${marks.skipped.length} skipped`);
       } catch (err) {
         result.errors.push(`Paper marking: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Text follows the same one-writer rule option quotes do: documents and
+    // doc_mentions live in market.db, so ingesting them on a reader would be
+    // silently destroyed by the next market:pull — the exact bug class the
+    // paper-db split exists to prevent, just for a table that never got
+    // split out because it never needs to be reader-writable in the first
+    // place. Classification is capped per run (classifyUnclassifiedDocuments'
+    // default limit) rather than draining a large backlog in one nightly
+    // job — each is a live LLM call, and next night catches up the rest.
+    if (isRunner()) {
+      // Each step isolated — SEC_EDGAR_USER_AGENT has no default (see
+      // config.ts), so a machine that hasn't set it must not lose news
+      // ingestion or classification of what news.ts just wrote.
+      try {
+        const news = await ingestNewsForUniverse(symbols);
+        log.info(`News: ${news.documentsWritten} documents, ${news.mentionsWritten} mentions`);
+        result.errors.push(...news.errors);
+      } catch (err) {
+        result.errors.push(`News ingest: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      try {
+        const edgar = await ingestEdgarForUniverse(symbols);
+        log.info(`EDGAR: ${edgar.documentsWritten} filings, ${edgar.symbolsUnresolved.length} unresolved tickers`);
+        result.errors.push(...edgar.errors);
+      } catch (err) {
+        result.errors.push(`EDGAR ingest: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      try {
+        const classified = await classifyUnclassifiedDocuments();
+        log.info(`Text classification: ${classified.classified}/${classified.attempted}`);
+        result.errors.push(...classified.errors);
+      } catch (err) {
+        result.errors.push(`Text classification: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 

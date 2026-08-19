@@ -50,6 +50,10 @@ const schema = z.object({
   RETRAIN_CRON: z.string().default('0 8 * * 0'),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
+  // SEC EDGAR's fair-access policy requires every request to identify a real
+  // contact — an unidentified or generic User-Agent gets rate-limited or
+  // blocked outright. No default: this one has to name a real person or org.
+  SEC_EDGAR_USER_AGENT: z.string().optional(),
 
   DEFAULT_CALENDAR: z.enum(['miladi', 'shamsi']).default('miladi'),
   BASE_CURRENCY: z.string().default('CAD'),
@@ -195,6 +199,8 @@ export const config = {
     retrainCron: env.RETRAIN_CRON,
     /** E4 — same unit as every other dollar figure in this database. */
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
+    /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
+    edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,
   },
 
   syncCron: env.SYNC_CRON,
