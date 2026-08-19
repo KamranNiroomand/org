@@ -83,16 +83,27 @@ def price(request: BatchRequest) -> BatchResponse:
     results: list[PriceResult] = []
 
     for row in request.rows:
-        vol = implied_vol(
-            row.price,
-            row.spot,
-            row.strike,
-            row.years,
-            row.rate,
-            row.div_yield,
-            row.is_call,
-            american=row.american,
-        )
+        try:
+            vol = implied_vol(
+                row.price,
+                row.spot,
+                row.strike,
+                row.years,
+                row.rate,
+                row.div_yield,
+                row.is_call,
+                american=row.american,
+            )
+        except OverflowError:
+            # The Bjerksund-Stensland approximation blows up at some vol
+            # candidates the Brent search probes on its way to a real root —
+            # e.g. `spot**beta` with beta pushed huge by a near-zero vol²
+            # denominator. That candidate is not a solution, so this is the
+            # same honest "no answer" as `vol is None`, not a batch failure —
+            # one degenerate contract must never cost every other row in the
+            # same request its price.
+            results.append(PriceResult(key=row.key, skipped="pricing-overflow"))
+            continue
         if vol is None:
             # No implied vol means no greeks either: greeks evaluated at an
             # invented volatility are invented numbers wearing a decimal point.

@@ -79,6 +79,51 @@ def test_refusal_survives_serialization() -> None:
     assert got["skipped"] == "unidentified-vol"
 
 
+def test_overflow_skips_the_row_instead_of_failing_the_batch() -> None:
+    """A deep OTM American put at zero dividend yield sends the Brent search
+    near the vol floor, where the Bjerksund-Stensland beta term overflows —
+    real production data, not a contrived input. One degenerate contract must
+    come back skipped, not take every other row in the same request down
+    with it (previously an unhandled OverflowError 500'd the whole batch).
+    """
+    r = client.post(
+        "/price",
+        json={
+            "rows": [
+                {
+                    "key": "good",
+                    "price": (NVDA["rows"][0]["bid"] + NVDA["rows"][0]["ask"]) / 2,
+                    "spot": NVDA["spot"],
+                    "strike": NVDA["rows"][0]["strike"],
+                    "years": YEARS_2D,
+                    "rate": NVDA["assumedRate"],
+                    "div_yield": NVDA["assumedDividendYield"],
+                    "is_call": True,
+                },
+                {
+                    "key": "overflow-put",
+                    "price": 0.01,
+                    "spot": 227.5,
+                    "strike": 100.0,
+                    "years": 0.25,
+                    "rate": 0.04,
+                    "div_yield": 0.0,
+                    "is_call": False,
+                },
+            ]
+        },
+    )
+    assert r.status_code == 200
+    results = {x["key"]: x for x in r.json()["results"]}
+
+    assert results["overflow-put"]["skipped"] == "pricing-overflow"
+    assert results["overflow-put"]["iv_bps"] is None
+
+    # The other row in the same batch must still have priced normally.
+    assert results["good"]["iv_bps"] is not None
+    assert results["good"]["skipped"] is None
+
+
 def test_theoretical_round_trips_against_the_solver() -> None:
     body = {
         "spot": 225.05,
