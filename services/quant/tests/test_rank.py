@@ -25,6 +25,7 @@ from app.rank import (
     RankedContract,
     _annualize_horizon_return,
     _interpolate_rate,
+    _vol_forecast_ratio,
     forecast_value,
     latest_model_dir,
     load_model,
@@ -133,17 +134,37 @@ class TestInterpolateRate:
 
 class TestAnnualizeHorizonReturn:
     def test_positive_return_annualizes_positive(self) -> None:
-        assert _annualize_horizon_return(0.02, horizon_days=5) > 0.0
+        assert _annualize_horizon_return(0.001, horizon_days=5) > 0.0
 
     def test_zero_return_is_zero_drift(self) -> None:
         assert _annualize_horizon_return(0.0, horizon_days=5) == pytest.approx(0.0, abs=1e-9)
 
     def test_does_not_raise_on_a_total_loss_prediction(self) -> None:
         # log(1 + (-1.5)) is a domain error; this must clamp, not crash a
-        # whole ranking run over one absurd prediction.
+        # whole ranking run over one absurd prediction. Also lands well
+        # past the abs-drift cap, so this doubles as that cap's floor case.
         drift = _annualize_horizon_return(-1.5, horizon_days=5)
         assert math.isfinite(drift)
-        assert drift < 0.0
+        assert drift == pytest.approx(-1.0, abs=1e-9)
+
+    def test_an_ordinary_short_horizon_prediction_is_capped_once_extrapolated(self) -> None:
+        # Found live: BRK.B's real raw 5-day prediction — +4.85%, nothing
+        # alarming about that number on its own — annualizes to 239% once
+        # extrapolated to a 59-day contract, and drove one underlying to
+        # an implied 100% probability of profit. Same input, capped.
+        uncapped = math.log(1.0485) / (5 / 252)
+        assert uncapped > 2.0  # confirms the naive extrapolation really is this extreme
+        capped = _annualize_horizon_return(0.0485, horizon_days=5)
+        assert capped == pytest.approx(1.0, abs=1e-9)
+
+    def test_a_genuinely_moderate_prediction_passes_through_uncapped(self) -> None:
+        # The whole point of capping only the extreme case: a real,
+        # moderate short-horizon prediction must reach rank_underlying
+        # unmodified.
+        got = _annualize_horizon_return(0.001, horizon_days=5)
+        want = math.log(1.001) / (5 / 252)
+        assert got == pytest.approx(want, rel=1e-9)
+        assert abs(got) < 1.0
 
 
 def _quote_row(**overrides: object) -> dict:
@@ -177,45 +198,65 @@ def _quotes_frame(rows: list[dict]) -> pl.DataFrame:
 
 
 class TestRankUnderlying:
+    """`vol_ratio` is multiplied against each row's own `iv` to get that
+    contract's forecast vol — see `_vol_forecast_ratio`'s docstring for why
+    it is a ratio rather than a single flat number reused across a chain.
+    """
+
     def test_skips_rows_with_no_solved_iv(self) -> None:
         quotes = _quotes_frame([_quote_row(iv=None, price=None)])
-        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 0.30, [(365, 0.04)])
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)])
         assert ranked == []
 
     def test_skips_contracts_expiring_on_or_before_the_trading_day(self) -> None:
         quotes = _quotes_frame([_quote_row(expiry="2025-12-01")])
-        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 0.30, [(365, 0.04)])
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)])
         assert ranked == []
 
     def test_underpriced_contract_gets_positive_expected_value(self) -> None:
-        # forecast_vol far above market IV, with everything else held fixed,
-        # must make the option look cheap relative to the forecast.
+        # forecast_vol (row iv * ratio) far above market IV, with
+        # everything else held fixed, must make the option look cheap
+        # relative to the forecast.
         quotes = _quotes_frame([_quote_row(price=1.0, iv=0.10)])
-        ranked = rank_underlying(quotes, "2025-12-01", 0.0, 0.80, [(365, 0.04)], round_trip_cost=0.0)
+        ranked = rank_underlying(quotes, "2025-12-01", 0.0, 8.0, [(365, 0.04)], round_trip_cost=0.0)
         assert len(ranked) == 1
+        assert ranked[0].forecast_vol == pytest.approx(0.80, rel=1e-9)
         assert ranked[0].ev > 0.0
         assert ranked[0].ev_per_risk == pytest.approx(ranked[0].ev / (1.0 * 100), rel=1e-9)
 
     def test_overpriced_contract_gets_negative_expected_value(self) -> None:
         quotes = _quotes_frame([_quote_row(price=20.0, iv=0.80)])
-        ranked = rank_underlying(quotes, "2025-12-01", 0.0, 0.10, [(365, 0.04)], round_trip_cost=0.0)
+        ranked = rank_underlying(quotes, "2025-12-01", 0.0, 0.125, [(365, 0.04)], round_trip_cost=0.0)
         assert len(ranked) == 1
+        assert ranked[0].forecast_vol == pytest.approx(0.10, rel=1e-9)
         assert ranked[0].ev < 0.0
+
+    def test_two_contracts_on_the_same_chain_get_different_forecast_vols(self) -> None:
+        # The whole point of the ratio design: two strikes with different
+        # market IVs (a real skew) must not collapse to one flat forecast.
+        quotes = _quotes_frame([
+            _quote_row(occ_symbol="A", strike=90.0, iv=0.20),
+            _quote_row(occ_symbol="B", strike=110.0, iv=0.40),
+        ])
+        ranked = rank_underlying(quotes, "2025-12-01", 0.0, 1.5, [(365, 0.04)])
+        by_symbol = {c.occ_symbol: c for c in ranked}
+        assert by_symbol["A"].forecast_vol == pytest.approx(0.20 * 1.5, rel=1e-9)
+        assert by_symbol["B"].forecast_vol == pytest.approx(0.40 * 1.5, rel=1e-9)
 
     def test_round_trip_cost_reduces_every_contracts_expected_value(self) -> None:
         quotes = _quotes_frame([_quote_row()])
-        free = rank_underlying(quotes, "2025-12-01", 0.05, 0.30, [(365, 0.04)], round_trip_cost=0.0)
-        costly = rank_underlying(quotes, "2025-12-01", 0.05, 0.30, [(365, 0.04)], round_trip_cost=1.30)
+        free = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)], round_trip_cost=0.0)
+        costly = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)], round_trip_cost=1.30)
         assert costly[0].ev == pytest.approx(free[0].ev - 1.30, rel=1e-9)
 
     def test_no_rate_curve_skips_the_contract_rather_than_guessing(self) -> None:
         quotes = _quotes_frame([_quote_row()])
-        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 0.30, [])
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [])
         assert ranked == []
 
     def test_result_fields_are_well_typed(self) -> None:
         quotes = _quotes_frame([_quote_row()])
-        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 0.30, [(365, 0.04)])
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)])
         assert len(ranked) == 1
         c = ranked[0]
         assert isinstance(c, RankedContract)
@@ -248,6 +289,44 @@ def _write_fake_model(run_dir, beats_baseline: bool) -> None:
             }
         )
     )
+
+
+class TestVolForecastRatio:
+    def test_the_sndk_case_gets_capped_not_trusted_unbounded(self) -> None:
+        # Real numbers from the live incident: 21-day realized vol ~140%
+        # against a median IV of ~46% across the (mistakenly narrow) slice
+        # of the chain first checked. Left uncapped, the resulting ratio
+        # drove a single underlying to dominate the entire ranked board.
+        quotes = _quotes_frame([_quote_row(iv=0.4555), _quote_row(iv=0.45)])
+        ratio = _vol_forecast_ratio(1.3964, quotes, max_ratio=2.0)
+        assert ratio == pytest.approx(2.0, rel=1e-9)
+
+    def test_a_moderate_vol_premium_signal_passes_through_uncapped(self) -> None:
+        # The whole point of capping only the extreme case: a realistic,
+        # moderate divergence between trailing RV and market IV — the kind
+        # of gap the system is actually meant to find — must not be
+        # touched.
+        quotes = _quotes_frame([_quote_row(iv=0.30), _quote_row(iv=0.32)])
+        ratio = _vol_forecast_ratio(0.45, quotes, max_ratio=2.0)
+        median_iv = (0.30 + 0.32) / 2
+        assert ratio == pytest.approx(0.45 / median_iv, rel=1e-9)
+
+    def test_uses_the_median_across_the_whole_chain_not_one_contract(self) -> None:
+        quotes = _quotes_frame([_quote_row(iv=0.20), _quote_row(iv=0.30), _quote_row(iv=10.0)])
+        # median of (0.20, 0.30, 10.0) is 0.30, not skewed by the one
+        # outlier the way a mean would be.
+        ratio = _vol_forecast_ratio(0.30, quotes, max_ratio=2.0)
+        assert ratio == pytest.approx(1.0, rel=1e-9)
+
+    def test_no_priced_quotes_falls_back_to_a_neutral_ratio(self) -> None:
+        quotes = _quotes_frame([_quote_row(iv=None)])
+        assert _vol_forecast_ratio(1.5, quotes) == 1.0
+
+    def test_empty_chain_falls_back_to_a_neutral_ratio(self) -> None:
+        # .clear() keeps the schema (unlike an empty list, which polars
+        # cannot infer columns from) while dropping every row.
+        quotes = _quotes_frame([_quote_row(iv=None)]).clear()
+        assert _vol_forecast_ratio(1.5, quotes) == 1.0
 
 
 class TestLoadModelAndLatestModelDir:

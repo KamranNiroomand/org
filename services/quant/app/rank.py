@@ -61,6 +61,14 @@ TRADING_DAYS_PER_YEAR = 252
 DEFAULT_ROUND_TRIP_COST = 1.30
 DEFAULT_MULTIPLIER = 100
 DEFAULT_VOL_WINDOW = 21
+# Caps the multiplicative vol-forecast ratio (see the module docstring's
+# first flagged simplification) at this multiple. See
+# _vol_forecast_ratio's docstring for why.
+MAX_VOL_FORECAST_RATIO = 2.0
+# Caps the annualized drift (see the module docstring's second flagged
+# simplification) at this magnitude, +/-. See
+# _annualize_horizon_return's docstring for why.
+MAX_ANNUALIZED_DRIFT = 1.0
 _MIN_YEARS = 1e-9
 _MIN_VOL = 1e-9
 
@@ -199,11 +207,50 @@ class RankedContract:
     prob_profit: float
 
 
+def _vol_forecast_ratio(
+    realized_vol: float, quotes: pl.DataFrame, max_ratio: float = MAX_VOL_FORECAST_RATIO
+) -> float:
+    """The multiplicative view `rank_underlying` applies to every
+    contract's own market IV, derived from trailing realized vol versus
+    this underlying's own median market-implied vol for the day.
+
+    **Deliberately multiplicative, scaling each contract's own IV — not a
+    single flat vol substituted across the whole chain.** An earlier
+    version of this function returned one replacement `forecast_vol` for
+    the whole underlying, and it was wrong in a way a live case exposed:
+    SNDK's real chain (confirmed against the raw quotes, a smooth, genuine
+    skew — not noise) ran from ~30% IV at a deep-ITM strike to ~70% IV six
+    hundred dollars further out. Comparing every strike in that chain
+    against one flat forecast number structurally guarantees the lowest
+    point on any real skew curve looks like the biggest "opportunity",
+    regardless of whether the skew itself is justified — a bias with
+    nothing to do with genuine mispricing. Scaling each contract's own IV
+    by a shared ratio instead preserves the skew shape: a genuine view
+    that vol is elevated moves every strike up together, rather than
+    flattening the smile into a single, wrong number.
+
+    The ratio is still capped at `max_ratio`, for the reason the original,
+    single-vol version of this cap existed: trailing RV is a naive floor
+    (see the module docstring's first flagged simplification) that does
+    not know vol mean-reverts after a spike, and an extreme, unbounded
+    ratio is more likely that floor's own blind spot than a real,
+    tradeable view. A ratio of 1.0 (no view) is the safe fallback whenever
+    there is no market IV to compare against.
+    """
+    ivs = quotes["iv"].drop_nulls()
+    if ivs.len() == 0:
+        return 1.0
+    reference = float(ivs.median())
+    if reference <= 0:
+        return 1.0
+    return min(realized_vol / reference, max_ratio)
+
+
 def rank_underlying(
     quotes: pl.DataFrame,
     trading_day: str,
     forecast_drift: float,
-    forecast_vol: float,
+    vol_ratio: float,
     rate_curve: list[tuple[int, float]],
     dividend_yield: float = 0.0,
     round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
@@ -214,6 +261,13 @@ def rank_underlying(
     `liquid_only=True` to `db.read_quotes`) — this only additionally skips
     rows with no solved `iv`/`price`, since those have no basis for
     comparison regardless of the gate's own verdict.
+
+    `vol_ratio` (see `_vol_forecast_ratio`) is multiplied against **each
+    contract's own market IV** to get that contract's forecast vol — not a
+    single flat number reused across the whole chain. This is what keeps
+    the ranking skew-aware: two contracts on the same underlying can and
+    should get two different forecast vols if the market itself prices
+    them differently.
     """
     out: list[RankedContract] = []
     for row in quotes.iter_rows(named=True):
@@ -231,6 +285,7 @@ def rank_underlying(
         spot = row["underlying_price"]
         strike = row["strike"]
         price = row["price"]
+        forecast_vol = row["iv"] * vol_ratio
 
         value = forecast_value(spot, strike, years, forecast_drift, rate, dividend_yield, forecast_vol, is_call)
         cost_per_share = round_trip_cost / multiplier
@@ -259,7 +314,9 @@ def rank_underlying(
     return out
 
 
-def _annualize_horizon_return(predicted_return: float, horizon_days: int) -> float:
+def _annualize_horizon_return(
+    predicted_return: float, horizon_days: int, max_abs_drift: float = MAX_ANNUALIZED_DRIFT
+) -> float:
     """Converts a fixed-horizon predicted return into a continuously
     compounded annual drift, so one model can price contracts at any DTE.
 
@@ -270,9 +327,22 @@ def _annualize_horizon_return(predicted_return: float, horizon_days: int) -> flo
     predicting a return at or below -100% is already nonsensical, and this
     keeps that failure a `ValueError`-free `-inf` drift (a certainty of
     total loss) rather than a `math.log` domain error crashing the whole run.
+
+    The result is then clamped to `±max_abs_drift`. Found live, the same
+    session the vol ratio's cap was added: a raw 5-day prediction of a
+    perfectly ordinary +4.85% — for BRK.B, a low-volatility name where
+    nothing about that number looks alarming on its own — annualizes to a
+    239% continuously-compounded drift once extrapolated out to a 59-day
+    contract, and drove a single underlying to an implied 100% probability
+    of profit and thousand-percent expected values. The exponential in the
+    annualization is exact arithmetic; the *extrapolation* it is applied
+    to is the known-flagged assumption, and this is what that assumption
+    breaking looks like on a real, otherwise-unremarkable prediction, not
+    only on an extreme one.
     """
     growth = max(1.0 + predicted_return, 1e-6)
-    return math.log(growth) / (horizon_days / TRADING_DAYS_PER_YEAR)
+    annualized = math.log(growth) / (horizon_days / TRADING_DAYS_PER_YEAR)
+    return max(-max_abs_drift, min(max_abs_drift, annualized))
 
 
 def load_model(run_dir: Path) -> tuple[lgb.Booster, dict]:
@@ -358,12 +428,13 @@ def rank_day(
         quotes = read_quotes(symbol, trading_day, liquid_only=True)
         if quotes.height == 0:
             continue
+        vol_ratio = _vol_forecast_ratio(vol, quotes)
         ranked.extend(
             rank_underlying(
                 quotes,
                 trading_day,
                 drift,
-                vol,
+                vol_ratio,
                 rate_curve,
                 dividend_yield=dividend_yield,
                 round_trip_cost=round_trip_cost,
