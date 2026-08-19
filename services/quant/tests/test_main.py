@@ -258,7 +258,7 @@ class TestRank:
 
         seen_force = {}
 
-        def _capture(day, model_dir, top=25, force=False):
+        def _capture(day, model_dir, top=25, force=False, max_capital=None):
             seen_force["force"] = force
             return []
 
@@ -266,3 +266,40 @@ class TestRank:
         r = client.post("/rank", json={"day": "2026-01-01"})
         assert r.status_code == 200
         assert seen_force["force"] is True
+
+    def test_max_capital_reaches_rank_day_unchanged(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        seen = {}
+
+        def _capture(day, model_dir, top=25, force=False, max_capital=None):
+            seen["max_capital"] = max_capital
+            return []
+
+        monkeypatch.setattr("app.main.rank_day", _capture)
+        r = client.post("/rank", json={"day": "2026-01-01", "max_capital": 200})
+        assert r.status_code == 200
+        assert seen["max_capital"] == 200.0
+
+    def test_max_capital_defaults_to_none(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        seen = {}
+
+        def _capture(day, model_dir, top=25, force=False, max_capital=None):
+            seen["max_capital"] = max_capital
+            return []
+
+        monkeypatch.setattr("app.main.rank_day", _capture)
+        r = client.post("/rank", json={"day": "2026-01-01"})
+        assert r.status_code == 200
+        assert seen["max_capital"] is None
+
+    def test_max_capital_must_be_positive(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: tmp_path / "unused")
+        r = client.post("/rank", json={"day": "2026-01-01", "max_capital": 0})
+        assert r.status_code == 422

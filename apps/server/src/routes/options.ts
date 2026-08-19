@@ -257,13 +257,14 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    * behind a refusal — see rank.py's own module docstring.
    */
   app.get('/api/quant/rank', async (req, reply) => {
-    const query = req.query as { day?: string; top?: string; force?: string };
+    const query = req.query as { day?: string; top?: string; force?: string; maxCapital?: string };
     const day = query.day ?? todayKey();
     const top = query.top ? Number(query.top) : 25;
     const force = query.force !== 'false';
+    const maxCapital = query.maxCapital ? Number(query.maxCapital) : undefined;
 
     try {
-      return await rankDay(day, top, force);
+      return await rankDay(day, top, force, maxCapital);
     } catch (err) {
       if (err instanceof QuantRefusal) return reply.code(409).send({ error: err.message });
       if (err instanceof QuantUnavailable) return reply.code(503).send({ error: err.message });

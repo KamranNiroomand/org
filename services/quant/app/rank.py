@@ -255,6 +255,7 @@ def rank_underlying(
     dividend_yield: float = 0.0,
     round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
     multiplier: int = DEFAULT_MULTIPLIER,
+    max_capital: float | None = None,
 ) -> list[RankedContract]:
     """Ranks one underlying's contracts by expected value under the given
     forecast. `quotes` is expected to already be `liquid`-filtered (pass
@@ -268,6 +269,15 @@ def rank_underlying(
     the ranking skew-aware: two contracts on the same underlying can and
     should get two different forecast vols if the market itself prices
     them differently.
+
+    `max_capital`, if given, drops any contract costing more than that to
+    buy one contract of (`price * multiplier`) **before** EV is used to
+    rank anything. Filtering by EV alone would never surface an affordable
+    contract on its own: EV scales with the same multiplier capital does,
+    so the cheapest contracts are structurally never the biggest absolute
+    EV regardless of how good a deal they are relative to their own cost —
+    that comparison is what `ev_per_risk` is for, but it never gets a
+    chance to matter if the expensive rows were never excluded first.
     """
     out: list[RankedContract] = []
     for row in quotes.iter_rows(named=True):
@@ -285,12 +295,14 @@ def rank_underlying(
         spot = row["underlying_price"]
         strike = row["strike"]
         price = row["price"]
+        capital = price * multiplier
+        if max_capital is not None and capital > max_capital:
+            continue
         forecast_vol = row["iv"] * vol_ratio
 
         value = forecast_value(spot, strike, years, forecast_drift, rate, dividend_yield, forecast_vol, is_call)
         cost_per_share = round_trip_cost / multiplier
         ev = (value - price - cost_per_share) * multiplier
-        capital = price * multiplier
         prob = probability_of_profit(spot, strike, price, years, forecast_drift, dividend_yield, forecast_vol, is_call)
 
         out.append(
@@ -370,10 +382,13 @@ def rank_day(
     dividend_yield: float = 0.0,
     round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
     force: bool = False,
+    max_capital: float | None = None,
 ) -> list[RankedContract]:
     """The full pipeline: load a model, forecast every underlying, price
     every underlying's gate-passing chain against that forecast, and return
-    the top `top` contracts by expected value.
+    the top `top` contracts by expected value. See `rank_underlying`'s own
+    docstring for why `max_capital` has to be applied per-contract here,
+    before ranking, rather than by the caller filtering the result after.
 
     Refuses to run against a model that did not beat the mean baseline
     out-of-fold, unless `force=True` — ranking real candidates against a
@@ -438,6 +453,7 @@ def rank_day(
                 rate_curve,
                 dividend_yield=dividend_yield,
                 round_trip_cost=round_trip_cost,
+                max_capital=max_capital,
             )
         )
 
@@ -452,10 +468,13 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--vol-window", type=int, default=DEFAULT_VOL_WINDOW)
     parser.add_argument("--force", action="store_true", help="Rank even if the model did not beat baseline.")
+    parser.add_argument("--max-capital", type=float, default=None, help="Drop contracts costing more than this to buy one of (price x multiplier).")
     args = parser.parse_args()
 
     model_dir = args.model or latest_model_dir()
-    ranked = rank_day(args.day, model_dir, vol_window=args.vol_window, top=args.top, force=args.force)
+    ranked = rank_day(
+        args.day, model_dir, vol_window=args.vol_window, top=args.top, force=args.force, max_capital=args.max_capital
+    )
 
     if not ranked:
         print("No ranked contracts — check that liquid, priced quotes exist for this day.")

@@ -119,13 +119,18 @@ export async function priceBatch(rows: PriceRow[], chunkSize = 2000): Promise<Pr
  * `services/quant/app/rank.py`'s own module docstring for what this forecast
  * actually is and, just as importantly, what it is not.
  */
-export async function rankDay(day: string, top = 25, force = true): Promise<RankResult> {
+export async function rankDay(
+  day: string,
+  top = 25,
+  force = true,
+  maxCapital?: number,
+): Promise<RankResult> {
   let res: Response;
   try {
     res = await fetch(`${config.market.quantUrl}/rank`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ day, top, force }),
+      body: JSON.stringify({ day, top, force, max_capital: maxCapital }),
       signal: AbortSignal.timeout(60_000),
     });
   } catch (err) {
