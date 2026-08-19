@@ -18,7 +18,7 @@ import { nowIso, todayKey } from '../lib/util.js';
 import { auditForLeakage } from '../lib/agents/leakageAudit.js';
 import { narrateSignal } from '../lib/agents/narrate.js';
 import { proposeHypotheses } from '../lib/agents/hypotheses.js';
-import { quantHealthy } from '../lib/quant.js';
+import { quantHealthy, rankDay, QuantRefusal, QuantUnavailable } from '../lib/quant.js';
 
 /**
  * Status and control for the options corpus.
@@ -244,6 +244,31 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       app.log.error({ err }, 'Hypothesis generation failed');
+      return reply.code(502).send({ error: message });
+    }
+  });
+
+  /**
+   * The ranked signal board — every gate-passing contract for one trading
+   * day, priced under the current model's forecast and sorted by expected
+   * value. `force=true` by default: the model does not beat its own
+   * out-of-fold baseline yet, and the caller must always get a board to
+   * look at, with that fact attached to the response rather than hidden
+   * behind a refusal — see rank.py's own module docstring.
+   */
+  app.get('/api/quant/rank', async (req, reply) => {
+    const query = req.query as { day?: string; top?: string; force?: string };
+    const day = query.day ?? todayKey();
+    const top = query.top ? Number(query.top) : 25;
+    const force = query.force !== 'false';
+
+    try {
+      return await rankDay(day, top, force);
+    } catch (err) {
+      if (err instanceof QuantRefusal) return reply.code(409).send({ error: err.message });
+      if (err instanceof QuantUnavailable) return reply.code(503).send({ error: err.message });
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      app.log.error({ err }, 'Ranking failed');
       return reply.code(502).send({ error: message });
     }
   });

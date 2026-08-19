@@ -2,21 +2,22 @@ import { useState } from 'react';
 import { cn } from '../ui';
 import { CorpusStatus } from './CorpusStatus';
 import { PaperBook } from './PaperBook';
+import { SignalBoard } from './SignalBoard';
 
 /**
- * The Options tab, in its first real form.
+ * The Options tab.
  *
- * Two screens, both wired to what actually exists today: corpus health and
- * the paper book. There is no ranked signal board yet — `rank.py` and the
- * model behind it aren't built — so this is deliberately not a chain
- * browser or a recommendation list. It is somewhere to watch the pipeline
- * work and to run paper trades by hand while that catches up.
+ * Three screens: corpus health, the ranked signal board, and the paper book.
+ * The signal board is the primary way to place a paper trade now — the open
+ * form on the paper book itself remains for typing in a symbol the board
+ * didn't rank, not as the main path.
  */
 
-type SubTab = 'status' | 'paper';
+type SubTab = 'status' | 'signals' | 'paper';
 
 const SUB_TABS: Array<[SubTab, string]> = [
   ['status', 'Status'],
+  ['signals', 'Signals'],
   ['paper', 'Paper book'],
 ];
 
@@ -42,6 +43,7 @@ export function OptionsTab() {
       </div>
 
       {tab === 'status' && <CorpusStatus />}
+      {tab === 'signals' && <SignalBoard />}
       {tab === 'paper' && <PaperBook />}
     </div>
   );

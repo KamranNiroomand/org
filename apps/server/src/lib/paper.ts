@@ -9,11 +9,10 @@ import { newId, nowIso } from './util.js';
 /**
  * Paper trading with artificial money.
  *
- * No signal-generating model exists yet, so an order is opened by calling
- * this module directly rather than by a ranked recommendation — `source`
- * distinguishes the two so the future ranked board plugs in without a schema
- * change. Every dollar here is imaginary: nothing in this module places a
- * real order, touches a real account, or could.
+ * An order's `source` distinguishes one opened by hand from one opened from
+ * the ranked signal board, without a schema change between the two — see
+ * `OpenOrderInput.source`. Every dollar here is imaginary: nothing in this
+ * module places a real order, touches a real account, or could.
  *
  * **Long only.** A short option's loss is unbounded and its margin
  * requirement is a real brokerage mechanic this module does not simulate;
@@ -52,6 +51,8 @@ export interface OpenOrderInput {
   /** Overrides the auto-fetched ask. Required until real quotes exist to fetch. */
   entryPriceE4?: number;
   notes?: string;
+  /** Which UI opened this — a manual typed entry, or one click off the ranked board. */
+  source?: 'manual' | 'model';
 }
 
 /**
@@ -107,7 +108,7 @@ export function openOrder(input: OpenOrderInput): string {
       entryPriceE4,
       entryBasis,
       status: 'open',
-      source: 'manual',
+      source: input.source ?? 'manual',
       notes: input.notes ?? null,
       openedAt: nowIso(),
     })
