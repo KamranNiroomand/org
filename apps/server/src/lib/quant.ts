@@ -145,3 +145,51 @@ export async function rankDay(
   }
   return (await res.json()) as RankResult;
 }
+
+export interface HeldContract {
+  occSymbol: string;
+  underlying: string;
+}
+
+export interface PositionHealthResult {
+  model_run_id: string;
+  model_beats_baseline: boolean;
+  //: keyed by occSymbol; a null value means no current view could be
+  //: computed for that contract (expired, no quote today, no rate for its
+  //: DTE) — see score_held_contracts's own docstring.
+  contracts: Record<string, RankedContract | null>;
+}
+
+/**
+ * Re-scores specific, already-held contracts against **today's** forecast
+ * — the position-monitor path, not a fresh ranking. See
+ * `services/quant/app/rank.py`'s `score_held_contracts` for why this is not
+ * just `rankDay` called again.
+ */
+export async function positionHealth(day: string, contracts: HeldContract[]): Promise<PositionHealthResult> {
+  if (contracts.length === 0) {
+    return { model_run_id: '', model_beats_baseline: false, contracts: {} };
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/position-health`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        day,
+        contracts: contracts.map((c) => ({ occ_symbol: c.occSymbol, underlying: c.underlying })),
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (res.status === 409) {
+    const body = (await res.json()) as { detail: string };
+    throw new QuantRefusal(body.detail);
+  }
+  if (!res.ok) {
+    throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as PositionHealthResult;
+}

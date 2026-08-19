@@ -228,3 +228,27 @@ export function readDocumentsBefore(underlying: string, beforeInstant: string) {
     .orderBy(desc(documents.publishedAt))
     .all();
 }
+
+/** The mirror image of `readDocumentsBefore` — everything published for
+ * `underlying` strictly after `sinceInstant`, newest first. For a
+ * position-health check ("what's happened since I opened this"), not a
+ * training feature, so it also surfaces `eventType` — the classifier's own
+ * tag, useful to a person skimming, not useful as an ML feature since it is
+ * itself derived from the same document.
+ */
+export function readDocumentsSince(underlying: string, sinceInstant: string) {
+  return marketDb
+    .select({
+      id: documents.id,
+      source: documents.source,
+      publishedAt: documents.publishedAt,
+      title: documents.title,
+      eventType: documents.eventType,
+      sentiment: docMentions.sentiment,
+    })
+    .from(docMentions)
+    .innerJoin(documents, eq(documents.id, docMentions.documentId))
+    .where(sql`${docMentions.underlying} = ${underlying} and ${documents.publishedAt} > ${sinceInstant}`)
+    .orderBy(desc(documents.publishedAt))
+    .all();
+}

@@ -374,21 +374,19 @@ def latest_model_dir(base_dir: Path | None = None) -> Path:
     return max(candidates, key=lambda d: d.name)
 
 
-def rank_day(
+def _forecast_inputs(
     trading_day: str,
     model_dir: Path,
-    vol_window: int = DEFAULT_VOL_WINDOW,
-    top: int = 25,
-    dividend_yield: float = 0.0,
-    round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
-    force: bool = False,
-    max_capital: float | None = None,
-) -> list[RankedContract]:
-    """The full pipeline: load a model, forecast every underlying, price
-    every underlying's gate-passing chain against that forecast, and return
-    the top `top` contracts by expected value. See `rank_underlying`'s own
-    docstring for why `max_capital` has to be applied per-contract here,
-    before ranking, rather than by the caller filtering the result after.
+    vol_window: int,
+    force: bool,
+) -> tuple[dict[str, float], dict[str, float], list[tuple[int, float]], dict]:
+    """Everything both `rank_day` (every gate-passing contract) and
+    `score_held_contracts` (specific, already-held contracts) need before
+    they can price anything: a per-symbol drift forecast, a per-symbol
+    realized-vol floor, and the day's rate curve. Split out so a held
+    position gets scored against the exact same forecast machinery a fresh
+    ranking would use — two different formulas for "what does the model
+    think" would be its own, worse bug.
 
     Refuses to run against a model that did not beat the mean baseline
     out-of-fold, unless `force=True` — ranking real candidates against a
@@ -435,6 +433,29 @@ def rank_day(
     if not rate_curve:
         raise SystemExit(f"No risk-free rate curve on or before {trading_day}.")
 
+    return drift_by_symbol, vol_by_symbol, rate_curve, manifest
+
+
+def rank_day(
+    trading_day: str,
+    model_dir: Path,
+    vol_window: int = DEFAULT_VOL_WINDOW,
+    top: int = 25,
+    dividend_yield: float = 0.0,
+    round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
+    force: bool = False,
+    max_capital: float | None = None,
+) -> list[RankedContract]:
+    """The full pipeline: load a model, forecast every underlying, price
+    every underlying's gate-passing chain against that forecast, and return
+    the top `top` contracts by expected value. See `rank_underlying`'s own
+    docstring for why `max_capital` has to be applied per-contract here,
+    before ranking, rather than by the caller filtering the result after.
+    """
+    drift_by_symbol, vol_by_symbol, rate_curve, _manifest = _forecast_inputs(
+        trading_day, model_dir, vol_window, force
+    )
+
     ranked: list[RankedContract] = []
     for symbol, drift in drift_by_symbol.items():
         # A drift that landed exactly on the cap isn't a large-but-real
@@ -471,6 +492,70 @@ def rank_day(
 
     ranked.sort(key=lambda c: c.ev, reverse=True)
     return ranked[:top]
+
+
+def score_held_contracts(
+    contracts: list[dict],
+    trading_day: str,
+    model_dir: Path,
+    vol_window: int = DEFAULT_VOL_WINDOW,
+    dividend_yield: float = 0.0,
+    round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
+    force: bool = False,
+) -> dict[str, RankedContract | None]:
+    """Re-scores specific, already-held contracts against **today's**
+    forecast — for a position monitor, not a fresh entry screen.
+
+    `contracts` is `[{occ_symbol, underlying}, ...]`. Only those two fields
+    are needed: strike, expiry, and type all come from today's captured
+    quote row for that `occ_symbol` (the same source `rank_day` itself
+    reads from), never from the caller — a held position's own contract
+    details are a database fact, not something worth risking a second,
+    possibly-stale copy of by threading them through the caller instead.
+
+    Unlike `rank_day`, this never applies the liquidity gate or drops a
+    clamped-drift underlying — a position you already hold needs an honest
+    current view regardless of whether it would pass today's entry
+    criteria; hiding it would just mean silence exactly when a position has
+    gone the direction those checks exist to catch. A `None` result means
+    "no current view could be computed" (contract expired, no quote today,
+    no rate for its DTE), not "this position is fine".
+    """
+    drift_by_symbol, vol_by_symbol, rate_curve, _manifest = _forecast_inputs(
+        trading_day, model_dir, vol_window, force
+    )
+
+    by_underlying: dict[str, list[str]] = {}
+    for c in contracts:
+        by_underlying.setdefault(c["underlying"], []).append(c["occ_symbol"])
+
+    results: dict[str, RankedContract | None] = {c["occ_symbol"]: None for c in contracts}
+    for underlying, occ_symbols in by_underlying.items():
+        drift = drift_by_symbol.get(underlying)
+        vol = vol_by_symbol.get(underlying)
+        if drift is None or vol is None or vol <= 0:
+            continue
+        # liquid_only=False: an existing position still needs a current
+        # view even on a day it wouldn't pass the entry gate.
+        quotes = read_quotes(underlying, trading_day, liquid_only=False)
+        if quotes.height == 0:
+            continue
+        vol_ratio = _vol_forecast_ratio(vol, quotes)
+        held_quotes = quotes.filter(pl.col("occ_symbol").is_in(occ_symbols))
+        if held_quotes.height == 0:
+            continue
+        for scored in rank_underlying(
+            held_quotes,
+            trading_day,
+            drift,
+            vol_ratio,
+            rate_curve,
+            dividend_yield=dividend_yield,
+            round_trip_cost=round_trip_cost,
+        ):
+            results[scored.occ_symbol] = scored
+
+    return results
 
 
 def main() -> None:

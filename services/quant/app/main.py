@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.pricing import american_price, bsm_greeks, implied_vol
-from app.rank import RankedContract, latest_model_dir, load_model, rank_day
+from app.rank import RankedContract, latest_model_dir, load_model, rank_day, score_held_contracts
 
 app = FastAPI(title="org-quant", version="0.1.0")
 
@@ -249,4 +249,56 @@ def rank(request: RankRequest) -> RankResponse:
         model_beats_baseline=manifest["metrics"]["beats_baseline"],
         model_information_coefficient=manifest["metrics"]["information_coefficient"],
         contracts=[RankedContractResponse.from_ranked(c) for c in ranked],
+    )
+
+
+class HeldContract(BaseModel):
+    occ_symbol: str
+    underlying: str
+
+
+class PositionHealthRequest(BaseModel):
+    """Re-scores specific, already-held contracts against today's forecast
+    — see score_held_contracts's own docstring for why this is not just
+    `/rank` called again.
+    """
+
+    day: str = Field(description="Trading day, YYYY-MM-DD.")
+    contracts: list[HeldContract]
+    #: Same reasoning as RankRequest.force — a position monitor that goes
+    #: silent the moment the model stops beating baseline is worse than
+    #: one that keeps reporting with the caveat attached.
+    force: bool = True
+
+
+class PositionHealthResponse(BaseModel):
+    model_run_id: str
+    model_beats_baseline: bool
+    #: keyed by occ_symbol; a null value means no current view could be
+    #: computed (expired, no quote today, no rate for its DTE) — never
+    #: fabricated as "unchanged" or dropped from the response silently.
+    contracts: dict[str, RankedContractResponse | None]
+
+
+@app.post("/position-health", response_model=PositionHealthResponse)
+def position_health(request: PositionHealthRequest) -> PositionHealthResponse:
+    try:
+        model_dir = latest_model_dir()
+        _, manifest = load_model(model_dir)
+        scored = score_held_contracts(
+            [c.model_dump() for c in request.contracts],
+            request.day,
+            model_dir,
+            force=request.force,
+        )
+    except SystemExit as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    return PositionHealthResponse(
+        model_run_id=manifest["run_id"],
+        model_beats_baseline=manifest["metrics"]["beats_baseline"],
+        contracts={
+            occ: (RankedContractResponse.from_ranked(c) if c is not None else None)
+            for occ, c in scored.items()
+        },
     )

@@ -63,6 +63,28 @@ export interface OptionsStatus {
   days: OptionsStatusDay[];
 }
 
+/**
+ * The nightly re-evaluation of an open position against today's forecast
+ * and today's news — see `apps/server/src/lib/options/positionHealth.ts`.
+ * Null until the nightly job has scored this order at least once.
+ * `current*` fields are null together when no current view could be
+ * computed (expired, no quote today) — not the same as "the position is
+ * fine".
+ */
+export interface PositionHealth {
+  day: string;
+  currentEv: number | null;
+  currentEvPerRisk: number | null;
+  currentProbProfit: number | null;
+  currentForecastVol: number | null;
+  currentForecastDrift: number | null;
+  newDocumentsCount: number;
+  latestDocumentTitle: string | null;
+  latestDocumentEventType: string | null;
+  latestDocumentPublishedAt: string | null;
+  computedAt: string;
+}
+
 export interface PaperOrder {
   id: string;
   occSymbol: string;
@@ -77,6 +99,7 @@ export interface PaperOrder {
   notes: string | null;
   openedAt: string;
   closedAt: string | null;
+  health: PositionHealth | null;
 }
 
 export interface PaperEquityPoint {
@@ -135,6 +158,8 @@ export const optionsApi = {
   closeOrder: (id: string, exitPriceE4?: number) =>
     api.post<{ ok: true }>(`/api/paper/orders/${id}/close`, exitPriceE4 !== undefined ? { exitPriceE4 } : {}),
   markNow: () => api.post<{ tradingDay: string; marked: number; skipped: unknown[] }>('/api/paper/mark'),
+  checkHealthNow: () =>
+    api.post<{ tradingDay: string; scored: number; skipped: unknown[] }>('/api/paper/health'),
 
   rank: (day: string, top = 25, maxCapital?: number) =>
     api.get<RankResponse>(

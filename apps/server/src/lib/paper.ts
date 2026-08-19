@@ -23,7 +23,7 @@ import { newId, nowIso } from './util.js';
 
 export class PaperError extends Error {}
 
-function contractMultiplier(occSymbol: string): { multiplier: number; underlying: string } {
+export function contractMultiplier(occSymbol: string): { multiplier: number; underlying: string } {
   const row = marketDb
     .select({ multiplier: optionContracts.multiplier, underlying: optionContracts.underlying })
     .from(optionContracts)
