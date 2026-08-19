@@ -2,8 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { desc } from 'drizzle-orm';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { marketDb } from '../db/market/index.js';
-import { paperEquity, paperOrders } from '../db/market/schema.js';
+import { paperDb } from '../db/paper/index.js';
+import { paperEquity, paperOrders } from '../db/paper/schema.js';
 import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct } from '../lib/paper.js';
 
 /**
@@ -32,7 +32,7 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
     startingBalanceE4: config.market.paperStartingBalanceE4,
   }));
 
-  app.get('/api/paper/orders', async () => marketDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all());
+  app.get('/api/paper/orders', async () => paperDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all());
 
   app.post('/api/paper/orders', async (req, reply) => {
     const parsed = openBody.safeParse(req.body);
@@ -66,8 +66,8 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
    * `tradeReturnPct` per position without a second endpoint.
    */
   app.get('/api/paper/equity', async () => {
-    const equity = marketDb.select().from(paperEquity).orderBy(paperEquity.day).all();
-    const orders = marketDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all();
+    const equity = paperDb.select().from(paperEquity).orderBy(paperEquity.day).all();
+    const orders = paperDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all();
     return { startingBalanceE4: config.market.paperStartingBalanceE4, equity, orders };
   });
 
@@ -80,7 +80,7 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get<{ Params: { id: string } }>('/api/paper/orders/:id/return', async (req, reply) => {
-    const order = marketDb.select().from(paperOrders).all().find((o) => o.id === req.params.id);
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === req.params.id);
     if (!order) return reply.code(404).send({ error: 'Unknown order' });
     const currentE4 = order.exitPriceE4 ?? order.entryPriceE4;
     return {

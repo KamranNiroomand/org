@@ -3,7 +3,10 @@ import { formatOccSymbol, toE4 } from '@org/shared';
 import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
 import { runMarketMigrations } from '../db/market/migrate.js';
-import { optionContracts, optionQuotes, paperEquity, paperMarks, paperOrders } from '../db/market/schema.js';
+import { optionContracts, optionQuotes } from '../db/market/schema.js';
+import { paperDb } from '../db/paper/index.js';
+import { runPaperMigrations } from '../db/paper/migrate.js';
+import { paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { nowIso } from './util.js';
 import {
   closeOrder,
@@ -70,9 +73,10 @@ function seedQuote(tradingDay: string, bidE4: number, askE4: number) {
 
 beforeEach(() => {
   runMarketMigrations();
-  marketDb.delete(paperMarks).run();
-  marketDb.delete(paperEquity).run();
-  marketDb.delete(paperOrders).run();
+  runPaperMigrations();
+  paperDb.delete(paperMarks).run();
+  paperDb.delete(paperEquity).run();
+  paperDb.delete(paperOrders).run();
   marketDb.delete(optionQuotes).run();
   marketDb.delete(optionContracts).run();
   seedContract();
@@ -82,7 +86,7 @@ describe('openOrder', () => {
   it('fills at the ask when a real quote exists', () => {
     seedQuote(new Date().toISOString().slice(0, 10), BID_E4, ASK_E4);
     const id = openOrder({ occSymbol: OCC, quantity: 2 });
-    const order = marketDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
     expect(order.entryPriceE4).toBe(ASK_E4);
     expect(order.entryBasis).toBe('measured');
     expect(order.side).toBe('long');
@@ -92,7 +96,7 @@ describe('openOrder', () => {
   it('requires an explicit price before any quote exists', () => {
     expect(() => openOrder({ occSymbol: OCC, quantity: 1 })).toThrow(PaperError);
     const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
-    const order = marketDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
     expect(order.entryBasis).toBe('modelled');
   });
 
@@ -120,7 +124,7 @@ describe('closeOrder', () => {
     const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
     seedQuote(new Date().toISOString().slice(0, 10), BID_E4, ASK_E4);
     closeOrder({ orderId: id });
-    const order = marketDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
     expect(order.exitPriceE4).toBe(BID_E4);
     expect(order.exitBasis).toBe('measured');
     expect(order.status).toBe('closed');
@@ -129,7 +133,7 @@ describe('closeOrder', () => {
   it('accepts a zero bid — worthless at expiry is a legitimate exit', () => {
     const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
     closeOrder({ orderId: id, exitPriceE4: 0 });
-    const order = marketDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
     expect(order.exitPriceE4).toBe(0);
   });
 
@@ -160,7 +164,7 @@ describe('markOpenPositions', () => {
     expect(result.marked).toBe(1);
     expect(result.skipped).toHaveLength(0);
 
-    const mark = marketDb.select().from(paperMarks).all().find((m) => m.orderId === id)!;
+    const mark = paperDb.select().from(paperMarks).all().find((m) => m.orderId === id)!;
     expect(mark.markPriceE4).toBe(BID_E4);
     expect(mark.basis).toBe('measured');
     expect(mark.unrealizedPlE4).toBe((BID_E4 - ASK_E4) * 3 * MULTIPLIER);
@@ -188,7 +192,7 @@ describe('markOpenPositions', () => {
       .run();
 
     markOpenPositions(today);
-    const mark = marketDb.select().from(paperMarks).all().find((m) => m.orderId === id)!;
+    const mark = paperDb.select().from(paperMarks).all().find((m) => m.orderId === id)!;
     expect(mark.markPriceE4).toBe(toE4(1.05));
     expect(mark.basis).toBe('modelled');
   });
@@ -207,7 +211,7 @@ describe('markOpenPositions', () => {
     seedQuote(today, BID_E4, ASK_E4);
     markOpenPositions(today);
     markOpenPositions(today);
-    const marks = marketDb.select().from(paperMarks).all().filter((m) => m.orderId === id);
+    const marks = paperDb.select().from(paperMarks).all().filter((m) => m.orderId === id);
     expect(marks).toHaveLength(1);
   });
 });
@@ -225,10 +229,10 @@ describe('computeDailyEquity', () => {
     markOpenPositions(today);
 
     computeDailyEquity(today);
-    const row = marketDb.select().from(paperEquity).all().find((e) => e.day === today)!;
+    const row = paperDb.select().from(paperEquity).all().find((e) => e.day === today)!;
 
     const realizedPl = (BID_E4 - ASK_E4) * 2 * MULTIPLIER;
-    const mark = marketDb.select().from(paperMarks).all().find((m) => m.orderId === openId)!;
+    const mark = paperDb.select().from(paperMarks).all().find((m) => m.orderId === openId)!;
     const unrealizedPl = mark.unrealizedPlE4;
 
     expect(row.realizedPlToDateE4).toBe(realizedPl);
@@ -244,12 +248,12 @@ describe('computeDailyEquity', () => {
     openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
     markOpenPositions(day1);
     computeDailyEquity(day1);
-    const row1 = marketDb.select().from(paperEquity).all().find((e) => e.day === day1)!;
+    const row1 = paperDb.select().from(paperEquity).all().find((e) => e.day === day1)!;
     expect(row1.dayReturnPct).toBeNull();
 
     markOpenPositions(day2);
     computeDailyEquity(day2);
-    const row2 = marketDb.select().from(paperEquity).all().find((e) => e.day === day2)!;
+    const row2 = paperDb.select().from(paperEquity).all().find((e) => e.day === day2)!;
     expect(row2.dayReturnPct).not.toBeNull();
   });
 
@@ -259,7 +263,7 @@ describe('computeDailyEquity', () => {
     openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
     markOpenPositions(today);
     computeDailyEquity(today);
-    const row = marketDb.select().from(paperEquity).all().find((e) => e.day === today)!;
+    const row = paperDb.select().from(paperEquity).all().find((e) => e.day === today)!;
 
     const expectedPct =
       ((row.totalEquityE4 - config.market.paperStartingBalanceE4) / config.market.paperStartingBalanceE4) * 100;
@@ -273,7 +277,7 @@ describe('computeDailyEquity', () => {
     markOpenPositions(today);
     computeDailyEquity(today);
     computeDailyEquity(today);
-    const rows = marketDb.select().from(paperEquity).all().filter((e) => e.day === today);
+    const rows = paperDb.select().from(paperEquity).all().filter((e) => e.day === today);
     expect(rows).toHaveLength(1);
   });
 });

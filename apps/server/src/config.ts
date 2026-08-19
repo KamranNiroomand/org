@@ -37,6 +37,8 @@ const schema = z.object({
   // Path to MARKET_DATA_DIR on the runner, if different from this machine's.
   RUNNER_DATA_DIR: z.string().optional(),
   MARKET_DB_PATH: z.string().optional(),
+  // Separate from market.db on purpose — see config.market.paperDbPath.
+  PAPER_DB_PATH: z.string().optional(),
   POLYGON_API_KEY: z.string().optional(),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
   OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
@@ -118,6 +120,15 @@ export const config = {
   market: {
     dataDir: marketDataDir,
     dbPath: env.MARKET_DB_PATH ?? join(marketDataDir, 'market.db'),
+    /**
+     * A paper trade is the user's own decision, made from whichever machine
+     * they're looking at the UI on — a reader as often as the runner. Kept
+     * as a physically separate file from `market.db`, in the same directory
+     * but never touched by `market:pull`'s single-file rsync, because that
+     * pull replaces `market.db` wholesale: a paper order that lived inside
+     * it would be silently destroyed by the next pull. See paper/schema.ts.
+     */
+    paperDbPath: env.PAPER_DB_PATH ?? join(marketDataDir, 'paper.db'),
     archiveDir: join(marketDataDir, 'quotes'),
     modelsDir: join(marketDataDir, 'models'),
     /** Days of quotes kept in SQLite before archival moves them to Parquet. */

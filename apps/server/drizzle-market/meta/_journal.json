@@ -36,6 +36,13 @@
       "when": 1787087088153,
       "tag": "0004_silky_korath",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787138265815,
+      "tag": "0005_bumpy_violations",
+      "breakpoints": true
     }
   ]
 }

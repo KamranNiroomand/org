@@ -26,6 +26,12 @@ export default defineConfig({
       // real research corpus, which by then holds years of captured quotes that
       // cannot be re-fetched.
       MARKET_DATA_DIR: join(tmpdir(), 'org-vitest-market'),
+      // Same hazard, third time: paper.ts opens the paper trading database at
+      // import time too, and it is a physically separate file from
+      // market.db precisely so a real paper trade can never be silently
+      // destroyed by a pull — redirecting it here is what keeps a test run
+      // from being able to touch it in the first place.
+      PAPER_DB_PATH: join(tmpdir(), 'org-vitest-paper', 'paper.db'),
       // The same hazard applies to the personal database — anything that
       // imports src/db/index.ts (categorize.ts, most of routes/) opens a
       // handle to it at import time, with no test ever having exercised that
