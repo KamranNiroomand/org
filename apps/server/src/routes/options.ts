@@ -13,6 +13,8 @@ import { listUniverse, retierByLiquidity } from '../lib/options/universe.js';
 import { repriceDay } from '../lib/options/reprice.js';
 import { nowIso, todayKey } from '../lib/util.js';
 import { auditForLeakage } from '../lib/agents/leakageAudit.js';
+import { narrateSignal } from '../lib/agents/narrate.js';
+import { proposeHypotheses } from '../lib/agents/hypotheses.js';
 import { quantHealthy } from '../lib/quant.js';
 
 /**
@@ -147,6 +149,75 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       app.log.error({ err }, 'Leakage audit failed');
+      return reply.code(502).send({ error: message });
+    }
+  });
+
+  /**
+   * Explains one ranked contract's numbers in plain language. Never a price
+   * predictor — see agents/narrate.ts. The caller supplies the already-
+   * computed signal; this agent explains it, never recomputes it.
+   */
+  app.post('/api/quant/narrate', async (req, reply) => {
+    const parsed = z
+      .object({
+        occSymbol: z.string().min(1),
+        underlying: z.string().min(1),
+        type: z.enum(['call', 'put']),
+        strike: z.number().positive(),
+        dte: z.number().int().positive(),
+        marketPrice: z.number().positive(),
+        marketIv: z.number().positive(),
+        forecastVol: z.number().positive(),
+        forecastDrift: z.number(),
+        ev: z.number(),
+        evPerRisk: z.number(),
+        probProfit: z.number().min(0).max(1),
+        modelBeatsBaseline: z.boolean(),
+        modelInformationCoefficient: z.number(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
+
+    if (!config.anthropic.configured) {
+      return reply.code(503).send({ error: 'ANTHROPIC_API_KEY is not set — the narrator cannot run.' });
+    }
+
+    try {
+      return await narrateSignal(parsed.data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      app.log.error({ err }, 'Narration failed');
+      return reply.code(502).send({ error: message });
+    }
+  });
+
+  /**
+   * Proposes candidate features for a human to implement and test — never
+   * implements or scores one. See agents/hypotheses.ts.
+   */
+  app.post('/api/quant/hypotheses', async (req, reply) => {
+    const parsed = z
+      .object({
+        target: z.enum(['dir', 'vrp']),
+        currentFeatureCols: z.array(z.string()).min(1),
+        currentInformationCoefficient: z.number(),
+        currentBeatsBaseline: z.boolean(),
+        nSymbols: z.number().int().positive(),
+        nTrainDays: z.number().int().positive(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
+
+    if (!config.anthropic.configured) {
+      return reply.code(503).send({ error: 'ANTHROPIC_API_KEY is not set — the hypothesis generator cannot run.' });
+    }
+
+    try {
+      return await proposeHypotheses(parsed.data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      app.log.error({ err }, 'Hypothesis generation failed');
       return reply.code(502).send({ error: message });
     }
   });
