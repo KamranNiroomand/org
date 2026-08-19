@@ -97,11 +97,20 @@ function SignalRow({ contract, onOpened }: { contract: RankedContract; onOpened:
 
 export function SignalBoard() {
   const qc = useQueryClient();
-  const [day, setDay] = useState(todayKey());
+  // `null` means "not yet chosen" — defaults to the corpus's own latest
+  // captured day below, not today, because tonight's capture usually
+  // hasn't run yet when this loads and today would just be empty.
+  const [day, setDay] = useState<string | null>(null);
+
+  const { data: status } = useQuery({
+    queryKey: ['options-status'],
+    queryFn: () => optionsApi.status(),
+  });
+  const effectiveDay = day ?? status?.totals.lastDay ?? todayKey();
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ['quant-rank', day],
-    queryFn: () => optionsApi.rank(day),
+    queryKey: ['quant-rank', effectiveDay],
+    queryFn: () => optionsApi.rank(effectiveDay),
     retry: false,
   });
 
@@ -119,7 +128,7 @@ export function SignalBoard() {
             <div className="flex items-center gap-2">
               <Input
                 type="date"
-                value={day}
+                value={effectiveDay}
                 onChange={(e) => setDay(e.target.value)}
                 className="h-7 w-36 text-xs"
               />
