@@ -67,6 +67,23 @@ def sharpe_ratio(returns: np.ndarray, periods_per_year: int = 252) -> float:
     return float(np.mean(r) / np.std(r) * math.sqrt(periods_per_year))
 
 
+def max_drawdown(cumulative: np.ndarray) -> float:
+    """Largest peak-to-trough decline in a cumulative P&L or equity series.
+
+    Returned as a positive number — "the drawdown was 1200.0", not "-1200.0"
+    — since every caller so far wants magnitude, and a stray missing minus
+    sign turning a loss into a gain is exactly the kind of silent sign bug
+    this project's conventions elsewhere (E4 money, explicit null vs. zero)
+    exist to make impossible by construction.
+    """
+    c = np.asarray(cumulative, dtype=float)
+    if c.size == 0:
+        return 0.0
+    running_peak = np.maximum.accumulate(c)
+    drawdown = running_peak - c
+    return float(np.max(drawdown))
+
+
 def deflated_sharpe_ratio(
     observed_sharpe: float,
     n_trials: int,

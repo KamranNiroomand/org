@@ -17,6 +17,7 @@ from app.metrics import (
     information_coefficient,
     log_loss,
     mae,
+    max_drawdown,
     rmse,
     sharpe_ratio,
 )
@@ -99,6 +100,25 @@ class TestSharpeRatio:
 
     def test_zero_volatility_is_zero_not_infinity(self) -> None:
         assert sharpe_ratio(np.array([0.01, 0.01, 0.01])) == 0.0
+
+
+class TestMaxDrawdown:
+    def test_matches_hand_computation(self) -> None:
+        # Peak 100 at index 1, trough 60 at index 3 -> drawdown 40.
+        cumulative = np.array([50.0, 100.0, 80.0, 60.0, 90.0])
+        assert max_drawdown(cumulative) == pytest.approx(40.0)
+
+    def test_returned_as_a_positive_magnitude_not_a_negative_delta(self) -> None:
+        assert max_drawdown(np.array([100.0, 50.0])) == 50.0
+
+    def test_monotonically_rising_series_has_zero_drawdown(self) -> None:
+        assert max_drawdown(np.array([1.0, 2.0, 3.0, 4.0])) == 0.0
+
+    def test_empty_series_is_zero(self) -> None:
+        assert max_drawdown(np.array([])) == 0.0
+
+    def test_single_point_is_zero(self) -> None:
+        assert max_drawdown(np.array([42.0])) == 0.0
 
 
 class TestDeflatedSharpeRatio:

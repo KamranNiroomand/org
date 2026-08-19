@@ -224,3 +224,57 @@ def read_risk_free_curve(day: str) -> list[tuple[int, float]]:
             [latest["day"]],
         ).fetchall()
     return [(r["tenor_days"], r["rate_bps"] / 10_000.0) for r in rows]
+
+
+def read_contract_history(occ_symbols: list[str]) -> pl.DataFrame:
+    """Every captured row for the given contracts, across all trading days.
+
+    For walking a position forward after entry — `backtest.py`'s reason to
+    exist. One query for the whole list rather than one call per contract:
+    a backtest over even a modest candidate set is thousands of contracts,
+    and a query-per-contract there is the same anti-pattern `read_bars`
+    already avoids for the whole universe.
+    """
+    schema = {
+        "occ_symbol": pl.Utf8,
+        "trading_day": pl.Utf8,
+        "price": pl.Float64,
+        "underlying_price": pl.Float64,
+        "iv": pl.Float64,
+        "liquid": pl.Boolean,
+    }
+    if not occ_symbols:
+        return pl.DataFrame(schema=schema)
+
+    placeholders = ",".join("?" for _ in occ_symbols)
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT occ_symbol, trading_day, bid_e4, ask_e4, close_e4,
+                   underlying_e4, iv_bps, liquid
+            FROM option_quotes
+            WHERE occ_symbol IN ({placeholders})
+            ORDER BY occ_symbol, trading_day
+            """,
+            occ_symbols,
+        ).fetchall()
+
+    if not rows:
+        return pl.DataFrame(schema=schema)
+
+    def price(bid_e4: int | None, ask_e4: int | None, close_e4: int | None) -> float | None:
+        if bid_e4 is not None and ask_e4 is not None and bid_e4 > 0:
+            return (bid_e4 + ask_e4) / (2 * _E4)
+        return (close_e4 / _E4) if close_e4 is not None else None
+
+    return pl.DataFrame(
+        {
+            "occ_symbol": [r["occ_symbol"] for r in rows],
+            "trading_day": [r["trading_day"] for r in rows],
+            "price": [price(r["bid_e4"], r["ask_e4"], r["close_e4"]) for r in rows],
+            "underlying_price": [r["underlying_e4"] / _E4 for r in rows],
+            "iv": [(r["iv_bps"] / 10_000.0) if r["iv_bps"] is not None else None for r in rows],
+            "liquid": [bool(r["liquid"]) for r in rows],
+        },
+        schema=schema,
+    )
