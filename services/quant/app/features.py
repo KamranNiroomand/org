@@ -6,14 +6,25 @@ amounts of data.
 **Underlying features** need only bars, which the backfill already provides
 for the whole universe. They can be built and validated today.
 
-**Chain surface features** need a captured option chain, and none exists yet
-— nightly capture only started running. Every chain function here is written
-and unit-tested against realistic quote panels, but has not been validated
-against a real multi-expiry, multi-type capture the way `pricing.py` was
-validated against a real broker chain. That validation is still owed, and
-belongs in a follow-up once the corpus has real data to check against — see
-the tests in `tests/test_features.py` for exactly what is and is not proven
-yet.
+**Chain surface features** need a captured option chain — validated against
+the real corpus now that one exists (see `tests/test_features.py`'s
+`TestChainFeaturesOnRealMultiExpiryChain`), not just the synthetic panel they
+shipped unit-tested against. That validation caught a real bug: `db.py`'s
+`read_quotes` did not dedupe a day recaptured after an interrupted run,
+silently double-counting roughly 16% of contracts in `put_call_ratios`' sums
+— fixed at the source rather than here.
+
+It also surfaced something that is not a code bug but is worth knowing before
+using these: **near-zero-DTE ATM IV can be dominated by a stale trade
+print.** A 1-day AAPL call solved to 84% IV against every neighbouring
+strike sitting near 30-40% — not a real term-structure event, but a `close`
+price captured from a trade that happened earlier in the day than the
+underlying price recorded alongside it, on a contract this data plan has no
+live quote to sanity-check against. `term_slope` and `risk_reversal_25d` will
+faithfully compute a number from whatever `atm_iv_by_expiry` selects, noise
+included — filtering to a minimum DTE before calling them, once there is
+enough captured history to pick a threshold from evidence rather than a
+guess, is the next honest step here, not a silent clamp added now.
 """
 
 from __future__ import annotations

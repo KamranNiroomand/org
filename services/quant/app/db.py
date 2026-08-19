@@ -117,13 +117,25 @@ def read_bars(symbols: list[str] | None = None, start: str | None = None, end: s
 
 
 def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) -> pl.DataFrame:
-    """One underlying's captured contracts on one day.
+    """One underlying's captured contracts on one day — one row per contract.
 
     `liquid_only` defaults to `False`: surface features like put/call ratios
     want the whole chain, since an illiquid strike still reflects real
     positioning even if it would never be offered as a trade candidate. Filter
     to `liquid_only=True` only at the point where a contract might actually be
     ranked or filled.
+
+    **Deduped to the latest `as_of` per contract.** `option_quotes` is
+    append-only and keyed on `(occ_symbol, as_of)`, not `(occ_symbol,
+    trading_day)` — a day recaptured after an interrupted run (a stale
+    process, a restart) leaves two real, distinct rows for the same contract
+    on the same day, both with the same close and same solved IV, but
+    duplicated all the same. Left undeduped, that duplication is invisible
+    row-by-row and silent in an aggregate: `put_call_ratios` sums volume and
+    open interest, and a systematically over-represented side skews the
+    ratio in whichever direction happened to get captured twice more often.
+    Found by checking this function against the real corpus rather than
+    only synthetic fixtures — see `tests/test_features.py`.
     """
     schema = {
         "occ_symbol": pl.Utf8,
@@ -147,16 +159,20 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
         "liquid": pl.Boolean,
     }
     query = """
-        SELECT c.underlying, c.expiry, c.type, c.strike_e4,
-               q.occ_symbol, q.bid_e4, q.ask_e4, q.close_e4, q.volume, q.open_interest,
-               q.underlying_e4, q.iv_bps, q.delta, q.gamma, q.vega, q.theta, q.liquid
-        FROM option_quotes q
-        JOIN option_contracts c ON c.occ_symbol = q.occ_symbol
-        WHERE c.underlying = ? AND q.trading_day = ?
+        WITH ranked AS (
+            SELECT c.underlying, c.expiry, c.type, c.strike_e4,
+                   q.occ_symbol, q.bid_e4, q.ask_e4, q.close_e4, q.volume, q.open_interest,
+                   q.underlying_e4, q.iv_bps, q.delta, q.gamma, q.vega, q.theta, q.liquid,
+                   ROW_NUMBER() OVER (PARTITION BY q.occ_symbol ORDER BY q.as_of DESC) AS rn
+            FROM option_quotes q
+            JOIN option_contracts c ON c.occ_symbol = q.occ_symbol
+            WHERE c.underlying = ? AND q.trading_day = ?
+        )
+        SELECT * FROM ranked WHERE rn = 1
     """
     params: list[object] = [underlying, trading_day]
     if liquid_only:
-        query += " AND q.liquid = 1"
+        query += " AND liquid = 1"
 
     with connect() as conn:
         rows = conn.execute(query, params).fetchall()
@@ -227,13 +243,17 @@ def read_risk_free_curve(day: str) -> list[tuple[int, float]]:
 
 
 def read_contract_history(occ_symbols: list[str]) -> pl.DataFrame:
-    """Every captured row for the given contracts, across all trading days.
+    """One row per contract per trading day, across every day captured.
 
     For walking a position forward after entry — `backtest.py`'s reason to
     exist. One query for the whole list rather than one call per contract:
     a backtest over even a modest candidate set is thousands of contracts,
     and a query-per-contract there is the same anti-pattern `read_bars`
     already avoids for the whole universe.
+
+    Deduped to the latest `as_of` per contract per day, for the same reason
+    `read_quotes` is — a day recaptured after an interrupted run leaves two
+    real rows for the same contract on the same day.
     """
     schema = {
         "occ_symbol": pl.Utf8,
@@ -250,11 +270,16 @@ def read_contract_history(occ_symbols: list[str]) -> pl.DataFrame:
     with connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT occ_symbol, trading_day, bid_e4, ask_e4, close_e4,
-                   underlying_e4, iv_bps, liquid
-            FROM option_quotes
-            WHERE occ_symbol IN ({placeholders})
-            ORDER BY occ_symbol, trading_day
+            WITH ranked AS (
+                SELECT occ_symbol, trading_day, bid_e4, ask_e4, close_e4,
+                       underlying_e4, iv_bps, liquid,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY occ_symbol, trading_day ORDER BY as_of DESC
+                       ) AS rn
+                FROM option_quotes
+                WHERE occ_symbol IN ({placeholders})
+            )
+            SELECT * FROM ranked WHERE rn = 1 ORDER BY occ_symbol, trading_day
             """,
             occ_symbols,
         ).fetchall()
