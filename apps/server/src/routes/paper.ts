@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { paperDb } from '../db/paper/index.js';
 import { paperEquity, paperOrders } from '../db/paper/schema.js';
 import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct } from '../lib/paper.js';
+import { computePositionHealth, latestCapturedTradingDay, latestPositionHealth } from '../lib/options/positionHealth.js';
 
 /**
  * Paper trading with artificial money.
@@ -62,12 +63,19 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
    * Both the account-level and per-trade views live here: `equity` is the
    * account curve, and every `orders` row already carries what it needs
    * (`entryPriceE4` plus its latest mark or exit) for a caller to compute
-   * `tradeReturnPct` per position without a second endpoint.
+   * `tradeReturnPct` per position without a second endpoint. Each open
+   * order also carries its latest `health` row (null until the nightly job
+   * has scored it at least once) — see `positionHealth.ts`.
    */
   app.get('/api/paper/equity', async () => {
     const equity = paperDb.select().from(paperEquity).orderBy(paperEquity.day).all();
     const orders = paperDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all();
-    return { startingBalanceE4: config.market.paperStartingBalanceE4, equity, orders };
+    const healthByOrder = latestPositionHealth();
+    return {
+      startingBalanceE4: config.market.paperStartingBalanceE4,
+      equity,
+      orders: orders.map((o) => ({ ...o, health: healthByOrder.get(o.id) ?? null })),
+    };
   });
 
   /** Manual trigger — the nightly job calls the same two functions. */
@@ -76,6 +84,16 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
     const result = markOpenPositions(today);
     computeDailyEquity(today);
     return result;
+  });
+
+  /**
+   * Manual trigger — the nightly job calls the same function, but with
+   * literal today rather than this day-picking fallback; see
+   * `latestCapturedTradingDay`'s own doc comment for why the two differ.
+   */
+  app.post('/api/paper/health', async () => {
+    const day = latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
+    return computePositionHealth(day);
   });
 
   app.get<{ Params: { id: string } }>('/api/paper/orders/:id/return', async (req, reply) => {

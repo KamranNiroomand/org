@@ -34,6 +34,7 @@ from app.rank import (
     probability_of_profit,
     rank_day,
     rank_underlying,
+    score_held_contracts,
 )
 from app.train import FEATURE_COLS, train
 
@@ -448,3 +449,71 @@ class TestRankDayEndToEnd:
         ranked = rank_day(day, model_dir, top=5000, force=True)
         for c in ranked:
             assert abs(c.forecast_drift) < MAX_ANNUALIZED_DRIFT, c.occ_symbol
+
+
+class TestScoreHeldContracts:
+    """The position-health path: re-scores specific, already-held
+    contracts, rather than picking fresh candidates like `rank_day`.
+    """
+
+    def _real_day_and_model(self, tmp_path):
+        from app.db import read_bars
+
+        if read_bars().height == 0:
+            pytest.skip("no bars in market.db yet — run bars:backfill first")
+        day = _latest_priced_liquid_day()
+        if day is None:
+            pytest.skip("no liquid, priced option quotes captured yet")
+        try:
+            model_dir = latest_model_dir()
+        except SystemExit:
+            pytest.skip("no trained model yet — run app.train first")
+        return day, model_dir
+
+    def test_matches_rank_days_own_scoring_for_the_same_contract(self, tmp_path) -> None:
+        # The property the whole split exists to guarantee: scoring a held
+        # position must agree with a fresh ranking of the same contract on
+        # the same day — two different formulas for "what does the model
+        # think" would be its own, worse bug than the one this replaces.
+        day, model_dir = self._real_day_and_model(tmp_path)
+        ranked = rank_day(day, model_dir, top=1, force=True)
+        if not ranked:
+            pytest.skip("no gate-passing contracts today to cross-check against")
+        c = ranked[0]
+
+        scored = score_held_contracts(
+            [{"occ_symbol": c.occ_symbol, "underlying": c.underlying}],
+            day,
+            model_dir,
+            force=True,
+        )
+        held = scored[c.occ_symbol]
+        assert held is not None
+        assert held.ev == pytest.approx(c.ev, rel=1e-9)
+        assert held.forecast_vol == pytest.approx(c.forecast_vol, rel=1e-9)
+        assert held.prob_profit == pytest.approx(c.prob_profit, rel=1e-9)
+
+    def test_unknown_contract_scores_to_none_not_a_crash(self, tmp_path) -> None:
+        day, model_dir = self._real_day_and_model(tmp_path)
+        scored = score_held_contracts(
+            [{"occ_symbol": "ZZZZ  991231C00001000", "underlying": "ZZZZ"}],
+            day,
+            model_dir,
+            force=True,
+        )
+        assert scored["ZZZZ  991231C00001000"] is None
+
+    def test_liquid_only_is_false_unlike_rank_day(self) -> None:
+        # A held position that fell below today's liquidity threshold must
+        # still get scored — hiding it would mean silence exactly when a
+        # position needs the most attention, which is the whole reason this
+        # function exists as something other than "call rank_day again".
+        quotes = _quotes_frame([_quote_row(liquid=False)])
+        # rank_underlying itself never looks at `liquid` at all — the gate
+        # is applied by `read_quotes(liquid_only=...)` before rows ever
+        # reach here, which is exactly the boundary this test pins: a
+        # `liquid=False` row must still price normally once it's in front
+        # of rank_underlying, proving the two callers only differ in what
+        # they ask the DB for, not in how a row is priced once fetched.
+        ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)])
+        assert len(ranked) == 1

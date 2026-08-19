@@ -200,6 +200,46 @@ function OrderRow({ order, onClosed }: { order: PaperOrder; onClosed: () => void
           </Button>
         </div>
       )}
+      {order.status === 'open' && <PositionHealthLine health={order.health} />}
+    </div>
+  );
+}
+
+/**
+ * Today's re-evaluation of an open position — the model's forecast recomputed
+ * against today's data, plus any real news since the position opened. A
+ * static "the model liked this when you opened it" snapshot is a bad model
+ * of how a real day goes; this is what changed since then. Never null-vs-
+ * hidden: a `health` of `null` means the nightly job hasn't scored this
+ * position yet, and `currentEv === null` inside a real health row means the
+ * model itself has no current view (expired, no quote) — both are shown
+ * plainly rather than left blank.
+ */
+function PositionHealthLine({ health }: { health: PaperOrder['health'] }) {
+  if (!health) {
+    return <div className="w-full text-[11px] text-muted">Not checked yet — runs nightly, or click "Check health" above.</div>;
+  }
+  return (
+    <div className="tnum flex w-full flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-1.5 text-[11px] text-muted">
+      <span>As of {health.day}:</span>
+      {health.currentEv !== null ? (
+        <span className={cn('font-medium', health.currentEv >= 0 ? 'text-positive' : 'text-negative')}>
+          model now sees {usd(Math.round(health.currentEv * 10_000))} EV
+          {health.currentProbProfit !== null && `, ${(health.currentProbProfit * 100).toFixed(0)}% P(profit)`}
+        </span>
+      ) : (
+        <span>model has no current view (expired or no quote today)</span>
+      )}
+      {health.newDocumentsCount > 0 ? (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Badge tone="warning">
+            {health.newDocumentsCount} new doc{health.newDocumentsCount === 1 ? '' : 's'}
+          </Badge>
+          {health.latestDocumentTitle && <span className="truncate">{health.latestDocumentTitle}</span>}
+        </span>
+      ) : (
+        <span>no new news</span>
+      )}
     </div>
   );
 }
@@ -214,6 +254,7 @@ export function PaperBook() {
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ['paper-equity'] });
   const mark = useMutation({ mutationFn: () => optionsApi.markNow(), onSuccess: invalidate });
+  const checkHealth = useMutation({ mutationFn: () => optionsApi.checkHealthNow(), onSuccess: invalidate });
 
   if (isLoading) return <Skeleton className="h-64" />;
   if (!data) return null;
@@ -256,7 +297,15 @@ export function PaperBook() {
       <OpenOrderForm onOpened={invalidate} />
 
       <Card className="overflow-hidden">
-        <CardHeader title="Positions" subtitle="Per-trade return — distinct from the account-level curve above" />
+        <CardHeader
+          title="Positions"
+          subtitle="Per-trade return — distinct from the account-level curve above"
+          action={
+            <Button size="sm" variant="ghost" onClick={() => checkHealth.mutate()} disabled={checkHealth.isPending}>
+              Check health
+            </Button>
+          }
+        />
         {data.orders.length === 0 ? (
           <Empty title="No paper trades yet" hint="Open one above with an OCC symbol from a captured chain." />
         ) : (

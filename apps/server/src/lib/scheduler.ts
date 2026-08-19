@@ -24,6 +24,7 @@ import { registerModelRun } from './options/modelRegistry.js';
 import { ingestNewsForUniverse } from './text/news.js';
 import { ingestEdgarForUniverse } from './text/edgar.js';
 import { classifyUnclassifiedDocuments } from './text/classify.js';
+import { computePositionHealth } from './options/positionHealth.js';
 
 /**
  * The nightly job.
@@ -300,6 +301,19 @@ export async function runOptionsCapture(
         result.errors.push(...classified.errors);
       } catch (err) {
         result.errors.push(`Text classification: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // Runs last of the paper/text steps, deliberately — it wants tonight's
+      // freshly-ingested news (just above) and tonight's fresh marks
+      // (already run earlier) both in place, so "what changed since you
+      // opened this" reflects the same night's data throughout rather than
+      // a mix of tonight's and yesterday's.
+      try {
+        const tradingDay = new Date().toISOString().slice(0, 10);
+        const health = await computePositionHealth(tradingDay);
+        log.info(`Position health: ${health.scored} position(s) scored, ${health.skipped.length} skipped`);
+      } catch (err) {
+        result.errors.push(`Position health: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 

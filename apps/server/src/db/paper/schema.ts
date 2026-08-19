@@ -132,3 +132,51 @@ export const paperEquity = sqliteTable(
   },
   (t) => [uniqueIndex('paper_equity_day_uq').on(t.day)],
 );
+
+/**
+ * Nightly re-evaluation of every **open** position against today's forecast
+ * and today's news — distinct from `paperMarks`, which prices a position
+ * off its actual quote and never asks the model anything.
+ *
+ * The reason this exists at all: opening a paper position freezes the
+ * model's opinion at the moment you clicked "Open", and a static freeze is
+ * a bad model of how a real day actually goes. Tomorrow the model itself
+ * updates (new bars, new realized vol, a new drift forecast) with zero news
+ * required, and separately, real news can move the picture the model can't
+ * see yet on its own. This table re-runs the *same* forecast machinery
+ * `rank_day` uses (`score_held_contracts`, not a second formula) so a held
+ * position's health is judged on identical terms to how it was ranked in
+ * the first place.
+ *
+ * `current*` columns are all nullable together: a `null` row means "no
+ * current view could be computed" (the contract expired, no quote today, no
+ * rate for its DTE) — not "this position is fine". That distinction matters
+ * because a position going quiet in a way the model can no longer price is
+ * itself worth noticing, not something to paper over with a stale number.
+ */
+export const paperPositionHealth = sqliteTable(
+  'paper_position_health',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    orderId: text('order_id')
+      .notNull()
+      .references(() => paperOrders.id, { onDelete: 'cascade' }),
+    day: text('day').notNull(),
+    currentEv: real('current_ev'),
+    currentEvPerRisk: real('current_ev_per_risk'),
+    currentProbProfit: real('current_prob_profit'),
+    currentForecastVol: real('current_forecast_vol'),
+    currentForecastDrift: real('current_forecast_drift'),
+    /** Documents about the underlying published since the position opened — point-in-time correct, read from `market.db`'s `documents`/`doc_mentions`. */
+    newDocumentsCount: integer('new_documents_count').notNull().default(0),
+    /** The single most recent qualifying document, for a one-line surface — not a feed. Null together whenever newDocumentsCount is 0. */
+    latestDocumentTitle: text('latest_document_title'),
+    latestDocumentEventType: text('latest_document_event_type'),
+    latestDocumentPublishedAt: text('latest_document_published_at'),
+    computedAt: text('computed_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('paper_position_health_order_day_uq').on(t.orderId, t.day),
+    index('paper_position_health_day_idx').on(t.day),
+  ],
+);

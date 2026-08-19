@@ -303,3 +303,69 @@ class TestRank:
         monkeypatch.setattr("app.main.latest_model_dir", lambda: tmp_path / "unused")
         r = client.post("/rank", json={"day": "2026-01-01", "max_capital": 0})
         assert r.status_code == 422
+
+
+class TestPositionHealth:
+    """A position monitor, not a fresh entry screen — see
+    score_held_contracts's own docstring for what makes it different from
+    /rank called again.
+    """
+
+    def test_no_trained_model_is_a_409_not_a_crash(self, tmp_path, monkeypatch) -> None:
+        def _raise():
+            raise SystemExit(f"No trained models found under {tmp_path / 'empty'}")
+
+        monkeypatch.setattr("app.main.latest_model_dir", _raise)
+        r = client.post(
+            "/position-health",
+            json={"day": "2026-01-01", "contracts": [{"occ_symbol": "X", "underlying": "X"}]},
+        )
+        assert r.status_code == 409
+        assert "No trained models" in r.json()["detail"]
+
+    def test_returns_scored_and_unscored_contracts_together(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr(
+            "app.main.score_held_contracts",
+            lambda contracts, day, model_dir, force=False: {"good": _FAKE_CONTRACT, "gone": None},
+        )
+
+        r = client.post(
+            "/position-health",
+            json={
+                "day": "2026-01-01",
+                "contracts": [
+                    {"occ_symbol": "good", "underlying": "AAPL"},
+                    {"occ_symbol": "gone", "underlying": "AAPL"},
+                ],
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["model_beats_baseline"] is False
+        assert body["contracts"]["good"]["ev"] == 0.5
+        # A null value must survive the wire, never dropped or coerced —
+        # it's the caller's signal that this position needs a look, not
+        # that everything about it is fine.
+        assert body["contracts"]["gone"] is None
+
+    def test_force_defaults_to_true(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        seen = {}
+
+        def _capture(contracts, day, model_dir, force=False):
+            seen["force"] = force
+            return {}
+
+        monkeypatch.setattr("app.main.score_held_contracts", _capture)
+        r = client.post(
+            "/position-health",
+            json={"day": "2026-01-01", "contracts": [{"occ_symbol": "X", "underlying": "X"}]},
+        )
+        assert r.status_code == 200
+        assert seen["force"] is True
