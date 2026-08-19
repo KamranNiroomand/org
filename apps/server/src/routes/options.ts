@@ -3,7 +3,7 @@ import { desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
-import { captureRuns, modelRuns, optionQuotes, trackedUnderlyings } from '../db/market/schema.js';
+import { captureRuns, documents, modelRuns, optionQuotes, trackedUnderlyings } from '../db/market/schema.js';
 import {
   getLastCaptureResult,
   getNextCaptureRun,
@@ -68,6 +68,16 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       .limit(1)
       .get();
 
+    const text = marketDb
+      .select({
+        total: sql<number>`count(*)`,
+        news: sql<number>`sum(case when ${documents.source} = 'polygon_news' then 1 else 0 end)`,
+        edgar: sql<number>`sum(case when ${documents.source} = 'edgar' then 1 else 0 end)`,
+        classified: sql<number>`sum(case when ${documents.eventType} is not null then 1 else 0 end)`,
+      })
+      .from(documents)
+      .get();
+
     return {
       configured: config.market.configured,
       role: config.market.role,
@@ -78,6 +88,7 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       nextRetrain: getNextRetrainRun(),
       lastRetrain: getLastRetrainResult(),
       lastRun: lastRun ?? null,
+      text: text ?? { total: 0, news: 0, edgar: 0, classified: 0 },
       universe: Object.fromEntries(universe.map((u) => [u.tier, u.n])),
       /**
        * `days` is the number that matters most right now. The corpus can only

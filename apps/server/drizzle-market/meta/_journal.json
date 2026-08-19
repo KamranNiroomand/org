@@ -43,6 +43,20 @@
       "when": 1787138265815,
       "tag": "0005_bumpy_violations",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787141370847,
+      "tag": "0006_ordinary_wildside",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787141783455,
+      "tag": "0007_special_the_santerians",
+      "breakpoints": true
     }
   ]
 }

@@ -338,3 +338,92 @@ export const captureRuns = sqliteTable(
   },
   (t) => [index('capture_kind_started_idx').on(t.kind, t.startedAt)],
 );
+
+// ---------------------------------------------------------------------------
+// Text — news and filings
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per document, from whichever source produced it.
+ *
+ * **Point-in-time correctness is the entire reason this table exists in
+ * this shape.** `publishedAt` is when the outside world could first have
+ * read this document; a feature computed for an earlier instant must never
+ * join against a row whose `publishedAt` is later than that instant. This
+ * table makes that check a single comparison rather than something a
+ * feature-builder has to reconstruct — every read path in `text.py` filters
+ * on it explicitly.
+ *
+ * A revision or amendment is a **new row**, never an update to an existing
+ * one. An EDGAR 8-K/A amending an earlier 8-K is a distinct filing with its
+ * own accession number and its own `publishedAt` — updating the original
+ * row in place would let a fact only known after the amendment leak into
+ * a feature computed for a time before it existed, exactly the lookahead
+ * bug this schema's whole design exists to make structurally hard to write.
+ *
+ * `sourceId` is the vendor's own identifier (a Polygon article id, an
+ * EDGAR accession number) — the natural idempotency key for ingestion, and
+ * unique together with `source` since the two vendors' id spaces are
+ * independent.
+ */
+export const documents = sqliteTable(
+  'documents',
+  {
+    id: text('id').primaryKey(),
+    source: text('source', { enum: ['polygon_news', 'edgar'] }).notNull(),
+    /** The vendor's own id — a Polygon article id, an EDGAR accession number. */
+    sourceId: text('source_id').notNull(),
+    /** Instant this document became publicly readable. See the table doc comment. */
+    publishedAt: text('published_at').notNull(),
+    /** When our own ingestion first saw it — distinct from publishedAt, kept for debugging gaps. */
+    ingestedAt: text('ingested_at').notNull(),
+    title: text('title').notNull(),
+    /** A publisher's summary or an EDGAR filing's own short description, never the full body. */
+    summary: text('summary'),
+    url: text('url').notNull(),
+    /** 'ANNUAL_REPORT', '8-K', 'press_release', etc. — free-form per source, not yet the fixed taxonomy events.ts tags into. */
+    docType: text('doc_type'),
+    /** EDGAR item codes, e.g. "2.02,9.01" — null for news. A strong prior for events.ts's classifier. */
+    edgarItems: text('edgar_items'),
+    /** Set by agents/events.ts. Null until classified — classification runs after ingestion, not inline with it. */
+    eventType: text('event_type'),
+    eventConfidence: text('event_confidence', { enum: ['high', 'medium', 'low'] }),
+  },
+  (t) => [
+    uniqueIndex('documents_source_uq').on(t.source, t.sourceId),
+    index('documents_published_idx').on(t.publishedAt),
+    index('documents_unclassified_idx').on(t.eventType),
+  ],
+);
+
+/**
+ * Which underlying(s) a document concerns, one row per document×underlying.
+ *
+ * A single news article routinely mentions a dozen tickers with different
+ * relevance to each; collapsing that into one row per document would force
+ * a single sentiment onto every mentioned name, which is simply wrong —
+ * Polygon's own news API already scores sentiment per ticker, independently,
+ * within one article (a name mentioned only as a comparison point reads
+ * 'neutral' while the article's actual subject reads 'positive' in the same
+ * response). This table preserves that granularity instead of averaging it
+ * away. An EDGAR filing mentions exactly one underlying — its filer — and
+ * carries no sentiment; the column stays null there rather than fabricating
+ * a score EDGAR never provided.
+ */
+export const docMentions = sqliteTable(
+  'doc_mentions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id, { onDelete: 'cascade' }),
+    underlying: text('underlying').notNull(),
+    /** Only ever populated for source='polygon_news' — see the table doc comment. */
+    sentiment: text('sentiment', { enum: ['positive', 'negative', 'neutral'] }),
+    sentimentReasoning: text('sentiment_reasoning'),
+  },
+  (t) => [
+    uniqueIndex('doc_mentions_doc_underlying_uq').on(t.documentId, t.underlying),
+    index('doc_mentions_underlying_idx').on(t.underlying),
+  ],
+);
