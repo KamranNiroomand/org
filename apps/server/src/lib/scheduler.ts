@@ -24,7 +24,8 @@ import { registerModelRun } from './options/modelRegistry.js';
 import { ingestNewsForUniverse } from './text/news.js';
 import { ingestEdgarForUniverse } from './text/edgar.js';
 import { classifyUnclassifiedDocuments } from './text/classify.js';
-import { computePositionHealth } from './options/positionHealth.js';
+import { computePositionHealth, latestCapturedTradingDay } from './options/positionHealth.js';
+import { pullMarketSnapshot } from './options/marketPull.js';
 
 /**
  * The nightly job.
@@ -144,6 +145,25 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
       if (missed.length > 0) result.errors.push(`No quote for: ${missed.join(', ')}`);
       log.info(`Prices: ${quotes.size}/${symbols.length} quoted, USD/CAD ${usdCad ?? 'unavailable'}`);
     }
+
+    // --- Options corpus (reader machines only) ------------------------------
+    // The runner captures and marks its own paper trades on its own schedule
+    // (`runOptionsCapture`, `runPaperMaintenance`). A reader never runs that
+    // job at all, so without this it would never sync from the runner and
+    // never mark or health-check any paper trades placed here — see
+    // `runPaperMaintenance`'s own doc comment for the incident that found
+    // this gap. `SYNC_CRON` defaults to 06:00 local, comfortably after the
+    // runner's own ~16:45 Eastern capture, so this sees that night's data.
+    if (!isRunner() && config.market.runnerSshHost) {
+      const pull = pullMarketSnapshot();
+      if (pull.ok) {
+        log.info(`Market sync: ${pull.message}`);
+        const tradingDay = latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
+        await runPaperMaintenance(log, tradingDay);
+      } else {
+        result.errors.push(`Market sync: ${pull.message}`);
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     result.errors.push(message);
@@ -153,6 +173,35 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
   }
 
   return result;
+}
+
+/**
+ * Marks every open paper position and re-evaluates its health for one
+ * trading day — reads `market.db` (quotes, documents) but only ever writes
+ * `paper.db`, so this is safe to run on a reader as well as the runner.
+ * That matters: `paper.db` is deliberately per-machine (see its own schema
+ * doc comment), and a person places a trade from whichever machine they're
+ * looking at the UI on, a reader as often as the runner — this used to only
+ * run inside `runOptionsCapture`, which is only ever scheduled on the
+ * runner, so a reader's own paper trades never got marked or health-checked
+ * by anything but a manual click. Shared here so both callers use the exact
+ * same logic rather than two copies drifting apart.
+ */
+async function runPaperMaintenance(log: FastifyBaseLogger, tradingDay: string): Promise<void> {
+  try {
+    const marks = markOpenPositions(tradingDay);
+    computeDailyEquity(tradingDay);
+    log.info(`Paper book: ${marks.marked} position(s) marked, ${marks.skipped.length} skipped`);
+  } catch (err) {
+    log.error({ err }, 'Paper marking failed');
+  }
+
+  try {
+    const health = await computePositionHealth(tradingDay);
+    log.info(`Position health: ${health.scored} position(s) scored, ${health.skipped.length} skipped`);
+  } catch (err) {
+    log.error({ err }, 'Position health failed');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,19 +301,16 @@ export async function runOptionsCapture(
         `${summary.liquidWritten} tradeable, ${summary.pricedWritten} priced`,
     );
 
-    // Marking runs on the runner, right after capture, so a position opened
-    // today is marked against tonight's own quotes rather than waiting for
-    // tomorrow's job — the whole point of an equity curve is that it moves
-    // every day capture runs, not every day someone happens to look at it.
-    if (isRunner()) {
-      try {
-        const tradingDay = new Date().toISOString().slice(0, 10);
-        const marks = markOpenPositions(tradingDay);
-        computeDailyEquity(tradingDay);
-        log.info(`Paper book: ${marks.marked} position(s) marked, ${marks.skipped.length} skipped`);
-      } catch (err) {
-        result.errors.push(`Paper marking: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    // Right after capture, so a position opened today is marked against
+    // tonight's own quotes rather than waiting for tomorrow's job — the
+    // whole point of an equity curve is that it moves every day capture
+    // runs, not every day someone happens to look at it. This is the
+    // runner's own paper trades, if any; a reader's are covered separately
+    // inside `runNightly`, since this job never runs there — see
+    // `runPaperMaintenance`'s own doc comment for why that split exists.
+    {
+      const tradingDay = new Date().toISOString().slice(0, 10);
+      await runPaperMaintenance(log, tradingDay);
     }
 
     // Text follows the same one-writer rule option quotes do: documents and
@@ -301,19 +347,6 @@ export async function runOptionsCapture(
         result.errors.push(...classified.errors);
       } catch (err) {
         result.errors.push(`Text classification: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      // Runs last of the paper/text steps, deliberately — it wants tonight's
-      // freshly-ingested news (just above) and tonight's fresh marks
-      // (already run earlier) both in place, so "what changed since you
-      // opened this" reflects the same night's data throughout rather than
-      // a mix of tonight's and yesterday's.
-      try {
-        const tradingDay = new Date().toISOString().slice(0, 10);
-        const health = await computePositionHealth(tradingDay);
-        log.info(`Position health: ${health.scored} position(s) scored, ${health.skipped.length} skipped`);
-      } catch (err) {
-        result.errors.push(`Position health: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
