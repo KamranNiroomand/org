@@ -9,8 +9,11 @@ import {
   getNextCaptureRun,
   getLastRetrainResult,
   getNextRetrainRun,
+  getLastTextSyncResult,
+  getNextTextSyncRun,
   runOptionsCapture,
   runRetrain,
+  runTextSync,
 } from '../lib/scheduler.js';
 import { listUniverse, retierByLiquidity } from '../lib/options/universe.js';
 import { repriceDay } from '../lib/options/reprice.js';
@@ -87,6 +90,8 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       lastCapture: getLastCaptureResult(),
       nextRetrain: getNextRetrainRun(),
       lastRetrain: getLastRetrainResult(),
+      nextTextSync: getNextTextSyncRun(),
+      lastTextSync: getLastTextSyncResult(),
       lastRun: lastRun ?? null,
       text: text ?? { total: 0, news: 0, edgar: 0, classified: 0 },
       universe: Object.fromEntries(universe.map((u) => [u.tier, u.n])),
@@ -126,6 +131,16 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: 'This machine is a reader; training runs on the runner, which holds the corpus.' });
     }
     return runRetrain(app.log, 'manual');
+  });
+
+  /** Manual news/EDGAR sync — the market-hours cron calls the same function. */
+  app.post('/api/options/text-sync', async (_req, reply) => {
+    if (!config.market.isRunner) {
+      return reply
+        .code(409)
+        .send({ error: 'This machine is a reader; text ingestion writes to market.db, which only the runner may write.' });
+    }
+    return runTextSync(app.log, 'manual');
   });
 
   /**

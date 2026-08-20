@@ -26,10 +26,16 @@ export function CorpusStatus() {
     void qc.invalidateQueries({ queryKey: ['options-status'] });
   };
 
+  const triggerTextSync = async () => {
+    await optionsApi.triggerTextSync();
+    void qc.invalidateQueries({ queryKey: ['options-status'] });
+  };
+
   if (isLoading) return <Skeleton className="h-64" />;
   if (!data) return null;
 
   const nextCapture = data.nextCapture ? new Date(data.nextCapture) : null;
+  const nextTextSync = data.nextTextSync ? new Date(data.nextTextSync) : null;
   const core = data.universe.core ?? 0;
   const research = data.universe.research ?? 0;
 
@@ -112,6 +118,46 @@ export function CorpusStatus() {
             </div>
           </div>
         )}
+      </Card>
+
+      <Card className="overflow-hidden">
+        <CardHeader
+          title="Text sync"
+          subtitle="News + EDGAR, market hours — independent of the once-nightly capture above"
+          action={
+            data.role === 'runner' ? (
+              <Button size="sm" variant="ghost" onClick={() => void triggerTextSync()} disabled={isFetching}>
+                <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} /> Run now
+              </Button>
+            ) : undefined
+          }
+        />
+        <div className="grid grid-cols-2 gap-4 p-4 text-xs sm:grid-cols-3">
+          <div>
+            <div className="text-muted">Next scheduled</div>
+            <div className="tnum mt-0.5">
+              {nextTextSync
+                ? nextTextSync.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
+                : '—'}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted">Last run</div>
+            <div className="mt-0.5">
+              {data.lastTextSync ? (
+                <Badge tone={data.lastTextSync.errors.length > 0 ? 'warning' : 'neutral'}>
+                  {data.lastTextSync.documentsWritten} new doc{data.lastTextSync.documentsWritten === 1 ? '' : 's'}
+                </Badge>
+              ) : (
+                'Never this session'
+              )}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted">Classified last run</div>
+            <div className="tnum mt-0.5">{data.lastTextSync ? data.lastTextSync.classified : '—'}</div>
+          </div>
+        </div>
       </Card>
 
       <Card className="overflow-hidden">
