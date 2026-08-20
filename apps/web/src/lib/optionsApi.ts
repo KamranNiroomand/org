@@ -60,6 +60,11 @@ export interface TextSyncResult {
   errors: string[];
 }
 
+export interface PullJobResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface OptionsStatus {
   configured: boolean;
   role: 'runner' | 'reader';
@@ -159,7 +164,7 @@ export const optionsApi = {
   status: () => api.get<OptionsStatus>('/api/options/status'),
   triggerCapture: () => api.post<CaptureJobResult>('/api/options/capture'),
   triggerTextSync: () => api.post<TextSyncResult>('/api/options/text-sync'),
-  triggerPull: () => api.post<{ ok: boolean; message: string }>('/api/options/pull'),
+  triggerPull: () => api.post<PullJobResult>('/api/options/pull'),
 
   paperEquity: () => api.get<PaperEquityResponse>('/api/paper/equity'),
   openOrder: (body: {

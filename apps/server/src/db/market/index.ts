@@ -43,9 +43,22 @@ function openMarketDatabase(): SqliteDatabase {
   return db;
 }
 
-let sqlite = openMarketDatabase();
+// `let`, not `const` — `connect()` reassigns both on every `reopenMarketDb()`
+// call, and every importer's `import { marketDb }` binding picks up the
+// reassignment automatically (ES module named imports are live bindings, not
+// snapshots).
+let sqlite: SqliteDatabase;
+export let marketDb: ReturnType<typeof drizzle<typeof marketSchema>>;
 
-export let marketDb = drizzle(sqlite, { schema: marketSchema });
+/** The only place `sqlite`/`marketDb` are assigned — module init and
+ * `reopenMarketDb()` both call this rather than repeating the two-line
+ * open-and-wrap sequence, so the pair can't drift apart on a future edit. */
+function connect(): void {
+  sqlite = openMarketDatabase();
+  marketDb = drizzle(sqlite, { schema: marketSchema });
+}
+connect();
+
 export { marketSchema };
 export type MarketDB = typeof marketDb;
 
@@ -75,15 +88,35 @@ export type MarketDB = typeof marketDb;
  * once already from a stale sidecar left by a killed process. The rsync'd
  * file itself is a `VACUUM INTO` snapshot and never has a legitimate WAL of
  * its own, so it is always correct to clear these before reopening here.
+ *
+ * Opens the replacement before closing the old connection, not the other
+ * way around — found by a review of this function: the naive close-then-
+ * open order leaves the module-level `sqlite`/`marketDb` pointed at an
+ * already-closed connection for every caller in the process if
+ * `openMarketDatabase()` throws (the just-rsync'd file momentarily locked,
+ * truncated, or the disk full) — every route touching `marketDb` would then
+ * throw "database connection is not open" until someone restarts the
+ * process, which is a far worse outcome than the stale-data bug this
+ * function exists to fix. With this order, `sqlite`/`marketDb` are only
+ * ever reassigned once the replacement is proven to open successfully; on
+ * failure they are left exactly as they were, still serving the previous
+ * (stale but *working*) snapshot. Closing the old connection is done last
+ * and best-effort — its own sidecars were just unlinked out from under it,
+ * so a failure to close cleanly is logged and ignored rather than allowed
+ * to undo the already-correct reassignment above it.
  */
 export function reopenMarketDb(): void {
-  sqlite.close();
+  const previous = sqlite;
   for (const suffix of ['-wal', '-shm']) {
     const sidecar = `${config.market.dbPath}${suffix}`;
     if (existsSync(sidecar)) unlinkSync(sidecar);
   }
-  sqlite = openMarketDatabase();
-  marketDb = drizzle(sqlite, { schema: marketSchema });
+  connect();
+  try {
+    previous.close();
+  } catch {
+    // Best-effort — see the doc comment above.
+  }
 }
 
 /** Escape hatch for pragmas and maintenance statements Drizzle doesn't model. */

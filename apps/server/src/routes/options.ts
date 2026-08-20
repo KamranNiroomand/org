@@ -155,9 +155,15 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    * connection that matters.
    */
   app.post('/api/options/pull', async (_req, reply) => {
-    const result = pullMarketSnapshot();
-    if (!result.ok) return reply.code(409).send({ error: result.message });
-    return result;
+    try {
+      const result = await pullMarketSnapshot();
+      if (!result.ok) return reply.code(409).send({ error: result.message });
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      app.log.error({ err }, 'Manual pull failed');
+      return reply.code(502).send({ error: message });
+    }
   });
 
   /**

@@ -155,7 +155,7 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
     // this gap. `SYNC_CRON` defaults to 06:00 local, comfortably after the
     // runner's own ~16:45 Eastern capture, so this sees that night's data.
     if (!isRunner() && config.market.runnerSshHost) {
-      const pull = pullMarketSnapshot();
+      const pull = await pullMarketSnapshot();
       if (pull.ok) {
         log.info(`Market sync: ${pull.message}`);
         const tradingDay = latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
