@@ -205,6 +205,109 @@ async function runPaperMaintenance(log: FastifyBaseLogger, tradingDay: string): 
 }
 
 // ---------------------------------------------------------------------------
+// Text — news and EDGAR
+// ---------------------------------------------------------------------------
+
+/**
+ * News and EDGAR ingestion + classification, on its own cadence
+ * (`TEXT_SYNC_CRON`, market hours) rather than only riding along with the
+ * once-nightly capture job.
+ *
+ * A headline breaking at 10am used to sit unseen until the 16:45 capture
+ * job got around to it — stale by any reasonable reading of "an options
+ * position should know about the news." This runs independently, and
+ * `runOptionsCapture` also calls it once more directly after capture so
+ * that night's `runPaperMaintenance` still sees whatever landed since the
+ * last poll.
+ *
+ * Runner-only, same reasoning as capture itself: documents/doc_mentions
+ * live in `market.db`, and writing them on a reader would be silently
+ * destroyed by the next `market:pull`.
+ */
+let textSyncing = false;
+
+export interface TextSyncResult {
+  startedAt: string;
+  finishedAt: string;
+  documentsWritten: number;
+  mentionsWritten: number;
+  filingsWritten: number;
+  classified: number;
+  errors: string[];
+}
+
+export async function runTextSync(log: FastifyBaseLogger, reason: string): Promise<TextSyncResult> {
+  const startedAt = nowIso();
+  const result: TextSyncResult = {
+    startedAt,
+    finishedAt: startedAt,
+    documentsWritten: 0,
+    mentionsWritten: 0,
+    filingsWritten: 0,
+    classified: 0,
+    errors: [],
+  };
+
+  if (!isRunner()) {
+    result.errors.push('This machine is a reader; text ingestion writes to market.db, which only the runner may write.');
+    result.finishedAt = nowIso();
+    return result;
+  }
+  if (textSyncing) {
+    result.errors.push('A text sync was already in progress; skipped this run.');
+    result.finishedAt = nowIso();
+    return result;
+  }
+  textSyncing = true;
+  log.info(`Text sync starting (${reason})`);
+
+  try {
+    const symbols = listUniverse({ activeOnly: true }).map((u) => toVendorSymbol(u.symbol));
+
+    // Each step isolated — SEC_EDGAR_USER_AGENT has no default (see
+    // config.ts), so a machine that hasn't set it must not lose news
+    // ingestion or classification of what news.ts just wrote.
+    try {
+      const news = await ingestNewsForUniverse(symbols);
+      result.documentsWritten += news.documentsWritten;
+      result.mentionsWritten += news.mentionsWritten;
+      log.info(`News: ${news.documentsWritten} documents, ${news.mentionsWritten} mentions`);
+      result.errors.push(...news.errors);
+    } catch (err) {
+      result.errors.push(`News ingest: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
+      const edgar = await ingestEdgarForUniverse(symbols);
+      result.documentsWritten += edgar.documentsWritten;
+      result.filingsWritten += edgar.documentsWritten;
+      log.info(`EDGAR: ${edgar.documentsWritten} filings, ${edgar.symbolsUnresolved.length} unresolved tickers`);
+      result.errors.push(...edgar.errors);
+    } catch (err) {
+      result.errors.push(`EDGAR ingest: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Classification is capped per run (classifyUnclassifiedDocuments' own
+    // default limit) rather than draining a large backlog in one call —
+    // each is a live LLM call, and the next poll (20 minutes away, not
+    // tomorrow night) catches up whatever's left.
+    try {
+      const classified = await classifyUnclassifiedDocuments();
+      result.classified = classified.classified;
+      log.info(`Text classification: ${classified.classified}/${classified.attempted}`);
+      result.errors.push(...classified.errors);
+    } catch (err) {
+      result.errors.push(`Text classification: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } finally {
+    textSyncing = false;
+  }
+
+  result.finishedAt = nowIso();
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Option chain capture
 // ---------------------------------------------------------------------------
 
@@ -313,42 +416,14 @@ export async function runOptionsCapture(
       await runPaperMaintenance(log, tradingDay);
     }
 
-    // Text follows the same one-writer rule option quotes do: documents and
-    // doc_mentions live in market.db, so ingesting them on a reader would be
-    // silently destroyed by the next market:pull — the exact bug class the
-    // paper-db split exists to prevent, just for a table that never got
-    // split out because it never needs to be reader-writable in the first
-    // place. Classification is capped per run (classifyUnclassifiedDocuments'
-    // default limit) rather than draining a large backlog in one nightly
-    // job — each is a live LLM call, and next night catches up the rest.
-    if (isRunner()) {
-      // Each step isolated — SEC_EDGAR_USER_AGENT has no default (see
-      // config.ts), so a machine that hasn't set it must not lose news
-      // ingestion or classification of what news.ts just wrote.
-      try {
-        const news = await ingestNewsForUniverse(symbols);
-        log.info(`News: ${news.documentsWritten} documents, ${news.mentionsWritten} mentions`);
-        result.errors.push(...news.errors);
-      } catch (err) {
-        result.errors.push(`News ingest: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      try {
-        const edgar = await ingestEdgarForUniverse(symbols);
-        log.info(`EDGAR: ${edgar.documentsWritten} filings, ${edgar.symbolsUnresolved.length} unresolved tickers`);
-        result.errors.push(...edgar.errors);
-      } catch (err) {
-        result.errors.push(`EDGAR ingest: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      try {
-        const classified = await classifyUnclassifiedDocuments();
-        log.info(`Text classification: ${classified.classified}/${classified.attempted}`);
-        result.errors.push(...classified.errors);
-      } catch (err) {
-        result.errors.push(`Text classification: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    // Text used to ingest here, once a night — now on its own faster cron
+    // (`runTextSync`) so a headline doesn't sit unseen until 16:45. Still
+    // run once more right here regardless: capture just gave every
+    // underlying a fresh close, and `runPaperMaintenance` below wants
+    // whatever text arrived since the last poll folded in before it reads
+    // "news since you opened this."
+    const text = await runTextSync(log, 'post-capture');
+    result.errors.push(...text.errors);
 
     // A snapshot only matters if there is somewhere to pull it from — never
     // taken on a reader, which has no runner-scheduled capture to follow
@@ -493,17 +568,26 @@ export async function runRetrain(log: FastifyBaseLogger, reason: string): Promis
 let task: ReturnType<typeof cron.schedule> | null = null;
 let captureTask: ReturnType<typeof cron.schedule> | null = null;
 let retrainTask: ReturnType<typeof cron.schedule> | null = null;
+let textSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
 let lastRetrainResult: RetrainJobResult | null = null;
+let lastTextSyncResult: TextSyncResult | null = null;
 
 export const getLastNightlyResult = (): NightlyResult | null => lastResult;
 export const getLastCaptureResult = (): CaptureJobResult | null => lastCaptureResult;
 export const getLastRetrainResult = (): RetrainJobResult | null => lastRetrainResult;
+export const getLastTextSyncResult = (): TextSyncResult | null => lastTextSyncResult;
 
 /** Next scheduled chain capture, for the UI to show. */
 export function getNextCaptureRun(): string | null {
   const next = captureTask?.getNextRun();
+  return next ? new Date(next).toISOString() : null;
+}
+
+/** Next scheduled text sync, for the UI to show. */
+export function getNextTextSyncRun(): string | null {
+  const next = textSyncTask?.getNextRun();
   return next ? new Date(next).toISOString() : null;
 }
 
@@ -566,8 +650,27 @@ export function startScheduler(log: FastifyBaseLogger): void {
           `${config.market.captureTimezone}), next run ${getNextCaptureRun() ?? 'unknown'}`,
       );
     }
+
+    if (!cron.validate(config.market.textSyncCron)) {
+      log.error(`TEXT_SYNC_CRON is not valid: "${config.market.textSyncCron}" — text sync disabled`);
+    } else {
+      textSyncTask = cron.schedule(
+        config.market.textSyncCron,
+        () => {
+          void runTextSync(log, 'scheduled').then((r) => {
+            lastTextSyncResult = r;
+          });
+        },
+        // Eastern, same as capture — market hours, not local time.
+        { timezone: config.market.captureTimezone },
+      );
+      log.info(
+        `Text sync scheduled (${config.market.textSyncCron} ` +
+          `${config.market.captureTimezone}), next run ${getNextTextSyncRun() ?? 'unknown'}`,
+      );
+    }
   } else {
-    log.info('Option capture disabled — POLYGON_API_KEY is not set');
+    log.info('Option capture and text sync disabled — POLYGON_API_KEY is not set');
   }
 
   if (!config.market.isRunner) {
@@ -605,4 +708,6 @@ export function stopScheduler(): void {
   captureTask = null;
   retrainTask?.stop();
   retrainTask = null;
+  textSyncTask?.stop();
+  textSyncTask = null;
 }

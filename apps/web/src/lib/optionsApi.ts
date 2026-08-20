@@ -50,6 +50,16 @@ export interface CaptureJobResult {
   errors: string[];
 }
 
+export interface TextSyncResult {
+  startedAt: string;
+  finishedAt: string;
+  documentsWritten: number;
+  mentionsWritten: number;
+  filingsWritten: number;
+  classified: number;
+  errors: string[];
+}
+
 export interface OptionsStatus {
   configured: boolean;
   role: 'runner' | 'reader';
@@ -57,6 +67,8 @@ export interface OptionsStatus {
   quantUp: boolean;
   nextCapture: string | null;
   lastCapture: CaptureJobResult | null;
+  nextTextSync: string | null;
+  lastTextSync: TextSyncResult | null;
   lastRun: CaptureRun | null;
   universe: Record<string, number>;
   totals: { quotes: number; firstDay: string | null; lastDay: string | null };
@@ -146,6 +158,7 @@ export interface RankResponse {
 export const optionsApi = {
   status: () => api.get<OptionsStatus>('/api/options/status'),
   triggerCapture: () => api.post<CaptureJobResult>('/api/options/capture'),
+  triggerTextSync: () => api.post<TextSyncResult>('/api/options/text-sync'),
 
   paperEquity: () => api.get<PaperEquityResponse>('/api/paper/equity'),
   openOrder: (body: {

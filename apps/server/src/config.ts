@@ -42,6 +42,13 @@ const schema = z.object({
   POLYGON_API_KEY: z.string().optional(),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
   OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
+  // News/EDGAR ingestion + classification, independent of the once-nightly
+  // capture cadence above — see the module doc comment on why: a headline
+  // that breaks at 10am is stale by the time the 16:45 capture job would
+  // otherwise be the first thing to notice it. Every 20 minutes, market
+  // hours only, matching the actual news-generating window — running it
+  // through the night would just spend the same request budget on silence.
+  TEXT_SYNC_CRON: z.string().default('*/20 9-16 * * 1-5'),
   // Weekly, Sunday morning — capture only runs weekdays (see
   // OPTIONS_CAPTURE_CRON's 1-5), so by Sunday the corpus already has
   // Friday's close as its latest day; no reason to wait further into the
@@ -190,6 +197,12 @@ export const config = {
      */
     captureCron: env.OPTIONS_CAPTURE_CRON,
     captureTimezone: 'America/New_York',
+    /**
+     * News/EDGAR ingestion + classification, on its own faster cadence —
+     * see TEXT_SYNC_CRON's own comment for why this is split out from the
+     * once-nightly capture job it used to live inside.
+     */
+    textSyncCron: env.TEXT_SYNC_CRON,
     /**
      * Weekly retrain — runs `train.py` on an expanding window and registers
      * the result as a new challenger. Never promotes anything automatically;
