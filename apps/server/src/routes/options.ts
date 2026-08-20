@@ -17,6 +17,7 @@ import {
 } from '../lib/scheduler.js';
 import { listUniverse, retierByLiquidity } from '../lib/options/universe.js';
 import { repriceDay } from '../lib/options/reprice.js';
+import { pullMarketSnapshot } from '../lib/options/marketPull.js';
 import { nowIso, todayKey } from '../lib/util.js';
 import { auditForLeakage } from '../lib/agents/leakageAudit.js';
 import { narrateSignal } from '../lib/agents/narrate.js';
@@ -141,6 +142,22 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: 'This machine is a reader; text ingestion writes to market.db, which only the runner may write.' });
     }
     return runTextSync(app.log, 'manual');
+  });
+
+  /**
+   * Manual snapshot pull — the reader's nightly job calls the same
+   * function. Deliberately an in-process call rather than pointing the UI
+   * at `npm run market:pull`: that CLI script is a separate process with
+   * its own `marketDb` connection, so it can reopen only *its own*
+   * short-lived handle — never the already-running server's, which is the
+   * one actually answering every other request. Calling `pullMarketSnapshot`
+   * from inside this handler is what lets `reopenMarketDb` reach the
+   * connection that matters.
+   */
+  app.post('/api/options/pull', async (_req, reply) => {
+    const result = pullMarketSnapshot();
+    if (!result.ok) return reply.code(409).send({ error: result.message });
+    return result;
   });
 
   /**

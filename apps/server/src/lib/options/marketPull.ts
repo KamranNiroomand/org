@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { config } from '../../config.js';
+import { reopenMarketDb } from '../../db/market/index.js';
 
 export interface PullResult {
   ok: boolean;
@@ -25,6 +26,13 @@ export interface PullResult {
  * actually hold. A timeout that kills rsync mid-flight can leave a
  * truncated file at the destination — found live, the hard way, debugging
  * this exact function's manual precursor.
+ *
+ * Reopens this process's own `marketDb` connection on success — found live,
+ * the same day: a long-running reader server that pulled a fresh snapshot
+ * kept answering from the *previous* one, because rsync's rename swaps the
+ * file at the path but an already-open connection keeps reading the old,
+ * now-unlinked inode. See `reopenMarketDb`'s own doc comment for why that's
+ * safe to do from underneath already-registered routes.
  */
 export function pullMarketSnapshot(): PullResult {
   if (config.market.isRunner) {
@@ -45,5 +53,7 @@ export function pullMarketSnapshot(): PullResult {
     const detail = result.stderr?.trim() || result.error?.message || `exit ${result.status ?? 'unknown'}`;
     return { ok: false, message: `rsync failed: ${detail}` };
   }
+
+  reopenMarketDb();
   return { ok: true, message: `Pulled ${remoteSnapshot} → ${config.market.dbPath}` };
 }

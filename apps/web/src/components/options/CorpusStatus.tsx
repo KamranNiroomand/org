@@ -1,8 +1,10 @@
+import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Database, RefreshCw } from 'lucide-react';
 import { Badge, Button, Card, CardHeader, Skeleton, cn } from '../ui';
 import { StatTile } from '../charts';
 import { optionsApi } from '../../lib/optionsApi';
+import { ApiError } from '../../lib/api';
 
 /**
  * What is actually collecting data, and how much of it exists.
@@ -15,6 +17,7 @@ import { optionsApi } from '../../lib/optionsApi';
  */
 export function CorpusStatus() {
   const qc = useQueryClient();
+  const [pullError, setPullError] = useState<string | null>(null);
   const { data, isLoading, isFetching } = useQuery({
     queryKey: ['options-status'],
     queryFn: () => optionsApi.status(),
@@ -29,6 +32,20 @@ export function CorpusStatus() {
   const triggerTextSync = async () => {
     await optionsApi.triggerTextSync();
     void qc.invalidateQueries({ queryKey: ['options-status'] });
+  };
+
+  // Deliberately calls the server's /api/options/pull rather than shelling
+  // out to `npm run market:pull` — an in-process pull is the one that can
+  // actually reopen the connection this same server answers every other
+  // request from. See marketPull.ts's own doc comment.
+  const pull = async () => {
+    setPullError(null);
+    try {
+      await optionsApi.triggerPull();
+      void qc.invalidateQueries({ queryKey: ['options-status'] });
+    } catch (err) {
+      setPullError(err instanceof ApiError ? err.message : 'Pull failed');
+    }
   };
 
   if (isLoading) return <Skeleton className="h-64" />;
@@ -71,9 +88,19 @@ export function CorpusStatus() {
               <Button size="sm" variant="ghost" onClick={() => void trigger()} disabled={isFetching}>
                 <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} /> Run now
               </Button>
-            ) : undefined
+            ) : (
+              <Button size="sm" variant="ghost" onClick={() => void pull()} disabled={isFetching}>
+                <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} /> Pull now
+              </Button>
+            )
           }
         />
+        {pullError && (
+          <div className="flex items-center gap-2 border-b border-border bg-warning/10 px-4 py-2 text-xs text-warning">
+            <AlertTriangle className="size-3.5 shrink-0" />
+            {pullError}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-4 p-4 text-xs sm:grid-cols-3">
           <div>
             <div className="text-muted">Next scheduled</div>

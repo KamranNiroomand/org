@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import type { Database as SqliteDatabase } from 'better-sqlite3';
@@ -43,11 +43,48 @@ function openMarketDatabase(): SqliteDatabase {
   return db;
 }
 
-const sqlite = openMarketDatabase();
+let sqlite = openMarketDatabase();
 
-export const marketDb = drizzle(sqlite, { schema: marketSchema });
+export let marketDb = drizzle(sqlite, { schema: marketSchema });
 export { marketSchema };
 export type MarketDB = typeof marketDb;
+
+/**
+ * Closes and reopens the connection at the same path — for a reader right
+ * after `market:pull` replaces the file underneath it.
+ *
+ * `rsync` (the transport `pullMarketSnapshot` uses) writes to a temp file
+ * and renames it into place, which is what makes an in-flight read safe —
+ * but it also means an *already-open* connection keeps its file descriptor
+ * pointed at the old, now-unlinked inode. Every subsequent query on that
+ * connection would keep reading yesterday's snapshot forever, correctly and
+ * silently, with nothing to indicate the wrong day's data was ever
+ * returned. `marketDb` is a live export (`let`, not `const`), so every
+ * importer's `import { marketDb }` binding picks up the reopened instance
+ * automatically — no restart, no process boundary crossed. Safe against
+ * concurrent readers, too: better-sqlite3 is fully synchronous, so there is
+ * no way for another handler's query to be mid-flight on the same event
+ * loop tick while this closes and reassigns.
+ *
+ * Closing the old connection alone is not enough — found by writing this
+ * function's own test. WAL mode leaves `-wal`/`-shm` sidecar files sitting
+ * next to the path after close; they belong to the *old* file's now-
+ * unlinked inode, but a fresh connection at the same path finds them next
+ * to the *new* file and tries to recover through them anyway, reading
+ * stale pre-swap data straight back — the same corruption this project hit
+ * once already from a stale sidecar left by a killed process. The rsync'd
+ * file itself is a `VACUUM INTO` snapshot and never has a legitimate WAL of
+ * its own, so it is always correct to clear these before reopening here.
+ */
+export function reopenMarketDb(): void {
+  sqlite.close();
+  for (const suffix of ['-wal', '-shm']) {
+    const sidecar = `${config.market.dbPath}${suffix}`;
+    if (existsSync(sidecar)) unlinkSync(sidecar);
+  }
+  sqlite = openMarketDatabase();
+  marketDb = drizzle(sqlite, { schema: marketSchema });
+}
 
 /** Escape hatch for pragmas and maintenance statements Drizzle doesn't model. */
 export function marketPragma(statement: string): unknown {
