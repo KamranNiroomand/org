@@ -17,9 +17,9 @@ npm install
 npm run dev
 ```
 
-Then open **http://localhost:5173**.
+Then open **http://localhost:5050**.
 
-> Vite 8 binds IPv6 only, so `localhost` works but a literal `127.0.0.1:5173`
+> Vite 8 binds IPv6 only, so `localhost` works but a literal `127.0.0.1:5050`
 > does not. The API server is the other way round — it binds `127.0.0.1:5174`.
 > In normal use you only ever visit the Vite URL; it proxies `/api` for you.
 
@@ -37,7 +37,7 @@ Then open **http://localhost:5173**.
 ## Layout
 
 ```
-apps/web       React 19 + Vite + Tailwind v4   → :5173
+apps/web       React 19 + Vite + Tailwind v4   → :5050
 apps/server    Fastify + SQLite + Drizzle       → :5174
 packages/shared  Types, money, and the calendar core
 ```

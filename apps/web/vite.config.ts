@@ -14,7 +14,7 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 5050,
     // Everything under /api goes to Fastify, so the browser sees one origin and
     // cookies work without CORS credentials in development.
     proxy: {
