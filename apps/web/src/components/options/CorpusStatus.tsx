@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Database, RefreshCw } from 'lucide-react';
 import { Badge, Button, Card, CardHeader, Skeleton, cn } from '../ui';
 import { StatTile } from '../charts';
@@ -15,21 +15,27 @@ import { optionsApi } from '../../lib/optionsApi';
  */
 export function CorpusStatus() {
   const qc = useQueryClient();
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ['options-status'],
     queryFn: () => optionsApi.status(),
     refetchInterval: 60_000,
   });
 
-  const trigger = async () => {
-    await optionsApi.triggerCapture();
-    void qc.invalidateQueries({ queryKey: ['options-status'] });
-  };
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ['options-status'] });
 
-  const triggerTextSync = async () => {
-    await optionsApi.triggerTextSync();
-    void qc.invalidateQueries({ queryKey: ['options-status'] });
-  };
+  // useMutation, not a bare async function + isFetching from the status
+  // query above: each button's own pending/error state has to come from
+  // its own request, not from an unrelated 60s background poll — the
+  // options-status refetch and "is a capture/pull/sync actually running
+  // right now" are two different things, and conflating them let a button
+  // look busy when nothing was happening, or look idle mid-request.
+  const capture = useMutation({ mutationFn: () => optionsApi.triggerCapture(), onSuccess: invalidate });
+  const textSync = useMutation({ mutationFn: () => optionsApi.triggerTextSync(), onSuccess: invalidate });
+  // Deliberately calls the server's /api/options/pull rather than shelling
+  // out to `npm run market:pull` — an in-process pull is the one that can
+  // actually reopen the connection this same server answers every other
+  // request from. See marketPull.ts's own doc comment.
+  const pull = useMutation({ mutationFn: () => optionsApi.triggerPull(), onSuccess: invalidate });
 
   if (isLoading) return <Skeleton className="h-64" />;
   if (!data) return null;
@@ -68,12 +74,22 @@ export function CorpusStatus() {
           subtitle={data.role === 'runner' ? 'This machine captures chains' : 'Reading a corpus captured elsewhere'}
           action={
             data.role === 'runner' ? (
-              <Button size="sm" variant="ghost" onClick={() => void trigger()} disabled={isFetching}>
-                <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} /> Run now
+              <Button size="sm" variant="ghost" onClick={() => capture.mutate()} disabled={capture.isPending}>
+                <RefreshCw className={cn('size-3.5', capture.isPending && 'animate-spin')} /> Run now
               </Button>
-            ) : undefined
+            ) : (
+              <Button size="sm" variant="ghost" onClick={() => pull.mutate()} disabled={pull.isPending}>
+                <RefreshCw className={cn('size-3.5', pull.isPending && 'animate-spin')} /> Pull now
+              </Button>
+            )
           }
         />
+        {(capture.error || pull.error) && (
+          <div className="flex items-center gap-2 border-b border-border bg-warning/10 px-4 py-2 text-xs text-warning">
+            <AlertTriangle className="size-3.5 shrink-0" />
+            {(capture.error ?? pull.error)?.message}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-4 p-4 text-xs sm:grid-cols-3">
           <div>
             <div className="text-muted">Next scheduled</div>
@@ -126,12 +142,18 @@ export function CorpusStatus() {
           subtitle="News + EDGAR, market hours — independent of the once-nightly capture above"
           action={
             data.role === 'runner' ? (
-              <Button size="sm" variant="ghost" onClick={() => void triggerTextSync()} disabled={isFetching}>
-                <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} /> Run now
+              <Button size="sm" variant="ghost" onClick={() => textSync.mutate()} disabled={textSync.isPending}>
+                <RefreshCw className={cn('size-3.5', textSync.isPending && 'animate-spin')} /> Run now
               </Button>
             ) : undefined
           }
         />
+        {textSync.error && (
+          <div className="flex items-center gap-2 border-b border-border bg-warning/10 px-4 py-2 text-xs text-warning">
+            <AlertTriangle className="size-3.5 shrink-0" />
+            {textSync.error.message}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-4 p-4 text-xs sm:grid-cols-3">
           <div>
             <div className="text-muted">Next scheduled</div>

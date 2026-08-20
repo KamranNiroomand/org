@@ -12,7 +12,7 @@ import { pullMarketSnapshot } from '../lib/options/marketPull.js';
  */
 console.log(`\nPulling from the runner (${config.market.runnerSshHost ?? 'RUNNER_SSH_HOST not set'})...\n`);
 
-const result = pullMarketSnapshot();
+const result = await pullMarketSnapshot();
 
 if (!result.ok) {
   console.error(`\n  ${result.message}\n`);

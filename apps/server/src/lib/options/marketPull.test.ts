@@ -7,8 +7,8 @@ import { pullMarketSnapshot } from './marketPull.js';
  * a runner must never attempt to pull from itself.
  */
 describe('pullMarketSnapshot', () => {
-  it('refuses to run on a runner', () => {
-    const result = pullMarketSnapshot();
+  it('refuses to run on a runner', async () => {
+    const result = await pullMarketSnapshot();
     expect(result.ok).toBe(false);
     expect(result.message).toContain('runner');
   });
