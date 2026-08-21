@@ -398,6 +398,16 @@ export const instruments = sqliteTable(
     forwardPe: real('forward_pe'),
     priceToBook: real('price_to_book'),
     dividendYield: real('dividend_yield'),
+    /**
+     * From the same Yahoo quote() call the nightly sweep already makes — no
+     * extra request budget spent. What makes a price/momentum alert (new
+     * 52-week low, volume spike) computable across the full universe instead
+     * of only the handful of symbols with a real time series in priceSnapshots.
+     */
+    fiftyTwoWeekHigh: real('fifty_two_week_high'),
+    fiftyTwoWeekLow: real('fifty_two_week_low'),
+    volume: integer('volume'),
+    avgVolume10Day: integer('avg_volume_10_day'),
     /** Epoch millis of the first trade — how long the company has been listed. */
     firstTradeMs: integer('first_trade_ms'),
     quotedAt: text('quoted_at'),
@@ -421,6 +431,63 @@ export const priceSnapshots = sqliteTable(
     asOf: text('as_of').notNull(),
   },
   (t) => [index('prices_symbol_idx').on(t.symbol, t.asOf)],
+);
+
+/**
+ * Symbols followed without a position — what makes an alert about a symbol
+ * read differently depending on whether you own it, are watching it, or
+ * have never looked at it.
+ *
+ * Not FK'd to `instruments`: that table is a nightly-refreshed cache of the
+ * sweep universe and can, in principle, be missing a symbol (a same-day
+ * IPO, a security outside the US/CA sweep). `name` is captured at add-time
+ * as a denormalized display fallback, same shape `holdings.name` already
+ * uses — every *live* figure (price, day change) is read from `instruments`
+ * at request time, never stored here.
+ */
+export const watchlist = sqliteTable('watchlist', {
+  symbol: text('symbol').primaryKey(),
+  name: text('name'),
+  note: text('note'),
+  createdAt: now(),
+});
+
+/**
+ * One fired price/momentum or news alert. The unique index on (symbol,
+ * ruleKey, tradingDay) is what makes evaluation idempotent — the same 9%
+ * drop does not re-alert every time the page is opened, because the insert
+ * that already happened today conflicts and is dropped rather than
+ * duplicated.
+ *
+ * `context` is captured at fire time, not derived live from `holdings`/
+ * `watchlist` at read time — a position can be sold five minutes after an
+ * alert fires, and "you owned this when it dropped 9%" should stay true in
+ * the feed even after the sale.
+ */
+export const alertEvents = sqliteTable(
+  'alert_events',
+  {
+    id: id(),
+    symbol: text('symbol').notNull(),
+    ruleKey: text('rule_key', {
+      enum: ['day_change_up', 'day_change_down', 'new_52w_high', 'new_52w_low', 'volume_spike', 'news_event'],
+    }).notNull(),
+    /** Civil day the underlying move/document happened on — the dedup key. */
+    tradingDay: text('trading_day').notNull(),
+    context: text('context', { enum: ['holding', 'watchlist', 'unwatched'] }).notNull(),
+    direction: text('direction', { enum: ['bullish', 'bearish', 'neutral'] }).notNull(),
+    headline: text('headline').notNull(),
+    /** The rule's own numbers — threshold, actual value, etc. Shape varies by ruleKey. */
+    detail: text('detail', { mode: 'json' }).$type<Record<string, unknown>>().notNull().default({}),
+    acknowledged: integer('acknowledged', { mode: 'boolean' }).notNull().default(false),
+    triggeredAt: text('triggered_at').notNull(),
+    createdAt: now(),
+  },
+  (t) => [
+    uniqueIndex('alert_events_dedup_uq').on(t.symbol, t.ruleKey, t.tradingDay),
+    index('alert_events_day_idx').on(t.tradingDay),
+    index('alert_events_context_idx').on(t.context, t.acknowledged),
+  ],
 );
 
 export const fxRates = sqliteTable(

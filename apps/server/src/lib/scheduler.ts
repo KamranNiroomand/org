@@ -26,6 +26,7 @@ import { ingestEdgarForUniverse } from './text/edgar.js';
 import { classifyUnclassifiedDocuments } from './text/classify.js';
 import { computePositionHealth, latestCapturedTradingDay } from './options/positionHealth.js';
 import { pullMarketSnapshot } from './options/marketPull.js';
+import { evaluatePriceAlerts } from './alerts/evaluate.js';
 
 /**
  * The nightly job.
@@ -53,6 +54,7 @@ export interface NightlyResult {
   banks: { items: number; added: number; modified: number; removed: number; categorized: number };
   calendars: { feeds: number; added: number; updated: number; removed: number };
   market: { universe: number; quoted: number };
+  alerts: { scanned: number; fired: number };
   prices: { symbols: number; quoted: number; usdCad: number | null };
   errors: string[];
 }
@@ -63,6 +65,7 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
     banks: { items: 0, added: 0, modified: 0, removed: 0, categorized: 0 },
     calendars: { feeds: 0, added: 0, updated: 0, removed: 0 },
     market: { universe: 0, quoted: 0 },
+    alerts: { scanned: 0, fired: 0 },
     prices: { symbols: 0, quoted: 0, usdCad: null },
     errors: [],
   };
@@ -119,14 +122,36 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
      * right cadence: listings change slowly, and market cap, P/E and sector
      * barely move intraday. The open page re-quotes only what it displays.
      */
+    let sweepSucceeded = false;
     try {
       const universe = await refreshUniverse();
       const swept = await sweepMarket();
       result.market = { universe: universe.total, quoted: swept.quoted };
       log.info(`Market: ${swept.quoted}/${universe.total} instruments quoted`);
+      sweepSucceeded = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       result.errors.push(`Market sweep: ${message}`);
+    }
+
+    // --- Price alerts ---------------------------------------------------------
+    // Right after the sweep, on the row set it just wrote — evaluating against
+    // yesterday's prices would flag moves a day stale by the time anyone opens
+    // the tab. Skipped entirely when the sweep itself failed: instruments still
+    // holds yesterday's numbers then, and evaluating against them would insert
+    // an alert dated *today* for a move that isn't actually today's — a stale
+    // headline dressed up as fresh news, and one that would then dedup-block
+    // the real alert once a later sweep does succeed.
+    if (sweepSucceeded) {
+      try {
+        const alerts = evaluatePriceAlerts();
+        result.alerts = { scanned: alerts.scanned, fired: alerts.fired };
+        log.info(`Alerts: ${alerts.fired} fired across ${alerts.scanned} instruments`);
+        result.errors.push(...alerts.errors);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result.errors.push(`Alert evaluation: ${message}`);
+      }
     }
 
     // --- Prices -------------------------------------------------------------

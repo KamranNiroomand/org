@@ -37,6 +37,10 @@ interface RawQuote {
   dividendYield?: number;
   firstTradeDateMilliseconds?: unknown;
   sector?: string;
+  fiftyTwoWeekHigh?: number;
+  fiftyTwoWeekLow?: number;
+  regularMarketVolume?: number;
+  averageDailyVolume10Day?: number;
 }
 
 interface YahooClient {
@@ -107,6 +111,10 @@ function writeQuotes(rows: RawQuote[]): number {
           forwardPe: num(q.forwardPE),
           priceToBook: num(q.priceToBook),
           dividendYield: num(q.dividendYield),
+          fiftyTwoWeekHigh: num(q.fiftyTwoWeekHigh),
+          fiftyTwoWeekLow: num(q.fiftyTwoWeekLow),
+          volume: num(q.regularMarketVolume),
+          avgVolume10Day: num(q.averageDailyVolume10Day),
           firstTradeMs: epochMs(q.firstTradeDateMilliseconds),
           // Sector deliberately untouched: it is set by the universe refresh
           // from Nasdaq's screener, and writing it here would blank every

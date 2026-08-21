@@ -5,6 +5,7 @@ import { formatMoney, money, parseMoney } from '@org/shared';
 import { AllocationBars, StatTile } from '../components/charts';
 import { MarketMap } from '../components/MarketMap';
 import { OptionsTab } from '../components/options/OptionsTab';
+import { WatchlistTab } from '../components/watchlist/WatchlistTab';
 import { Page, PageHeader } from '../components/PageHeader';
 import { Badge, Button, Card, CardHeader, Empty, Input, Skeleton, cn } from '../components/ui';
 import { api, type PortfolioResponse } from '../lib/api';
@@ -20,7 +21,7 @@ const TABS: Array<[Tab, string]> = [
   ['screener', 'Screener'],
 ];
 
-/** Reserved so the shell is right; neither is built yet. */
+/** Reserved so the shell is right; screener isn't built yet. */
 function Placeholder({ title, hint }: { title: string; hint: string }) {
   return (
     <Card className="overflow-hidden">
@@ -118,12 +119,7 @@ export function InvestmentsPage() {
 
         {tab === 'options' && <OptionsTab />}
 
-        {tab === 'watchlist' && (
-          <Placeholder
-            title="Watchlist"
-            hint="Reserved for symbols you want to follow without holding. Not built yet."
-          />
-        )}
+        {tab === 'watchlist' && <WatchlistTab />}
 
         {tab === 'screener' && (
           <Placeholder
