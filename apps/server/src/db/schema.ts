@@ -199,10 +199,11 @@ export const accounts = sqliteTable(
     institutionName: text('institution_name'),
     isManual: integer('is_manual', { mode: 'boolean' }).notNull().default(false),
     /**
-     * Whether this account feeds the summary tiles, cashflow, and category
-     * breakdown. Balances and the account list always show every account —
-     * this only governs the aggregates, so a joint account or a dormant
-     * savings account can be kept visible without skewing the charts.
+     * Whether this account feeds the summary tiles, cashflow, category
+     * breakdown, and the transaction list. The account list and balances
+     * always show every account regardless — this only governs whether an
+     * account's activity shows up elsewhere, so a joint account can be
+     * excluded from your own spending picture without deleting it.
      */
     includeInStats: integer('include_in_stats', { mode: 'boolean' })
       .notNull()

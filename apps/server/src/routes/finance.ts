@@ -119,6 +119,10 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
       );
     }
     if (q.includeTransfers !== 'true') filters.push(eq(transactions.isTransfer, false));
+    // Matches the aggregate queries below (summary, cashflow): an excluded
+    // account's transactions stay out of the list entirely, not just the
+    // totals derived from it.
+    filters.push(eq(accounts.includeInStats, true));
 
     return db
       .select({
@@ -415,6 +419,59 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
     const tiles = computeSummaryTiles(rows, bucketByAccount);
 
     return { month, ...tiles, transactionCount: rows.length };
+  });
+
+  /**
+   * The individual transactions behind one month's `refunds` tile —
+   * clicking that number wants to see what it's actually made of.
+   *
+   * Same row shape `/api/transactions` returns, so the web side can reuse
+   * its existing transaction-row rendering rather than inventing a second
+   * one. The credit-account/not-a-payment half of the predicate is
+   * `computeSummaryTiles`'s own refund branch, kept here as the one other
+   * place it's allowed to be restated rather than a shared export, since
+   * splitting two lines into their own module for one caller would be the
+   * wrong amount of indirection — `accountBucket` (the one subtle part) is
+   * still imported from there rather than re-derived.
+   */
+  app.get<{ Querystring: { month?: string } }>('/api/finance/refunds', async (req) => {
+    const month = req.query.month ?? todayKey().slice(0, 7);
+    const from = `${month}-01`;
+    const to = `${month}-31`;
+
+    const includedAccounts = db
+      .select({ id: accounts.id, type: accounts.type, subtype: accounts.subtype })
+      .from(accounts)
+      .where(eq(accounts.includeInStats, true))
+      .all();
+    const bucketByAccount = new Map(includedAccounts.map((a) => [a.id, accountBucket(a.type, a.subtype)]));
+
+    const rows = db
+      .select({
+        transaction: transactions,
+        account: { id: accounts.id, name: accounts.name, mask: accounts.mask, type: accounts.type },
+        category: { id: categories.id, name: categories.name, color: categories.color, kind: categories.kind },
+      })
+      .from(transactions)
+      .innerJoin(accounts, eq(transactions.accountId, accounts.id))
+      .leftJoin(categories, eq(transactions.categoryId, categories.id))
+      .where(
+        and(
+          gte(transactions.date, from),
+          lte(transactions.date, to),
+          notATransfer(),
+          eq(accounts.includeInStats, true),
+        ),
+      )
+      .orderBy(desc(transactions.date), desc(transactions.createdAt))
+      .all();
+
+    return rows.filter(
+      (r) =>
+        r.transaction.amount > 0 &&
+        bucketByAccount.get(r.transaction.accountId) === 'credit' &&
+        r.category?.kind !== 'payment',
+    );
   });
 
   /** Income vs. expense per month, for the cashflow chart. */

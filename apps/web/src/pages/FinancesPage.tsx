@@ -6,7 +6,7 @@ import { BankSync } from '../components/BankSync';
 import { CashflowChart, CategoryBars, StatTile } from '../components/charts';
 import { DualDate } from '../components/DualDate';
 import { Page, PageHeader } from '../components/PageHeader';
-import { Badge, Button, Card, CardHeader, Empty, Skeleton, cn } from '../components/ui';
+import { Badge, Button, Card, CardHeader, Empty, Modal, Skeleton, cn } from '../components/ui';
 import { api, type CashflowPoint, type MonthSummary, type TransactionRow } from '../lib/api';
 import { useSettings } from '../lib/settings';
 
@@ -32,6 +32,7 @@ interface Category {
 export function FinancesPage() {
   const { baseCurrency, health } = useSettings();
   const [month, setMonth] = useState(() => civilKey(todayCivil()).slice(0, 7));
+  const [refundsOpen, setRefundsOpen] = useState(false);
   const qc = useQueryClient();
 
   const { data: accounts } = useQuery({
@@ -55,6 +56,14 @@ export function FinancesPage() {
     queryKey: ['categories'],
     queryFn: () => api.get<Category[]>('/api/categories'),
   });
+  // Only fetched once the modal is actually opened — the refunds figure
+  // itself already came down with the summary tiles above, so there's no
+  // reason to also fetch the underlying rows on every page load.
+  const { data: refundTransactions, isLoading: refundsLoading } = useQuery({
+    queryKey: ['refunds', month],
+    queryFn: () => api.get<TransactionRow[]>(`/api/finance/refunds?month=${month}`),
+    enabled: refundsOpen,
+  });
 
   const recategorize = useMutation({
     mutationFn: ({ id, categoryId, learn }: { id: string; categoryId: string; learn: boolean }) =>
@@ -67,15 +76,18 @@ export function FinancesPage() {
 
   /**
    * Excluding an account is a display choice, not a destructive one — the
-   * account and its transactions stay exactly where they are, they just stop
-   * feeding the tiles and charts. Every aggregate query has to be invalidated
-   * together or the tiles and the charts disagree for a beat.
+   * account itself stays exactly where it is, in the account list, with its
+   * real balance. It disappears from the tiles, charts, and transaction
+   * list, though, not just the aggregates — that's what "excluded" means to
+   * a person unchecking a joint or shared account. Every affected query has
+   * to be invalidated together or the tiles and the list disagree for a
+   * beat.
    */
   const toggleAccount = useMutation({
     mutationFn: (vars: { id: string; includeInStats: boolean }) =>
       api.patch(`/api/accounts/${vars.id}`, { includeInStats: vars.includeInStats }),
     onSuccess: () => {
-      for (const key of ['accounts', 'summary', 'cashflow', 'budgets']) {
+      for (const key of ['accounts', 'summary', 'cashflow', 'budgets', 'transactions']) {
         void qc.invalidateQueries({ queryKey: [key] });
       }
     },
@@ -131,7 +143,13 @@ export function FinancesPage() {
             <StatTile label="Payments" value={m(summary.payments)} />
           )}
           {summary?.refunds !== null && summary?.refunds !== undefined && (
-            <StatTile label="Refunds" value={m(summary.refunds)} tone="positive" />
+            <button
+              type="button"
+              onClick={() => setRefundsOpen(true)}
+              className="rounded-xl text-left transition-opacity hover:opacity-80"
+            >
+              <StatTile label="Refunds" value={m(summary.refunds)} tone="positive" />
+            </button>
           )}
           {summary?.interest !== null && summary?.interest !== undefined && (
             <StatTile label="Interest" value={m(summary.interest)} tone="positive" />
@@ -207,11 +225,11 @@ export function FinancesPage() {
                       }
                       title={
                         a.includeInStats
-                          ? 'Counted in totals and charts — click to exclude'
-                          : 'Excluded from totals and charts — click to include'
+                          ? 'Shown in totals, charts, and transactions — click to exclude'
+                          : 'Excluded from totals, charts, and transactions — click to include'
                       }
                       aria-label={
-                        a.includeInStats ? `Exclude ${a.name} from totals` : `Include ${a.name} in totals`
+                        a.includeInStats ? `Exclude ${a.name}` : `Include ${a.name}`
                       }
                       aria-pressed={a.includeInStats}
                       className="rounded-md p-1 text-faint transition-colors hover:bg-bg-subtle hover:text-text"
@@ -324,6 +342,36 @@ export function FinancesPage() {
             </div>
           )}
         </Card>
+
+        <Modal
+          open={refundsOpen}
+          onOpenChange={setRefundsOpen}
+          title="Refunds"
+          description={`${month} — money credited back to your card, not counting card payments`}
+        >
+          {refundsLoading ? (
+            <Skeleton className="h-32" />
+          ) : refundTransactions?.length === 0 ? (
+            <Empty title="No refunds this month" />
+          ) : (
+            <div className="-mx-4 divide-y divide-border">
+              {refundTransactions?.map(({ transaction: t, account }) => (
+                <div key={t.id} className="flex items-center gap-3 px-4 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm">{t.merchantName ?? t.name}</div>
+                    <div className="flex items-center gap-2 text-xs text-muted">
+                      <DualDate date={t.date} style="short" />
+                      {account && <span className="text-faint">{account.name}</span>}
+                    </div>
+                  </div>
+                  <span className="tnum w-24 shrink-0 text-right text-sm font-medium text-positive">
+                    {formatMoney(money(t.amount, t.currency), { signed: true })}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal>
       </Page>
     </>
   );
