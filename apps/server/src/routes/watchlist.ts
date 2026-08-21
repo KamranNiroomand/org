@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { db } from '../db/index.js';
 import { alertEvents, instruments, watchlist } from '../db/schema.js';
 import { evaluatePriceAlerts } from '../lib/alerts/evaluate.js';
+import { runWatchlistTextSync } from '../lib/scheduler.js';
 import { nowIso } from '../lib/util.js';
 import { patchOf } from './_shared.js';
 
@@ -119,4 +120,12 @@ export async function watchlistRoutes(app: FastifyInstance): Promise<void> {
 
   /** Manual trigger, matching the existing /api/investments/market/sweep pattern. */
   app.post('/api/signals/evaluate', async () => evaluatePriceAlerts());
+
+  /**
+   * Manual news/EDGAR sync for the watchlist — the scheduled job calls the
+   * same function. Runner-only and Polygon-gated; on a reader or without a
+   * key this returns normally with an explanatory entry in `errors` rather
+   * than a 4xx, matching runWatchlistTextSync's own no-op shape.
+   */
+  app.post('/api/watchlist/text-sync', async () => runWatchlistTextSync(app.log, 'manual'));
 }
