@@ -228,22 +228,32 @@ export function AllocationBars({
   );
 }
 
-/** A single headline number — the right form when there's one figure to read. */
+/**
+ * A single headline number — the right form when there's one figure to read.
+ *
+ * Passing `onClick` renders the tile as a button rather than wrapping a
+ * plain `<div>` tile in a separate `<button>` — one interactive element
+ * with its own hover/focus state, instead of two nested boxes.
+ */
 export function StatTile({
   label,
   value,
   delta,
   tone = 'neutral',
   className,
+  onClick,
+  ariaLabel,
 }: {
   label: string;
   value: string;
   delta?: string;
   tone?: 'neutral' | 'positive' | 'negative';
   className?: string;
+  onClick?: () => void;
+  ariaLabel?: string;
 }) {
-  return (
-    <div className={cn('rounded-xl border border-border bg-panel px-4 py-3', className)}>
+  const content = (
+    <>
       <div className="text-[11px] tracking-wide text-muted uppercase">{label}</div>
       <div
         className={cn(
@@ -255,8 +265,26 @@ export function StatTile({
         {value}
       </div>
       {delta && <div className="tnum mt-0.5 text-xs text-muted">{delta}</div>}
-    </div>
+    </>
   );
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={ariaLabel}
+        className={cn(
+          'rounded-xl border border-border bg-panel px-4 py-3 text-left transition-opacity hover:opacity-80',
+          className,
+        )}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return <div className={cn('rounded-xl border border-border bg-panel px-4 py-3', className)}>{content}</div>;
 }
 
 export { Cell };

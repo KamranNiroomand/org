@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, isNull, like, lte, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, isNull, like, lte, ne, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
@@ -23,6 +23,9 @@ const notATransfer = () =>
     eq(transactions.isTransfer, false),
     or(isNull(categories.kind), ne(categories.kind, 'transfer')),
   );
+
+/** An account the user hasn't excluded — see the doc comment on `accounts.includeInStats`. */
+const accountIncluded = () => eq(accounts.includeInStats, true);
 
 const civilKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const monthKeySchema = z.string().regex(/^\d{4}-\d{2}$/);
@@ -72,9 +75,10 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Toggles whether an account feeds the aggregates. Deliberately separate
-   * from deleting it — excluding an account keeps its balance and its
-   * transactions, it just stops them being counted in the totals.
+   * Toggles whether an account feeds the aggregates and the transaction
+   * list. Deliberately separate from deleting it — excluding an account
+   * keeps its balance and its transactions in place, it just stops them
+   * appearing anywhere else in the app.
    */
   app.patch<{ Params: { id: string } }>('/api/accounts/:id', async (req, reply) => {
     const parsed = z.object({ includeInStats: z.boolean() }).safeParse(req.body);
@@ -119,6 +123,12 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
       );
     }
     if (q.includeTransfers !== 'true') filters.push(eq(transactions.isTransfer, false));
+    // Matches the aggregate queries below (summary, cashflow): an excluded
+    // account's transactions stay out of the list entirely, not just the
+    // totals derived from it. Applies even when `accountId` is given
+    // explicitly — excluding an account hides it everywhere, including a
+    // direct link to it.
+    filters.push(accountIncluded());
 
     return db
       .select({
@@ -306,7 +316,7 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
           gte(transactions.date, `${month}-01`),
           lte(transactions.date, `${month}-31`),
           eq(transactions.isTransfer, false),
-          eq(accounts.includeInStats, true),
+          accountIncluded(),
         ),
       )
       .groupBy(transactions.categoryId)
@@ -386,7 +396,7 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
     const includedAccounts = db
       .select({ id: accounts.id, type: accounts.type, subtype: accounts.subtype })
       .from(accounts)
-      .where(eq(accounts.includeInStats, true))
+      .where(accountIncluded())
       .all();
     const bucketByAccount = new Map(includedAccounts.map((a) => [a.id, accountBucket(a.type, a.subtype)]));
 
@@ -407,7 +417,7 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
           gte(transactions.date, from),
           lte(transactions.date, to),
           notATransfer(),
-          eq(accounts.includeInStats, true),
+          accountIncluded(),
         ),
       )
       .all();
@@ -415,6 +425,48 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
     const tiles = computeSummaryTiles(rows, bucketByAccount);
 
     return { month, ...tiles, transactionCount: rows.length };
+  });
+
+  /**
+   * The individual transactions behind one month's `refunds` tile —
+   * clicking that number wants to see what it's actually made of.
+   *
+   * Same row shape `/api/transactions` returns, so the web side can reuse
+   * its existing transaction-row rendering rather than inventing a second
+   * one. The credit-account/not-a-payment predicate mirrors
+   * `computeSummaryTiles`'s own refund branch — restated directly in SQL
+   * here rather than shared, since `accountBucket` reduces to a plain type
+   * check for the 'credit' case and pulling it in would cost a second
+   * query (and a JS-side filter) for no benefit.
+   */
+  app.get<{ Querystring: { month?: string; limit?: string } }>('/api/finance/refunds', async (req) => {
+    const month = req.query.month ?? todayKey().slice(0, 7);
+    const from = `${month}-01`;
+    const to = `${month}-31`;
+
+    return db
+      .select({
+        transaction: transactions,
+        account: { id: accounts.id, name: accounts.name, mask: accounts.mask, type: accounts.type },
+        category: { id: categories.id, name: categories.name, color: categories.color, kind: categories.kind },
+      })
+      .from(transactions)
+      .innerJoin(accounts, eq(transactions.accountId, accounts.id))
+      .leftJoin(categories, eq(transactions.categoryId, categories.id))
+      .where(
+        and(
+          gte(transactions.date, from),
+          lte(transactions.date, to),
+          notATransfer(),
+          accountIncluded(),
+          eq(accounts.type, 'credit'),
+          gt(transactions.amount, 0),
+          or(isNull(categories.kind), ne(categories.kind, 'payment')),
+        ),
+      )
+      .orderBy(desc(transactions.date), desc(transactions.createdAt))
+      .limit(Math.min(Number(req.query.limit ?? 200), 1000))
+      .all();
   });
 
   /** Income vs. expense per month, for the cashflow chart. */
@@ -430,7 +482,7 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
       .from(transactions)
       .innerJoin(accounts, eq(transactions.accountId, accounts.id))
       .leftJoin(categories, eq(transactions.categoryId, categories.id))
-      .where(and(notATransfer(), eq(accounts.includeInStats, true)))
+      .where(and(notATransfer(), accountIncluded()))
       .groupBy(sql`substr(${transactions.date}, 1, 7)`)
       .orderBy(desc(sql`substr(${transactions.date}, 1, 7)`))
       .limit(months)
