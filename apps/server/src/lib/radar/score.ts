@@ -14,6 +14,8 @@
  * population statistics needed to score it.
  */
 
+import { clamp } from '../util.js';
+
 export const RADAR_DISCLAIMER =
   'Heuristic screen only: momentum, proximity to 52-week high, volume spike, and ' +
   'news-sentiment trend (where covered), combined into an unweighted composite. ' +
@@ -75,6 +77,22 @@ function zScore(value: number, mean: number, stdDev: number): number {
   return stdDev > 0 ? (value - mean) / stdDev : 0;
 }
 
+/** `volume / avgVolume10Day`, or null when there's nothing to divide by —
+ * shared by `computePopulationStats` and `scoreInstrument` so the same row
+ * is never counted toward the population sample under a different
+ * eligibility rule than the one used to score it. */
+function volumeRatioOf(row: Pick<RadarInputs, 'volume' | 'avgVolume10Day'>): number | null {
+  return row.volume !== null && row.avgVolume10Day !== null && row.avgVolume10Day > 0
+    ? row.volume / row.avgVolume10Day
+    : null;
+}
+
+/** Whether a row has real, measured sentiment — not just a non-null score,
+ * which alone doesn't distinguish "measured neutral" from a stray 0. */
+function hasSentimentCoverage(row: Pick<RadarInputs, 'sentimentDocCount' | 'sentimentScore'>): boolean {
+  return row.sentimentDocCount > 0 && row.sentimentScore !== null;
+}
+
 export interface PopulationStats {
   momentum: { mean: number; stdDev: number };
   volumeRatio: { mean: number; stdDev: number };
@@ -84,12 +102,8 @@ export interface PopulationStats {
 
 export function computePopulationStats(rows: readonly RadarInputs[]): PopulationStats {
   const momentumValues = rows.map((r) => r.dayChangePercent).filter((v): v is number => v !== null);
-  const volumeRatioValues = rows
-    .filter((r) => r.volume !== null && r.avgVolume10Day !== null && r.avgVolume10Day > 0)
-    .map((r) => r.volume! / r.avgVolume10Day!);
-  const sentimentValues = rows
-    .filter((r) => r.sentimentDocCount > 0 && r.sentimentScore !== null)
-    .map((r) => r.sentimentScore!);
+  const volumeRatioValues = rows.map(volumeRatioOf).filter((v): v is number => v !== null);
+  const sentimentValues = rows.filter(hasSentimentCoverage).map((r) => r.sentimentScore!);
 
   return {
     momentum: meanAndStdDev(momentumValues),
@@ -130,7 +144,7 @@ export function scoreInstrument(row: RadarInputs, stats: PopulationStats): Radar
     row.fiftyTwoWeekLow !== null &&
     row.fiftyTwoWeekHigh > row.fiftyTwoWeekLow
   ) {
-    trendPct = Math.min(1, Math.max(0, (row.price - row.fiftyTwoWeekLow) / (row.fiftyTwoWeekHigh - row.fiftyTwoWeekLow)));
+    trendPct = clamp((row.price - row.fiftyTwoWeekLow) / (row.fiftyTwoWeekHigh - row.fiftyTwoWeekLow), 0, 1);
     newHigh = row.price >= row.fiftyTwoWeekHigh;
     // trendPct is 0..1, not a z-score — recentered so "at the midpoint of
     // the 52-week range" contributes nothing, matching every other
@@ -141,18 +155,17 @@ export function scoreInstrument(row: RadarInputs, stats: PopulationStats): Radar
     inputsUsed.push('fiftyTwoWeekRange');
   }
 
-  let volumeRatio: number | null = null;
   let volumeZ: number | null = null;
-  if (row.volume !== null && row.avgVolume10Day !== null && row.avgVolume10Day > 0) {
-    volumeRatio = row.volume / row.avgVolume10Day;
+  const volumeRatio = volumeRatioOf(row);
+  if (volumeRatio !== null) {
     volumeZ = zScore(volumeRatio, stats.volumeRatio.mean, stats.volumeRatio.stdDev);
     zComponents.push(volumeZ);
     inputsUsed.push('volumeRatio');
   }
 
   let sentimentZ: number | null = null;
-  if (row.sentimentDocCount > 0 && row.sentimentScore !== null && stats.sentiment !== null) {
-    sentimentZ = zScore(row.sentimentScore, stats.sentiment.mean, stats.sentiment.stdDev);
+  if (hasSentimentCoverage(row) && stats.sentiment !== null) {
+    sentimentZ = zScore(row.sentimentScore!, stats.sentiment.mean, stats.sentiment.stdDev);
     zComponents.push(sentimentZ);
     inputsUsed.push('sentimentScore');
   }
