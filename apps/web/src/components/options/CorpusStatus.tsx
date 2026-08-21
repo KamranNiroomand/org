@@ -107,7 +107,15 @@ export function CorpusStatus() {
             <div className="text-muted">Last run</div>
             <div className="mt-0.5">
               {data.lastRun ? (
-                <Badge tone={data.lastRun.status === 'failed' ? 'negative' : 'neutral'}>
+                <Badge
+                  tone={
+                    data.lastRun.status === 'failed'
+                      ? 'negative'
+                      : data.lastRun.status === 'degraded'
+                        ? 'warning'
+                        : 'neutral'
+                  }
+                >
                   {data.lastRun.status}
                 </Badge>
               ) : (
@@ -116,12 +124,27 @@ export function CorpusStatus() {
             </div>
           </div>
           <div>
-            <div className="text-muted">Quotes / symbols last run</div>
+            {/*
+              `symbolsDone` is attempted, not captured — a run can say
+              "566/566" while over half of them wrote zero quotes. Leading
+              with the symbols that actually succeeded is what makes a
+              rate-limited night visible instead of reading as a clean one.
+            */}
+            <div className="text-muted">Symbols captured</div>
             <div className="tnum mt-0.5">
-              {data.lastRun ? `${data.lastRun.quotesWritten.toLocaleString()} / ${data.lastRun.symbolsDone}` : '—'}
+              {data.lastRun
+                ? `${(data.lastRun.symbolsDone - data.lastRun.symbolsFailed).toLocaleString()} / ${data.lastRun.symbolsDone}`
+                : '—'}
             </div>
           </div>
         </div>
+        {data.lastRun && data.lastRun.symbolsFailed > 0 && (
+          <div className="flex items-center gap-2 border-t border-border bg-warning/10 px-4 py-2 text-xs text-warning">
+            <AlertTriangle className="size-3.5 shrink-0" />
+            {data.lastRun.symbolsFailed} symbol{data.lastRun.symbolsFailed === 1 ? '' : 's'} lost to errors last run
+            — usually the vendor rate limit. See the log below.
+          </div>
+        )}
         {data.lastRun && data.lastRun.errors.length > 0 && (
           <div className="border-t border-border px-4 py-3 text-xs text-muted">
             <div className="mb-1 font-medium text-warning">{data.lastRun.errors.length} error(s) last run</div>

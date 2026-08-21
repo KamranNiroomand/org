@@ -27,13 +27,16 @@ export interface OptionsStatusDay {
 export interface CaptureRun {
   id: string;
   kind: 'nightly' | 'backfill';
-  status: 'running' | 'done' | 'failed';
+  status: 'running' | 'done' | 'degraded' | 'failed';
   startedAt: string;
   finishedAt: string | null;
+  /** Attempted, not necessarily written — see `symbolsFailed` for the gap. */
   symbolsDone: number;
   contractsSeen: number;
   quotesWritten: number;
   errors: string[];
+  /** Of `symbolsDone`, how many wrote zero quotes (usually rate-limited). */
+  symbolsFailed: number;
 }
 
 export interface CaptureJobResult {

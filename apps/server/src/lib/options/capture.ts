@@ -27,6 +27,16 @@ import type { ChainQuote, OptionsProvider } from './provider.js';
 
 const MAX_DTE = 90;
 
+/**
+ * The one error this module pushes that isn't about a specific symbol —
+ * kept as a named constant so callers can tell a sidecar outage (pricing
+ * only, not coverage) apart from a per-symbol fetch failure when deciding
+ * whether a run counts as 'degraded'. See the `status` write below.
+ */
+export const SIDECAR_UNAVAILABLE_ERROR =
+  'Quant sidecar unreachable — quotes captured without implied vol or greeks. ' +
+  'They are recomputable from the stored rows; the quotes themselves are not.';
+
 export interface CaptureOptions {
   maxDte?: number;
   thresholds?: LiquidityThresholds;
@@ -263,10 +273,7 @@ export async function captureChains(
   };
 
   if (!quantAvailable) {
-    summary.errors.push(
-      'Quant sidecar unreachable — quotes captured without implied vol or greeks. ' +
-        'They are recomputable from the stored rows; the quotes themselves are not.',
-    );
+    summary.errors.push(SIDECAR_UNAVAILABLE_ERROR);
   }
 
   for (const symbol of symbols) {
@@ -300,11 +307,16 @@ export async function captureChains(
       .run();
   }
 
+  // Per-symbol failures only — excludes the one sidecar-outage line, which
+  // affects pricing, not quote coverage, and shouldn't call a run 'degraded'
+  // on its own.
+  const symbolErrorCount = summary.errors.filter((e) => e !== SIDECAR_UNAVAILABLE_ERROR).length;
+
   summary.finishedAt = nowIso();
   marketDb
     .update(captureRuns)
     .set({
-      status: summary.errors.length > 0 && summary.quotesWritten === 0 ? 'failed' : 'done',
+      status: summary.quotesWritten === 0 ? 'failed' : symbolErrorCount > 0 ? 'degraded' : 'done',
       finishedAt: summary.finishedAt,
       errors: summary.errors,
     })

@@ -160,6 +160,8 @@ describe('chain capture', () => {
     expect(last.cursor).not.toBeNull();
     expect(last.symbolsDone).toBeGreaterThan(0);
     expect(last.finishedAt).not.toBeNull();
-    expect(last.status).toBe('done');
+    // BROKEN failed and NVDA succeeded — real quotes were written, but not
+    // for every symbol, which is exactly what 'degraded' is for.
+    expect(last.status).toBe('degraded');
   });
 });

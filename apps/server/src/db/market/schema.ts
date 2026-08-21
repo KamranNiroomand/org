@@ -324,7 +324,14 @@ export const captureRuns = sqliteTable(
   {
     id: text('id').primaryKey(),
     kind: text('kind', { enum: ['nightly', 'backfill'] }).notNull(),
-    status: text('status', { enum: ['running', 'done', 'failed'] })
+    /**
+     * 'degraded' is 'done' with real gaps — some symbols wrote quotes, some
+     * didn't (usually sustained rate-limiting). Kept distinct from 'done' so
+     * a night that silently lost most of the universe doesn't read the same
+     * as a clean run; kept distinct from 'failed' because it isn't one — the
+     * run completed and most of what it wrote is real.
+     */
+    status: text('status', { enum: ['running', 'done', 'degraded', 'failed'] })
       .notNull()
       .default('running'),
     startedAt: text('started_at').notNull(),

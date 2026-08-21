@@ -16,6 +16,7 @@ import {
   runTextSync,
 } from '../lib/scheduler.js';
 import { listUniverse, retierByLiquidity } from '../lib/options/universe.js';
+import { SIDECAR_UNAVAILABLE_ERROR } from '../lib/options/capture.js';
 import { repriceDay } from '../lib/options/reprice.js';
 import { pullMarketSnapshot } from '../lib/options/marketPull.js';
 import { nowIso, todayKey } from '../lib/util.js';
@@ -65,12 +66,23 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       .groupBy(trackedUnderlyings.tier)
       .all();
 
-    const lastRun = marketDb
+    const lastRunRow = marketDb
       .select()
       .from(captureRuns)
       .orderBy(desc(captureRuns.startedAt))
       .limit(1)
       .get();
+
+    /**
+     * `symbolsDone` counts symbols *attempted*, not symbols that actually
+     * wrote a quote — a run can say `symbolsDone: 566` while well over half
+     * of them silently 429'd. `symbolsFailed` is what tells the UI whether
+     * "done" really means done. See capture.ts's own status-write comment.
+     */
+    const lastRun = lastRunRow && {
+      ...lastRunRow,
+      symbolsFailed: lastRunRow.errors.filter((e) => e !== SIDECAR_UNAVAILABLE_ERROR).length,
+    };
 
     const text = marketDb
       .select({

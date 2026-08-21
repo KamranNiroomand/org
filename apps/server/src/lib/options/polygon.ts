@@ -41,6 +41,34 @@ const BASE = 'https://api.polygon.io';
 const MAX_CONCURRENCY = 2;
 const MAX_RETRIES = 4;
 
+/**
+ * Paces every outbound request to `config.market.polygonMaxRequestsPerMinute`,
+ * independent of how many callers are in flight.
+ *
+ * Concurrency limits alone don't protect against a *sustained* per-minute
+ * ceiling: `capture.ts` fetches one symbol at a time, `backfill.ts` caps at
+ * `MAX_CONCURRENCY`, yet the first real nightly capture still lost 321 of 566
+ * symbols to 429s — spread evenly across the whole ~48-minute run, not
+ * clustered at the end, which means the vendor's real limit was being
+ * exceeded from the first request onward regardless of concurrency. Retrying
+ * with backoff (below) reacts after the fact and, against a per-minute
+ * ceiling, often retries back into the same exhausted window. Spacing every
+ * request's *start* evenly ahead of time is what actually keeps the run
+ * under budget rather than hoping retries eventually find room.
+ *
+ * Global and module-level on purpose: every Polygon call in the process —
+ * capture, backfill, news, the capability probe — shares one vendor-side
+ * budget, so they have to share one pacer.
+ */
+let nextRequestAt = 0;
+async function paceRequest(): Promise<void> {
+  const intervalMs = 60_000 / config.market.polygonMaxRequestsPerMinute;
+  const now = Date.now();
+  const scheduledAt = Math.max(now, nextRequestAt);
+  nextRequestAt = scheduledAt + intervalMs;
+  if (scheduledAt > now) await sleep(scheduledAt - now);
+}
+
 interface PolygonEnvelope<T> {
   status?: string;
   results?: T[];
@@ -102,6 +130,7 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<PolygonEnvelo
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     let res: Response;
     try {
+      await paceRequest();
       res = await fetch(url, { signal });
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
