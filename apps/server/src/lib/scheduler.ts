@@ -346,16 +346,26 @@ export async function runTextSync(log: FastifyBaseLogger, reason: string): Promi
  * A separate `watchlistTextSyncing` guard, not the options one — the two
  * jobs read/write disjoint symbol sets and neither should block the other
  * from running just because it happened to overlap.
+ *
+ * Deliberately does NOT call `classifyUnclassifiedDocuments` itself.
+ * `runTextSync` already sweeps every unclassified document regardless of
+ * source, on a *tighter* cadence (`TEXT_SYNC_CRON`, 20 min, vs this job's
+ * 30) — and both jobs are only ever scheduled together, under the same
+ * `config.market.configured` gate. A second call here bought nothing but a
+ * real cost: whenever the two crons' windows land close together (which,
+ * at :00 past every trading hour, they do every day), both would select
+ * the same pending rows before either had written its classification back,
+ * paying for the same document's LLM classification twice.
  */
 let watchlistTextSyncing = false;
 
 export interface WatchlistTextSyncResult {
   startedAt: string;
   finishedAt: string;
+  symbolsSkipped: number;
   documentsWritten: number;
   mentionsWritten: number;
   filingsWritten: number;
-  classified: number;
   alertsCreated: number;
   errors: string[];
 }
@@ -365,10 +375,10 @@ export async function runWatchlistTextSync(log: FastifyBaseLogger, reason: strin
   const result: WatchlistTextSyncResult = {
     startedAt,
     finishedAt: startedAt,
+    symbolsSkipped: 0,
     documentsWritten: 0,
     mentionsWritten: 0,
     filingsWritten: 0,
-    classified: 0,
     alertsCreated: 0,
     errors: [],
   };
@@ -396,9 +406,23 @@ export async function runWatchlistTextSync(log: FastifyBaseLogger, reason: strin
     // converted to the vendor's format (`BRK.B`) right at the two calls
     // that actually leave the process. createNewsAlerts does its own
     // matching conversion when it reads what got stored under that format.
-    const symbols = db.select({ s: watchlist.symbol }).from(watchlist).all().map((w) => w.s);
+    const watched = db.select({ s: watchlist.symbol }).from(watchlist).all().map((w) => w.s);
+
+    // A watchlist symbol that's already in the options universe gets fresh
+    // news/EDGAR coverage from runTextSync's own, tighter-cadence sweep —
+    // fetching it again here would just spend a second, redundant slot of
+    // the shared Polygon rate budget on data that's already current. Only
+    // symbols the options side isn't already watching are this job's to do.
+    const inOptionsUniverse = new Set(listUniverse({ activeOnly: true }).map((u) => u.symbol));
+    const symbols = watched.filter((s) => !inOptionsUniverse.has(s));
+    result.symbolsSkipped = watched.length - symbols.length;
+
     if (symbols.length === 0) {
-      log.info('Watchlist text sync: nothing on the watchlist, skipping');
+      log.info(
+        watched.length === 0
+          ? 'Watchlist text sync: nothing on the watchlist, skipping'
+          : `Watchlist text sync: all ${watched.length} watched symbol(s) already covered by the options universe, skipping`,
+      );
       result.finishedAt = nowIso();
       return result;
     }
@@ -424,22 +448,12 @@ export async function runWatchlistTextSync(log: FastifyBaseLogger, reason: strin
       result.errors.push(`Watchlist EDGAR ingest: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // classifyUnclassifiedDocuments has no universe filter of its own — it
-    // processes whatever's unclassified regardless of source, so this and
-    // runTextSync's own call safely overlap rather than needing to
-    // coordinate: whichever runs first does the work, the other finds
-    // nothing pending.
     try {
-      const classified = await classifyUnclassifiedDocuments();
-      result.classified = classified.classified;
-      log.info(`Watchlist text classification: ${classified.classified}/${classified.attempted}`);
-      result.errors.push(...classified.errors);
-    } catch (err) {
-      result.errors.push(`Watchlist text classification: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    try {
-      const alerts = createNewsAlerts(symbols); // original format — see createNewsAlerts' own doc comment
+      // The full watched list, not the filtered symbols — a symbol skipped
+      // above because the options universe already covers it should still
+      // get its news alerts; runTextSync's classification sweep reaches its
+      // documents too, they just weren't fetched a second time here.
+      const alerts = createNewsAlerts(watched);
       result.alertsCreated = alerts.created;
       log.info(`Watchlist news alerts: ${alerts.created} from ${alerts.documentsSeen} classified document(s)`);
       result.errors.push(...alerts.errors);
@@ -846,7 +860,7 @@ export function startScheduler(log: FastifyBaseLogger): void {
       );
     }
   } else {
-    log.info('Option capture and text sync disabled — POLYGON_API_KEY is not set');
+    log.info('Option capture, text sync, and watchlist text sync disabled — POLYGON_API_KEY is not set');
   }
 
   if (!config.market.isRunner) {

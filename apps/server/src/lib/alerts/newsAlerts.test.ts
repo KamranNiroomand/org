@@ -113,6 +113,35 @@ describe('createNewsAlerts', () => {
     expect(rows[0]!.acknowledged).toBe(false);
   });
 
+  it('still updates when a second, distinct document produces a byte-identical headline', () => {
+    // EDGAR titles are often generic ("8-K (items 8.01) — MRNA") — two real,
+    // distinct filings can render the exact same headline text. The update
+    // check must key on documentId, not the headline string, or the second
+    // filing's own documentId never gets recorded.
+    const firstId = seedDocument({
+      id: 'doc-first',
+      underlying: 'MRNA',
+      title: '8-K (items 8.01) — MRNA',
+      publishedAt: '2026-08-21T09:00:00Z',
+    });
+    createNewsAlerts(['MRNA'], NOW);
+    db.update(alertEvents).set({ acknowledged: true }).where(eq(alertEvents.symbol, 'MRNA')).run();
+
+    seedDocument({
+      id: 'doc-second',
+      underlying: 'MRNA',
+      title: '8-K (items 8.01) — MRNA', // identical text, different filing
+      publishedAt: '2026-08-21T15:00:00Z',
+    });
+    const summary = createNewsAlerts(['MRNA'], NOW);
+    expect(summary.created).toBe(1); // must count as a real update, not a no-op
+
+    const row = db.select().from(alertEvents).where(eq(alertEvents.symbol, 'MRNA')).get()!;
+    expect(row.acknowledged).toBe(false); // reopened for the second, distinct filing
+    expect((row.detail as { documentId: string }).documentId).toBe('doc-second');
+    expect((row.detail as { documentId: string }).documentId).not.toBe(firstId);
+  });
+
   it('maps the vendor symbol format back to the watchlist symbol format', () => {
     // docMentions.underlying is stored in the vendor's dot format; the
     // caller passes symbols in this app's own hyphen format (matching

@@ -74,19 +74,19 @@ export function createNewsAlerts(symbols: readonly string[], now: string = nowIs
     .all();
 
   // Newest document per (symbol, day) wins — rows are already newest-first.
-  const bySymbolDay = new Map<string, { symbol: string; row: (typeof rows)[number] }>();
+  const bySymbolDay = new Map<string, { symbol: string; tradingDay: string; row: (typeof rows)[number] }>();
   for (const row of rows) {
     const symbol = vendorToOriginal.get(row.underlying);
     if (!symbol) continue; // shouldn't happen — the query itself is scoped to these symbols
-    const key = `${symbol}|${row.publishedAt.slice(0, 10)}`;
-    if (!bySymbolDay.has(key)) bySymbolDay.set(key, { symbol, row });
+    const tradingDay = row.publishedAt.slice(0, 10);
+    const key = `${symbol}|${tradingDay}`;
+    if (!bySymbolDay.has(key)) bySymbolDay.set(key, { symbol, tradingDay, row });
   }
 
   let created = 0;
   const errors: string[] = [];
 
-  for (const [key, { symbol, row }] of bySymbolDay) {
-    const tradingDay = key.slice(key.indexOf('|') + 1);
+  for (const { symbol, tradingDay, row } of bySymbolDay.values()) {
     try {
       const direction =
         row.sentiment === 'positive' ? 'bullish' : row.sentiment === 'negative' ? 'bearish' : 'neutral';
@@ -94,7 +94,7 @@ export function createNewsAlerts(symbols: readonly string[], now: string = nowIs
       const detail = { documentId: row.documentId, eventType: row.eventType, sentiment: row.sentiment };
 
       const existing = db
-        .select({ id: alertEvents.id, headline: alertEvents.headline })
+        .select({ id: alertEvents.id, detail: alertEvents.detail })
         .from(alertEvents)
         .where(
           and(
@@ -125,7 +125,13 @@ export function createNewsAlerts(symbols: readonly string[], now: string = nowIs
           })
           .run();
         created += 1;
-      } else if (existing.headline !== headline) {
+      } else if (existing.detail.documentId !== row.documentId) {
+        // Compared on documentId, not the headline text — EDGAR titles in
+        // particular are often generic ("8-K (items 8.01) — MRNA") and two
+        // genuinely distinct same-day filings can produce byte-identical
+        // headlines. documentId is the one thing guaranteed to actually
+        // distinguish "a different story landed" from "the same one got
+        // re-read this cycle".
         db.update(alertEvents)
           .set({ direction, headline, detail, acknowledged: false, triggeredAt: now })
           .where(eq(alertEvents.id, existing.id))

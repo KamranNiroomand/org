@@ -4,7 +4,11 @@ import { z } from 'zod';
 import { db } from '../db/index.js';
 import { alertEvents, instruments, watchlist } from '../db/schema.js';
 import { evaluatePriceAlerts } from '../lib/alerts/evaluate.js';
-import { runWatchlistTextSync } from '../lib/scheduler.js';
+import {
+  getLastWatchlistTextSyncResult,
+  getNextWatchlistTextSyncRun,
+  runWatchlistTextSync,
+} from '../lib/scheduler.js';
 import { nowIso } from '../lib/util.js';
 import { patchOf } from './_shared.js';
 
@@ -128,4 +132,10 @@ export async function watchlistRoutes(app: FastifyInstance): Promise<void> {
    * than a 4xx, matching runWatchlistTextSync's own no-op shape.
    */
   app.post('/api/watchlist/text-sync', async () => runWatchlistTextSync(app.log, 'manual'));
+
+  /** For a future "watchlist sync health" surface — matches the shape `/api/options/status` already exposes for `lastTextSync`/`nextTextSync`. */
+  app.get('/api/watchlist/text-sync/status', async () => ({
+    lastRun: getLastWatchlistTextSyncResult(),
+    nextRun: getNextWatchlistTextSyncRun(),
+  }));
 }
