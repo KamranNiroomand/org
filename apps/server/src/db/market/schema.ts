@@ -342,6 +342,14 @@ export const captureRuns = sqliteTable(
     contractsSeen: integer('contracts_seen').notNull().default(0),
     quotesWritten: integer('quotes_written').notNull().default(0),
     errors: text('errors', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    /**
+     * Of `symbolsDone`, how many wrote zero quotes — a real coverage gap,
+     * not just "had an error". Tracked as its own field rather than derived
+     * from `errors` at read time, because a symbol can log an error (e.g. a
+     * pricing-only failure) while its quotes still wrote fine; deriving
+     * "failed" from free-text error matching conflated the two.
+     */
+    symbolsFailed: integer('symbols_failed').notNull().default(0),
   },
   (t) => [index('capture_kind_started_idx').on(t.kind, t.startedAt)],
 );

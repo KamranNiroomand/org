@@ -143,7 +143,9 @@ export async function backfillBars(
   marketDb
     .update(captureRuns)
     .set({
-      status: progress.barsWritten > 0 ? 'done' : 'failed',
+      // Mirrors capture.ts's status write — a backfill that loses most of
+      // its symbols to rate-limiting must not read the same as a clean run.
+      status: progress.barsWritten === 0 ? 'failed' : progress.errors.length > 0 ? 'degraded' : 'done',
       finishedAt: nowIso(),
       errors: progress.errors,
     })

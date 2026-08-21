@@ -70,6 +70,17 @@ export interface CaptureSummary {
   pricedWritten: number;
   quantAvailable: boolean;
   errors: string[];
+  /**
+   * Symbols that wrote zero quotes — a fetch or persist failure, i.e. a real
+   * coverage gap. Deliberately not "any symbol with an error": a symbol
+   * whose quotes wrote fine but whose pricing call failed (a mid-run sidecar
+   * hiccup) still has a real, complete row for the night and must not count
+   * the same as one that silently lost its quotes to a 429. Tracked as a
+   * counter at the point of failure rather than derived later by pattern-
+   * matching the free-text `errors` array, which is what let a pricing
+   * failure and a coverage failure look identical in the first place.
+   */
+  symbolsFailed: number;
 }
 
 /** Writes contracts and quotes for one chain. Pricing is applied separately. */
@@ -270,6 +281,7 @@ export async function captureChains(
     pricedWritten: 0,
     quantAvailable,
     errors: [],
+    symbolsFailed: 0,
   };
 
   if (!quantAvailable) {
@@ -277,18 +289,33 @@ export async function captureChains(
   }
 
   for (const symbol of symbols) {
+    // Fetch and persist are the coverage-critical half: their failure means
+    // this symbol has zero quotes for the night, which is what `symbolsFailed`
+    // exists to count. Pricing is a separate try — a chain that persisted
+    // fine but failed to price (a mid-run sidecar hiccup) still has real,
+    // complete quotes; it belongs in `errors` for visibility, but counting
+    // it as a failed symbol would mark nights 'degraded' for a pricing gap
+    // that `/api/options/reprice` can recover without ever touching the
+    // vendor again, and would make the vendor-rate-limit warning in the UI
+    // lie about what actually happened.
+    let chain: readonly ChainQuote[] = [];
     try {
-      const chain = await provider.fetchChain({ underlying: symbol, maxDte });
+      chain = await provider.fetchChain({ underlying: symbol, maxDte });
       const written = persistChain(chain, thresholds);
       summary.contractsSeen += written.contracts;
       summary.quotesWritten += written.quotes;
       summary.liquidWritten += written.liquid;
-
-      if (quantAvailable) {
-        summary.pricedWritten += await enrichChain(chain, thresholds, dividendYield);
-      }
     } catch (err) {
       summary.errors.push(`${symbol}: ${err instanceof Error ? err.message : String(err)}`);
+      summary.symbolsFailed += 1;
+    }
+
+    if (chain.length > 0 && quantAvailable) {
+      try {
+        summary.pricedWritten += await enrichChain(chain, thresholds, dividendYield);
+      } catch (err) {
+        summary.errors.push(`${symbol}: pricing failed — ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     summary.symbolsDone += 1;
@@ -302,23 +329,20 @@ export async function captureChains(
         contractsSeen: summary.contractsSeen,
         quotesWritten: summary.quotesWritten,
         errors: summary.errors,
+        symbolsFailed: summary.symbolsFailed,
       })
       .where(sql`${captureRuns.id} = ${runId}`)
       .run();
   }
 
-  // Per-symbol failures only — excludes the one sidecar-outage line, which
-  // affects pricing, not quote coverage, and shouldn't call a run 'degraded'
-  // on its own.
-  const symbolErrorCount = summary.errors.filter((e) => e !== SIDECAR_UNAVAILABLE_ERROR).length;
-
   summary.finishedAt = nowIso();
   marketDb
     .update(captureRuns)
     .set({
-      status: summary.quotesWritten === 0 ? 'failed' : symbolErrorCount > 0 ? 'degraded' : 'done',
+      status: summary.quotesWritten === 0 ? 'failed' : summary.symbolsFailed > 0 ? 'degraded' : 'done',
       finishedAt: summary.finishedAt,
       errors: summary.errors,
+      symbolsFailed: summary.symbolsFailed,
     })
     .where(sql`${captureRuns.id} = ${runId}`)
     .run();

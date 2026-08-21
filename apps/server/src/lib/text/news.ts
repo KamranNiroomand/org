@@ -2,7 +2,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
 import { documents, docMentions } from '../../db/market/schema.js';
-import { mapLimit, MAX_CONCURRENCY } from '../options/polygon.js';
+import { get, mapLimit, MAX_CONCURRENCY } from '../options/polygon.js';
 import { nowIso } from '../util.js';
 
 /**
@@ -21,14 +21,6 @@ import { nowIso } from '../util.js';
  * re-deriving a weaker version of it locally.
  */
 
-const BASE = 'https://api.polygon.io';
-
-function apiKey(): string {
-  const key = config.market.polygonKey;
-  if (!key) throw new Error('POLYGON_API_KEY is not set — news ingestion is disabled without it.');
-  return key;
-}
-
 export interface PolygonNewsInsight {
   ticker?: string;
   sentiment?: 'positive' | 'negative' | 'neutral';
@@ -45,30 +37,21 @@ export interface PolygonNewsArticle {
   insights?: PolygonNewsInsight[];
 }
 
-interface PolygonNewsEnvelope {
-  results?: PolygonNewsArticle[];
-}
-
-/** One GET, no pagination walk — the `published_utc.gt` filter already
+/**
+ * One GET, no pagination walk — the `published_utc.gt` filter already
  * bounds each call to what is new since the last ingest, so a single page
  * covers it except on a symbol's very first run, where the limit caps how
  * much history one call pulls rather than pulling all of it.
+ *
+ * Goes through polygon.ts's `get()` rather than a bare `fetch` — this used
+ * to hit the vendor directly, which meant news polling was neither paced
+ * nor retried against the same per-minute budget everything else in the
+ * capture pipeline now respects.
  */
 async function fetchNews(ticker: string, publishedAfter: string | null, limit = 50): Promise<PolygonNewsArticle[]> {
-  const url = new URL(`${BASE}/v2/reference/news`);
-  url.searchParams.set('ticker', ticker);
-  url.searchParams.set('limit', String(limit));
-  url.searchParams.set('order', 'desc');
-  url.searchParams.set('sort', 'published_utc');
-  if (publishedAfter) url.searchParams.set('published_utc.gt', publishedAfter);
-  url.searchParams.set('apiKey', apiKey());
-
-  const res = await fetch(url);
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Polygon news ${res.status} ${res.statusText}${body ? ` — ${body.slice(0, 300)}` : ''}`);
-  }
-  const env = (await res.json()) as PolygonNewsEnvelope;
+  const params = new URLSearchParams({ ticker, limit: String(limit), order: 'desc', sort: 'published_utc' });
+  if (publishedAfter) params.set('published_utc.gt', publishedAfter);
+  const env = await get<PolygonNewsArticle>(`/v2/reference/news?${params}`);
   return env.results ?? [];
 }
 
