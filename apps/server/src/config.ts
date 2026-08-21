@@ -23,6 +23,10 @@ const schema = z.object({
   PLAID_SECRET: z.string().optional(),
   PLAID_COUNTRY_CODES: z.string().default('CA,US'),
   SYNC_CRON: z.string().default('0 6 * * *'),
+  // The heuristic radar (score.ts/run.ts) — org.db only, no MARKET_ROLE
+  // gate, so it runs on a reader just as well as a runner. Right after the
+  // market sweep so `instruments` is fresh for that trading day.
+  RADAR_CRON: z.string().default('15 6 * * *'),
 
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().default('claude-opus-5'),
@@ -233,6 +237,7 @@ export const config = {
   },
 
   syncCron: env.SYNC_CRON,
+  radarCron: env.RADAR_CRON,
   defaultCalendar: env.DEFAULT_CALENDAR,
   baseCurrency: env.BASE_CURRENCY,
 } as const;

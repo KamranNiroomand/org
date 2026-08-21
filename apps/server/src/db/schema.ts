@@ -490,6 +490,61 @@ export const alertEvents = sqliteTable(
   ],
 );
 
+/**
+ * One row per nightly radar scoring run — `capture_runs`' bookkeeping
+ * pattern from the options side, reused here for the same reason: a
+ * numeric scan of the full market is cheap enough to run every night, but
+ * still worth knowing when it last actually completed.
+ */
+export const radarRuns = sqliteTable('radar_runs', {
+  id: id(),
+  startedAt: text('started_at').notNull(),
+  finishedAt: text('finished_at'),
+  status: text('status', { enum: ['running', 'done', 'failed'] })
+    .notNull()
+    .default('running'),
+  tradingDay: text('trading_day').notNull(),
+  universeScored: integer('universe_scored').notNull().default(0),
+  shortlisted: integer('shortlisted').notNull().default(0),
+  errors: text('errors', { mode: 'json' }).$type<string[]>().notNull().default([]),
+});
+
+/**
+ * The nightly shortlist only, not a row per symbol per night for the whole
+ * ~7,000-symbol universe — persisting every score every night would grow
+ * this table by the size of `instruments` daily for no reader anyone has;
+ * only the names that actually cleared the shortlist cut are kept, so this
+ * stays small and every row here is something a person might actually look
+ * at. See `RADAR_DISCLAIMER` in `lib/radar/score.ts` for the "unvalidated
+ * heuristic" framing every API response returning these rows must carry.
+ */
+export const radarScores = sqliteTable(
+  'radar_scores',
+  {
+    id: id(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => radarRuns.id, { onDelete: 'cascade' }),
+    tradingDay: text('trading_day').notNull(),
+    symbol: text('symbol').notNull(),
+    rank: integer('rank').notNull(),
+    score: real('score').notNull(),
+    momentumZ: real('momentum_z'),
+    trendPct: real('trend_pct'),
+    newHigh: integer('new_high', { mode: 'boolean' }).notNull().default(false),
+    volumeRatio: real('volume_ratio'),
+    volumeZ: real('volume_z'),
+    sentimentZ: real('sentiment_z'),
+    sentimentDocCount: integer('sentiment_doc_count').notNull().default(0),
+    inputsUsed: text('inputs_used', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    createdAt: now(),
+  },
+  (t) => [
+    uniqueIndex('radar_scores_day_symbol_uq').on(t.tradingDay, t.symbol),
+    index('radar_scores_day_rank_idx').on(t.tradingDay, t.rank),
+  ],
+);
+
 export const fxRates = sqliteTable(
   'fx_rates',
   {
