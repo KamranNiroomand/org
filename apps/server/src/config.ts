@@ -40,6 +40,12 @@ const schema = z.object({
   // Separate from market.db on purpose — see config.market.paperDbPath.
   PAPER_DB_PATH: z.string().optional(),
   POLYGON_API_KEY: z.string().optional(),
+  // See polygon.ts's own doc comment: the vendor's per-minute ceiling is
+  // undisclosed, and the first real capture runs sustained well past it —
+  // 321 of 566 symbols lost to 429s, every night, for three nights running.
+  // Conservative default; lower it if 429s persist, raise it once a run
+  // shows clean headroom.
+  POLYGON_MAX_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().default(60),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
   OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
   // News/EDGAR ingestion + classification, independent of the once-nightly
@@ -176,6 +182,7 @@ export const config = {
     runnerDataDir: env.RUNNER_DATA_DIR ?? null,
     polygonKey: env.POLYGON_API_KEY ?? null,
     configured: Boolean(env.POLYGON_API_KEY),
+    polygonMaxRequestsPerMinute: env.POLYGON_MAX_REQUESTS_PER_MINUTE,
     /**
      * The Python sidecar. Prices contracts, builds features, trains and
      * backtests; reads market.db directly and returns JSON we persist.

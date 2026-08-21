@@ -29,17 +29,49 @@ import {
 const BASE = 'https://api.polygon.io';
 
 /**
- * Polite ceiling on in-flight requests.
- *
- * "Unlimited API Calls" on this plan means no monthly cap, not no rate limit
- * — confirmed the hard way when a backfill at concurrency 6 drew sustained
- * 429s within minutes. Currently unused as a default (`capture.ts` fetches
- * one symbol at a time on purpose, and `backfill.ts` sets its own limit)
- * but kept here as the one place a future caller should look before
- * assuming more concurrency is free.
+ * Ceiling on in-flight requests per caller — `backfill.ts` uses this via
+ * `mapLimit`. No longer the primary defense against sustained rate-limiting:
+ * see `paceRequest` below. Every request a `mapLimit` worker makes still
+ * queues for the same shared pacer slot, so raising this only changes how
+ * many requests are in flight waiting for their turn, not how fast the
+ * vendor sees them — throughput is governed by
+ * `POLYGON_MAX_REQUESTS_PER_MINUTE`, not by concurrency.
  */
 const MAX_CONCURRENCY = 2;
 const MAX_RETRIES = 4;
+
+/**
+ * Paces every outbound request to `config.market.polygonMaxRequestsPerMinute`,
+ * independent of how many callers are in flight.
+ *
+ * Concurrency limits alone don't protect against a *sustained* per-minute
+ * ceiling: `capture.ts` fetches one symbol at a time, `backfill.ts` caps at
+ * `MAX_CONCURRENCY`, yet the first real nightly capture still lost 321 of 566
+ * symbols to 429s — spread evenly across the whole ~48-minute run, not
+ * clustered at the end, which means the vendor's real limit was being
+ * exceeded from the first request onward regardless of concurrency. Retrying
+ * with backoff (below) reacts after the fact and, against a per-minute
+ * ceiling, often retries back into the same exhausted window. Spacing every
+ * request's *start* evenly ahead of time is what actually keeps the run
+ * under budget rather than hoping retries eventually find room.
+ *
+ * Global and module-level on purpose: every Polygon call in the process —
+ * capture, backfill, news, the capability probe — shares one vendor-side
+ * budget, so they have to share one pacer. A side effect worth knowing: two
+ * "concurrent" requests (e.g. `fetchLiveChain`'s `Promise.all` of the chain
+ * snapshot and the underlying's last close) now queue for sequential slots
+ * on this one clock rather than actually overlapping on the wire — correct
+ * for staying under budget, but it means that `Promise.all` no longer buys
+ * real parallelism, only readability.
+ */
+let nextRequestAt = 0;
+const requestIntervalMs = 60_000 / config.market.polygonMaxRequestsPerMinute;
+async function paceRequest(): Promise<void> {
+  const now = Date.now();
+  const scheduledAt = Math.max(now, nextRequestAt);
+  nextRequestAt = scheduledAt + requestIntervalMs;
+  if (scheduledAt > now) await sleep(scheduledAt - now);
+}
 
 interface PolygonEnvelope<T> {
   status?: string;
@@ -102,6 +134,7 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<PolygonEnvelo
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     let res: Response;
     try {
+      await paceRequest();
       res = await fetch(url, { signal });
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
@@ -383,5 +416,12 @@ export class PolygonProvider implements OptionsProvider {
   }
 }
 
-/** Bounded-concurrency helper, exported for the backfill. */
-export { mapLimit, MAX_CONCURRENCY };
+/**
+ * `get` is exported so every direct Polygon caller — not just this file's
+ * own chain/bar fetches — goes through the shared pacer and retry/backoff.
+ * `news.ts` used to call `fetch` on its own, which meant news polling had
+ * neither: it could 429 unpaced against the same budget this module paces
+ * everything else against. `mapLimit`/`MAX_CONCURRENCY` are exported for
+ * the same reason `backfill.ts` needs them.
+ */
+export { get, mapLimit, MAX_CONCURRENCY };

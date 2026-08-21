@@ -1,0 +1,1 @@
+ALTER TABLE `capture_runs` ADD `symbols_failed` integer DEFAULT 0 NOT NULL;

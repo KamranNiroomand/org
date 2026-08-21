@@ -27,6 +27,16 @@ import type { ChainQuote, OptionsProvider } from './provider.js';
 
 const MAX_DTE = 90;
 
+/**
+ * The one error this module pushes that isn't about a specific symbol —
+ * kept as a named constant so callers can tell a sidecar outage (pricing
+ * only, not coverage) apart from a per-symbol fetch failure when deciding
+ * whether a run counts as 'degraded'. See the `status` write below.
+ */
+export const SIDECAR_UNAVAILABLE_ERROR =
+  'Quant sidecar unreachable — quotes captured without implied vol or greeks. ' +
+  'They are recomputable from the stored rows; the quotes themselves are not.';
+
 export interface CaptureOptions {
   maxDte?: number;
   thresholds?: LiquidityThresholds;
@@ -60,6 +70,17 @@ export interface CaptureSummary {
   pricedWritten: number;
   quantAvailable: boolean;
   errors: string[];
+  /**
+   * Symbols that wrote zero quotes — a fetch or persist failure, i.e. a real
+   * coverage gap. Deliberately not "any symbol with an error": a symbol
+   * whose quotes wrote fine but whose pricing call failed (a mid-run sidecar
+   * hiccup) still has a real, complete row for the night and must not count
+   * the same as one that silently lost its quotes to a 429. Tracked as a
+   * counter at the point of failure rather than derived later by pattern-
+   * matching the free-text `errors` array, which is what let a pricing
+   * failure and a coverage failure look identical in the first place.
+   */
+  symbolsFailed: number;
 }
 
 /** Writes contracts and quotes for one chain. Pricing is applied separately. */
@@ -260,28 +281,41 @@ export async function captureChains(
     pricedWritten: 0,
     quantAvailable,
     errors: [],
+    symbolsFailed: 0,
   };
 
   if (!quantAvailable) {
-    summary.errors.push(
-      'Quant sidecar unreachable — quotes captured without implied vol or greeks. ' +
-        'They are recomputable from the stored rows; the quotes themselves are not.',
-    );
+    summary.errors.push(SIDECAR_UNAVAILABLE_ERROR);
   }
 
   for (const symbol of symbols) {
+    // Fetch and persist are the coverage-critical half: their failure means
+    // this symbol has zero quotes for the night, which is what `symbolsFailed`
+    // exists to count. Pricing is a separate try — a chain that persisted
+    // fine but failed to price (a mid-run sidecar hiccup) still has real,
+    // complete quotes; it belongs in `errors` for visibility, but counting
+    // it as a failed symbol would mark nights 'degraded' for a pricing gap
+    // that `/api/options/reprice` can recover without ever touching the
+    // vendor again, and would make the vendor-rate-limit warning in the UI
+    // lie about what actually happened.
+    let chain: readonly ChainQuote[] = [];
     try {
-      const chain = await provider.fetchChain({ underlying: symbol, maxDte });
+      chain = await provider.fetchChain({ underlying: symbol, maxDte });
       const written = persistChain(chain, thresholds);
       summary.contractsSeen += written.contracts;
       summary.quotesWritten += written.quotes;
       summary.liquidWritten += written.liquid;
-
-      if (quantAvailable) {
-        summary.pricedWritten += await enrichChain(chain, thresholds, dividendYield);
-      }
     } catch (err) {
       summary.errors.push(`${symbol}: ${err instanceof Error ? err.message : String(err)}`);
+      summary.symbolsFailed += 1;
+    }
+
+    if (chain.length > 0 && quantAvailable) {
+      try {
+        summary.pricedWritten += await enrichChain(chain, thresholds, dividendYield);
+      } catch (err) {
+        summary.errors.push(`${symbol}: pricing failed — ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     summary.symbolsDone += 1;
@@ -295,6 +329,7 @@ export async function captureChains(
         contractsSeen: summary.contractsSeen,
         quotesWritten: summary.quotesWritten,
         errors: summary.errors,
+        symbolsFailed: summary.symbolsFailed,
       })
       .where(sql`${captureRuns.id} = ${runId}`)
       .run();
@@ -304,9 +339,10 @@ export async function captureChains(
   marketDb
     .update(captureRuns)
     .set({
-      status: summary.errors.length > 0 && summary.quotesWritten === 0 ? 'failed' : 'done',
+      status: summary.quotesWritten === 0 ? 'failed' : summary.symbolsFailed > 0 ? 'degraded' : 'done',
       finishedAt: summary.finishedAt,
       errors: summary.errors,
+      symbolsFailed: summary.symbolsFailed,
     })
     .where(sql`${captureRuns.id} = ${runId}`)
     .run();

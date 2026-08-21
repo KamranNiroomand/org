@@ -65,6 +65,13 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       .groupBy(trackedUnderlyings.tier)
       .all();
 
+    /**
+     * `symbolsDone` counts symbols *attempted*, not symbols that actually
+     * wrote a quote — a run can say `symbolsDone: 566` while well over half
+     * of them silently 429'd. `symbolsFailed` (a real column — see
+     * capture.ts's own status-write comment) is what tells the UI whether
+     * "done" really means done.
+     */
     const lastRun = marketDb
       .select()
       .from(captureRuns)
