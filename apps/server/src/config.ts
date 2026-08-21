@@ -55,6 +55,13 @@ const schema = z.object({
   // hours only, matching the actual news-generating window — running it
   // through the night would just spend the same request budget on silence.
   TEXT_SYNC_CRON: z.string().default('*/20 9-16 * * 1-5'),
+  // Same idea as TEXT_SYNC_CRON, for the watchlist instead of the options
+  // universe — a slower cadence on purpose. The watchlist is a handful of
+  // symbols, not ~566, so there's no rate-limit budget to compete for; the
+  // slower interval just reflects that a watchlist name breaking news 30
+  // minutes late is a non-issue the options universe's own capture window
+  // doesn't have the same slack for.
+  WATCHLIST_TEXT_SYNC_CRON: z.string().default('*/30 9-16 * * 1-5'),
   // Weekly, Sunday morning — capture only runs weekdays (see
   // OPTIONS_CAPTURE_CRON's 1-5), so by Sunday the corpus already has
   // Friday's close as its latest day; no reason to wait further into the
@@ -210,6 +217,8 @@ export const config = {
      * once-nightly capture job it used to live inside.
      */
     textSyncCron: env.TEXT_SYNC_CRON,
+    /** Same idea, for the watchlist — see WATCHLIST_TEXT_SYNC_CRON's own comment. */
+    watchlistTextSyncCron: env.WATCHLIST_TEXT_SYNC_CRON,
     /**
      * Weekly retrain — runs `train.py` on an expanding window and registers
      * the result as a new challenger. Never promotes anything automatically;

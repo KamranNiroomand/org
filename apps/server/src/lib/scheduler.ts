@@ -7,7 +7,7 @@ import { asc } from 'drizzle-orm';
 import { config } from '../config.js';
 import { nowIso } from './util.js';
 import { db } from '../db/index.js';
-import { holdings } from '../db/schema.js';
+import { holdings, watchlist } from '../db/schema.js';
 import { syncAllFeeds } from './calendarFeeds.js';
 import { sweepMarket } from './market.js';
 import { refreshUniverse } from './universe.js';
@@ -27,6 +27,7 @@ import { classifyUnclassifiedDocuments } from './text/classify.js';
 import { computePositionHealth, latestCapturedTradingDay } from './options/positionHealth.js';
 import { pullMarketSnapshot } from './options/marketPull.js';
 import { evaluatePriceAlerts } from './alerts/evaluate.js';
+import { createNewsAlerts } from './alerts/newsAlerts.js';
 
 /**
  * The nightly job.
@@ -332,6 +333,141 @@ export async function runTextSync(log: FastifyBaseLogger, reason: string): Promi
   return result;
 }
 
+/**
+ * News/EDGAR ingestion for the watchlist — the same pipeline as
+ * `runTextSync`, pointed at `watchlist` instead of the options universe.
+ *
+ * Runner-only and Polygon-gated for the identical reason `runTextSync` is:
+ * `documents`/`doc_mentions` live in `market.db`, which only the runner may
+ * write. On a reader this is a documented no-op — watchlist news still
+ * arrives there on the next `market:pull`, same as everything else in that
+ * database.
+ *
+ * A separate `watchlistTextSyncing` guard, not the options one — the two
+ * jobs read/write disjoint symbol sets and neither should block the other
+ * from running just because it happened to overlap.
+ *
+ * Deliberately does NOT call `classifyUnclassifiedDocuments` itself.
+ * `runTextSync` already sweeps every unclassified document regardless of
+ * source, on a *tighter* cadence (`TEXT_SYNC_CRON`, 20 min, vs this job's
+ * 30) — and both jobs are only ever scheduled together, under the same
+ * `config.market.configured` gate. A second call here bought nothing but a
+ * real cost: whenever the two crons' windows land close together (which,
+ * at :00 past every trading hour, they do every day), both would select
+ * the same pending rows before either had written its classification back,
+ * paying for the same document's LLM classification twice.
+ */
+let watchlistTextSyncing = false;
+
+export interface WatchlistTextSyncResult {
+  startedAt: string;
+  finishedAt: string;
+  symbolsSkipped: number;
+  documentsWritten: number;
+  mentionsWritten: number;
+  filingsWritten: number;
+  alertsCreated: number;
+  errors: string[];
+}
+
+export async function runWatchlistTextSync(log: FastifyBaseLogger, reason: string): Promise<WatchlistTextSyncResult> {
+  const startedAt = nowIso();
+  const result: WatchlistTextSyncResult = {
+    startedAt,
+    finishedAt: startedAt,
+    symbolsSkipped: 0,
+    documentsWritten: 0,
+    mentionsWritten: 0,
+    filingsWritten: 0,
+    alertsCreated: 0,
+    errors: [],
+  };
+
+  if (!isRunner()) {
+    result.errors.push('This machine is a reader; text ingestion writes to market.db, which only the runner may write.');
+    result.finishedAt = nowIso();
+    return result;
+  }
+  if (!config.market.configured) {
+    result.errors.push('POLYGON_API_KEY is not set — news ingestion is disabled without it.');
+    result.finishedAt = nowIso();
+    return result;
+  }
+  if (watchlistTextSyncing) {
+    result.errors.push('A watchlist text sync was already in progress; skipped this run.');
+    result.finishedAt = nowIso();
+    return result;
+  }
+  watchlistTextSyncing = true;
+  log.info(`Watchlist text sync starting (${reason})`);
+
+  try {
+    // Kept in this app's own format (`BRK-B`) through ingestion — only
+    // converted to the vendor's format (`BRK.B`) right at the two calls
+    // that actually leave the process. createNewsAlerts does its own
+    // matching conversion when it reads what got stored under that format.
+    const watched = db.select({ s: watchlist.symbol }).from(watchlist).all().map((w) => w.s);
+
+    // A watchlist symbol that's already in the options universe gets fresh
+    // news/EDGAR coverage from runTextSync's own, tighter-cadence sweep —
+    // fetching it again here would just spend a second, redundant slot of
+    // the shared Polygon rate budget on data that's already current. Only
+    // symbols the options side isn't already watching are this job's to do.
+    const inOptionsUniverse = new Set(listUniverse({ activeOnly: true }).map((u) => u.symbol));
+    const symbols = watched.filter((s) => !inOptionsUniverse.has(s));
+    result.symbolsSkipped = watched.length - symbols.length;
+
+    if (symbols.length === 0) {
+      log.info(
+        watched.length === 0
+          ? 'Watchlist text sync: nothing on the watchlist, skipping'
+          : `Watchlist text sync: all ${watched.length} watched symbol(s) already covered by the options universe, skipping`,
+      );
+      result.finishedAt = nowIso();
+      return result;
+    }
+    const vendorSymbols = symbols.map(toVendorSymbol);
+
+    try {
+      const news = await ingestNewsForUniverse(vendorSymbols);
+      result.documentsWritten += news.documentsWritten;
+      result.mentionsWritten += news.mentionsWritten;
+      log.info(`Watchlist news: ${news.documentsWritten} documents, ${news.mentionsWritten} mentions`);
+      result.errors.push(...news.errors);
+    } catch (err) {
+      result.errors.push(`Watchlist news ingest: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
+      const edgar = await ingestEdgarForUniverse(vendorSymbols);
+      result.documentsWritten += edgar.documentsWritten;
+      result.filingsWritten += edgar.documentsWritten;
+      log.info(`Watchlist EDGAR: ${edgar.documentsWritten} filings, ${edgar.symbolsUnresolved.length} unresolved tickers`);
+      result.errors.push(...edgar.errors);
+    } catch (err) {
+      result.errors.push(`Watchlist EDGAR ingest: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
+      // The full watched list, not the filtered symbols — a symbol skipped
+      // above because the options universe already covers it should still
+      // get its news alerts; runTextSync's classification sweep reaches its
+      // documents too, they just weren't fetched a second time here.
+      const alerts = createNewsAlerts(watched);
+      result.alertsCreated = alerts.created;
+      log.info(`Watchlist news alerts: ${alerts.created} from ${alerts.documentsSeen} classified document(s)`);
+      result.errors.push(...alerts.errors);
+    } catch (err) {
+      result.errors.push(`Watchlist news alerts: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } finally {
+    watchlistTextSyncing = false;
+  }
+
+  result.finishedAt = nowIso();
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Option chain capture
 // ---------------------------------------------------------------------------
@@ -594,15 +730,18 @@ let task: ReturnType<typeof cron.schedule> | null = null;
 let captureTask: ReturnType<typeof cron.schedule> | null = null;
 let retrainTask: ReturnType<typeof cron.schedule> | null = null;
 let textSyncTask: ReturnType<typeof cron.schedule> | null = null;
+let watchlistTextSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
 let lastRetrainResult: RetrainJobResult | null = null;
 let lastTextSyncResult: TextSyncResult | null = null;
+let lastWatchlistTextSyncResult: WatchlistTextSyncResult | null = null;
 
 export const getLastNightlyResult = (): NightlyResult | null => lastResult;
 export const getLastCaptureResult = (): CaptureJobResult | null => lastCaptureResult;
 export const getLastRetrainResult = (): RetrainJobResult | null => lastRetrainResult;
 export const getLastTextSyncResult = (): TextSyncResult | null => lastTextSyncResult;
+export const getLastWatchlistTextSyncResult = (): WatchlistTextSyncResult | null => lastWatchlistTextSyncResult;
 
 /** Next scheduled chain capture, for the UI to show. */
 export function getNextCaptureRun(): string | null {
@@ -619,6 +758,12 @@ export function getNextTextSyncRun(): string | null {
 /** Next scheduled retrain, for the UI to show. */
 export function getNextRetrainRun(): string | null {
   const next = retrainTask?.getNextRun();
+  return next ? new Date(next).toISOString() : null;
+}
+
+/** Next scheduled watchlist text sync, for the UI to show. */
+export function getNextWatchlistTextSyncRun(): string | null {
+  const next = watchlistTextSyncTask?.getNextRun();
   return next ? new Date(next).toISOString() : null;
 }
 
@@ -694,8 +839,28 @@ export function startScheduler(log: FastifyBaseLogger): void {
           `${config.market.captureTimezone}), next run ${getNextTextSyncRun() ?? 'unknown'}`,
       );
     }
+
+    if (!cron.validate(config.market.watchlistTextSyncCron)) {
+      log.error(
+        `WATCHLIST_TEXT_SYNC_CRON is not valid: "${config.market.watchlistTextSyncCron}" — watchlist text sync disabled`,
+      );
+    } else {
+      watchlistTextSyncTask = cron.schedule(
+        config.market.watchlistTextSyncCron,
+        () => {
+          void runWatchlistTextSync(log, 'scheduled').then((r) => {
+            lastWatchlistTextSyncResult = r;
+          });
+        },
+        { timezone: config.market.captureTimezone },
+      );
+      log.info(
+        `Watchlist text sync scheduled (${config.market.watchlistTextSyncCron} ` +
+          `${config.market.captureTimezone}), next run ${getNextWatchlistTextSyncRun() ?? 'unknown'}`,
+      );
+    }
   } else {
-    log.info('Option capture and text sync disabled — POLYGON_API_KEY is not set');
+    log.info('Option capture, text sync, and watchlist text sync disabled — POLYGON_API_KEY is not set');
   }
 
   if (!config.market.isRunner) {
@@ -735,4 +900,6 @@ export function stopScheduler(): void {
   retrainTask = null;
   textSyncTask?.stop();
   textSyncTask = null;
+  watchlistTextSyncTask?.stop();
+  watchlistTextSyncTask = null;
 }
