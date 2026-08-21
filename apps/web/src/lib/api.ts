@@ -109,6 +109,30 @@ export interface CashflowPoint {
   expense: number;
 }
 
+export interface WatchlistRow {
+  symbol: string;
+  name: string | null;
+  note: string | null;
+  createdAt: string;
+  price: number | null;
+  currency: string | null;
+  dayChangePercent: number | null;
+}
+
+export interface SignalEvent {
+  id: string;
+  symbol: string;
+  ruleKey: 'day_change_up' | 'day_change_down' | 'new_52w_high' | 'new_52w_low' | 'volume_spike' | 'news_event';
+  tradingDay: string;
+  context: 'holding' | 'watchlist' | 'unwatched';
+  direction: 'bullish' | 'bearish' | 'neutral';
+  headline: string;
+  detail: Record<string, unknown>;
+  acknowledged: boolean;
+  triggeredAt: string;
+  createdAt: string;
+}
+
 export interface PortfolioResponse {
   holdings: Array<{
     id: string;

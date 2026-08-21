@@ -5,6 +5,7 @@ import { formatMoney, money, parseMoney } from '@org/shared';
 import { AllocationBars, StatTile } from '../components/charts';
 import { MarketMap } from '../components/MarketMap';
 import { OptionsTab } from '../components/options/OptionsTab';
+import { WatchlistTab } from '../components/watchlist/WatchlistTab';
 import { Page, PageHeader } from '../components/PageHeader';
 import { Badge, Button, Card, CardHeader, Empty, Input, Skeleton, cn } from '../components/ui';
 import { api, type PortfolioResponse } from '../lib/api';
@@ -118,12 +119,7 @@ export function InvestmentsPage() {
 
         {tab === 'options' && <OptionsTab />}
 
-        {tab === 'watchlist' && (
-          <Placeholder
-            title="Watchlist"
-            hint="Reserved for symbols you want to follow without holding. Not built yet."
-          />
-        )}
+        {tab === 'watchlist' && <WatchlistTab />}
 
         {tab === 'screener' && (
           <Placeholder
