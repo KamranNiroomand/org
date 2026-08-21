@@ -11,6 +11,7 @@ import { investmentRoutes } from './investments.js';
 import { optionsRoutes } from './options.js';
 import { paperRoutes } from './paper.js';
 import { projectRoutes } from './projects.js';
+import { signalsRoutes } from './signals.js';
 import { stickyRoutes } from './stickies.js';
 import { taskRoutes } from './tasks.js';
 import { watchlistRoutes } from './watchlist.js';
@@ -40,6 +41,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(financeRoutes);
   await app.register(investmentRoutes);
   await app.register(watchlistRoutes);
+  await app.register(signalsRoutes);
   await app.register(optionsRoutes);
   await app.register(paperRoutes);
   await app.register(ideaRoutes);

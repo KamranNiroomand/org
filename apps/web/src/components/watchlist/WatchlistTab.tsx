@@ -2,21 +2,23 @@ import { useState } from 'react';
 import { cn } from '../ui';
 import { WatchList } from './WatchList';
 import { AlertFeed } from './AlertFeed';
+import { Radar } from './Radar';
 
 /**
  * The Watchlist tab.
  *
- * Two screens for now: the symbols you're following, and the alerts that
- * have fired for them (plus holdings, plus anything else in the market —
- * see AlertFeed's own doc comment). Radar and Ask sub-tabs join this bar
- * once the heuristic radar and the multi-agent panel land.
+ * Three screens: the symbols you're following, the alerts that have fired
+ * for them (plus holdings, plus anything else in the market — see
+ * AlertFeed's own doc comment), and the market-wide heuristic radar. Ask
+ * joins this bar once the multi-agent panel lands.
  */
 
-type SubTab = 'watching' | 'alerts';
+type SubTab = 'watching' | 'alerts' | 'radar';
 
 const SUB_TABS: Array<[SubTab, string]> = [
   ['watching', 'Watching'],
   ['alerts', 'Alerts'],
+  ['radar', 'Radar'],
 ];
 
 export function WatchlistTab() {
@@ -42,6 +44,7 @@ export function WatchlistTab() {
 
       {tab === 'watching' && <WatchList />}
       {tab === 'alerts' && <AlertFeed />}
+      {tab === 'radar' && <Radar />}
     </div>
   );
 }

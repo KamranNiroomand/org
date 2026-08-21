@@ -28,6 +28,7 @@ import { computePositionHealth, latestCapturedTradingDay } from './options/posit
 import { pullMarketSnapshot } from './options/marketPull.js';
 import { evaluatePriceAlerts } from './alerts/evaluate.js';
 import { createNewsAlerts } from './alerts/newsAlerts.js';
+import { runRadarScoring, type RadarRunSummary } from './radar/run.js';
 
 /**
  * The nightly job.
@@ -731,17 +732,20 @@ let captureTask: ReturnType<typeof cron.schedule> | null = null;
 let retrainTask: ReturnType<typeof cron.schedule> | null = null;
 let textSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let watchlistTextSyncTask: ReturnType<typeof cron.schedule> | null = null;
+let radarTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
 let lastRetrainResult: RetrainJobResult | null = null;
 let lastTextSyncResult: TextSyncResult | null = null;
 let lastWatchlistTextSyncResult: WatchlistTextSyncResult | null = null;
+let lastRadarResult: RadarRunSummary | null = null;
 
 export const getLastNightlyResult = (): NightlyResult | null => lastResult;
 export const getLastCaptureResult = (): CaptureJobResult | null => lastCaptureResult;
 export const getLastRetrainResult = (): RetrainJobResult | null => lastRetrainResult;
 export const getLastTextSyncResult = (): TextSyncResult | null => lastTextSyncResult;
 export const getLastWatchlistTextSyncResult = (): WatchlistTextSyncResult | null => lastWatchlistTextSyncResult;
+export const getLastRadarResult = (): RadarRunSummary | null => lastRadarResult;
 
 /** Next scheduled chain capture, for the UI to show. */
 export function getNextCaptureRun(): string | null {
@@ -764,6 +768,12 @@ export function getNextRetrainRun(): string | null {
 /** Next scheduled watchlist text sync, for the UI to show. */
 export function getNextWatchlistTextSyncRun(): string | null {
   const next = watchlistTextSyncTask?.getNextRun();
+  return next ? new Date(next).toISOString() : null;
+}
+
+/** Next scheduled radar run, for the UI to show. */
+export function getNextRadarRun(): string | null {
+  const next = radarTask?.getNextRun();
   return next ? new Date(next).toISOString() : null;
 }
 
@@ -793,6 +803,22 @@ export function startScheduler(log: FastifyBaseLogger): void {
 
   const next = getNextRun();
   log.info(`Nightly sync scheduled (${config.syncCron}), next run ${next ?? 'unknown'}`);
+
+  // Radar scoring lives in org.db only — no MARKET_ROLE gate, runs the same
+  // on a reader as a runner, so it's scheduled here rather than inside the
+  // options-only block below.
+  if (!cron.validate(config.radarCron)) {
+    log.error(`RADAR_CRON is not valid: "${config.radarCron}" — radar disabled`);
+  } else {
+    radarTask = cron.schedule(
+      config.radarCron,
+      () => {
+        lastRadarResult = runRadarScoring();
+      },
+      { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    );
+    log.info(`Radar scoring scheduled (${config.radarCron}), next run ${getNextRadarRun() ?? 'unknown'}`);
+  }
 
   if (!config.market.isRunner) {
     log.info(
@@ -902,4 +928,6 @@ export function stopScheduler(): void {
   textSyncTask = null;
   watchlistTextSyncTask?.stop();
   watchlistTextSyncTask = null;
+  radarTask?.stop();
+  radarTask = null;
 }

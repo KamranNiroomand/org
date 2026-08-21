@@ -133,6 +133,54 @@ export interface SignalEvent {
   createdAt: string;
 }
 
+export interface RadarScore {
+  id: string;
+  runId: string;
+  tradingDay: string;
+  symbol: string;
+  rank: number;
+  score: number;
+  momentumZ: number | null;
+  trendPct: number | null;
+  newHigh: boolean;
+  volumeRatio: number | null;
+  volumeZ: number | null;
+  sentimentZ: number | null;
+  sentimentDocCount: number;
+  inputsUsed: string[];
+  createdAt: string;
+}
+
+export interface RadarResponse {
+  day: string;
+  disclaimer: string;
+  items: RadarScore[];
+}
+
+export interface RadarRunSummary {
+  runId: string | null;
+  universeScored: number;
+  shortlisted: number;
+  errors: string[];
+}
+
+export interface RadarRun {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'running' | 'done' | 'failed';
+  tradingDay: string;
+  universeScored: number;
+  shortlisted: number;
+  errors: string[];
+}
+
+export interface RadarRunsResponse {
+  lastRun: RadarRunSummary | null;
+  nextRun: string | null;
+  runs: RadarRun[];
+}
+
 export interface PortfolioResponse {
   holdings: Array<{
     id: string;
