@@ -21,7 +21,7 @@ const TABS: Array<[Tab, string]> = [
   ['screener', 'Screener'],
 ];
 
-/** Reserved so the shell is right; neither is built yet. */
+/** Reserved so the shell is right; screener isn't built yet. */
 function Placeholder({ title, hint }: { title: string; hint: string }) {
   return (
     <Card className="overflow-hidden">

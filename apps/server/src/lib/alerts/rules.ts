@@ -71,6 +71,10 @@ export function evaluatePriceRules(
     }
   }
 
+  // A same-day IPO or a thinly-traded symbol can report a 52-week high equal
+  // to (or, on stale data, below) its own 52-week low — else-if rather than
+  // two independent checks, so a degenerate range never fires both a
+  // "new high" and a "new low" for the same row on the same day.
   if (row.price !== null && row.fiftyTwoWeekHigh !== null && row.price >= row.fiftyTwoWeekHigh) {
     hits.push({
       ruleKey: 'new_52w_high',
@@ -78,8 +82,7 @@ export function evaluatePriceRules(
       headline: `${row.symbol} hit a new 52-week high`,
       detail: { price: row.price, fiftyTwoWeekHigh: row.fiftyTwoWeekHigh },
     });
-  }
-  if (row.price !== null && row.fiftyTwoWeekLow !== null && row.price <= row.fiftyTwoWeekLow) {
+  } else if (row.price !== null && row.fiftyTwoWeekLow !== null && row.price <= row.fiftyTwoWeekLow) {
     hits.push({
       ruleKey: 'new_52w_low',
       direction: 'bearish',

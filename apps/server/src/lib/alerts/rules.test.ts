@@ -44,6 +44,14 @@ describe('evaluatePriceRules', () => {
     expect(hits[0]).toMatchObject({ ruleKey: 'new_52w_low', direction: 'bearish' });
   });
 
+  it('fires only new_52w_high, never both, when the 52-week range is degenerate', () => {
+    // A same-day IPO or thin data can report high === low === price — both
+    // conditions are technically true, but only one alert should fire.
+    const hits = evaluatePriceRules({ ...base, price: 100, fiftyTwoWeekHigh: 100, fiftyTwoWeekLow: 100 });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.ruleKey).toBe('new_52w_high');
+  });
+
   it('fires volume_spike at 3x the 10-day average, direction neutral', () => {
     const hits = evaluatePriceRules({ ...base, volume: 3_000_000, avgVolume10Day: 1_000_000 });
     expect(hits).toHaveLength(1);

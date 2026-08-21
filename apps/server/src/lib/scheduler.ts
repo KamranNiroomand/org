@@ -122,11 +122,13 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
      * right cadence: listings change slowly, and market cap, P/E and sector
      * barely move intraday. The open page re-quotes only what it displays.
      */
+    let sweepSucceeded = false;
     try {
       const universe = await refreshUniverse();
       const swept = await sweepMarket();
       result.market = { universe: universe.total, quoted: swept.quoted };
       log.info(`Market: ${swept.quoted}/${universe.total} instruments quoted`);
+      sweepSucceeded = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       result.errors.push(`Market sweep: ${message}`);
@@ -135,15 +137,21 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
     // --- Price alerts ---------------------------------------------------------
     // Right after the sweep, on the row set it just wrote — evaluating against
     // yesterday's prices would flag moves a day stale by the time anyone opens
-    // the tab.
-    try {
-      const alerts = evaluatePriceAlerts();
-      result.alerts = { scanned: alerts.scanned, fired: alerts.fired };
-      log.info(`Alerts: ${alerts.fired} fired across ${alerts.scanned} instruments`);
-      result.errors.push(...alerts.errors);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      result.errors.push(`Alert evaluation: ${message}`);
+    // the tab. Skipped entirely when the sweep itself failed: instruments still
+    // holds yesterday's numbers then, and evaluating against them would insert
+    // an alert dated *today* for a move that isn't actually today's — a stale
+    // headline dressed up as fresh news, and one that would then dedup-block
+    // the real alert once a later sweep does succeed.
+    if (sweepSucceeded) {
+      try {
+        const alerts = evaluatePriceAlerts();
+        result.alerts = { scanned: alerts.scanned, fired: alerts.fired };
+        log.info(`Alerts: ${alerts.fired} fired across ${alerts.scanned} instruments`);
+        result.errors.push(...alerts.errors);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result.errors.push(`Alert evaluation: ${message}`);
+      }
     }
 
     // --- Prices -------------------------------------------------------------

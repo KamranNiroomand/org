@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { db } from '../db/index.js';
@@ -37,14 +37,24 @@ export async function watchlistRoutes(app: FastifyInstance): Promise<void> {
     const parsed = body.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: z.prettifyError(parsed.error) });
 
-    const row = {
-      symbol: parsed.data.symbol.toUpperCase(),
-      name: parsed.data.name ?? null,
-      note: parsed.data.note ?? null,
-      createdAt: nowIso(),
-    };
-    db.insert(watchlist).values(row).onConflictDoNothing({ target: watchlist.symbol }).run();
-    return reply.code(201).send(row);
+    const symbol = parsed.data.symbol.toUpperCase();
+    const result = db
+      .insert(watchlist)
+      .values({
+        symbol,
+        name: parsed.data.name ?? null,
+        note: parsed.data.note ?? null,
+        createdAt: nowIso(),
+      })
+      .onConflictDoNothing({ target: watchlist.symbol })
+      .run();
+
+    // Re-adding an already-watched symbol is a no-op, not a creation — the
+    // response must reflect the row actually stored (its real name/note),
+    // never echo back what was just submitted, which onConflictDoNothing
+    // silently leaves untouched.
+    const stored = db.select().from(watchlist).where(eq(watchlist.symbol, symbol)).get();
+    return reply.code(result.changes > 0 ? 201 : 200).send(stored);
   });
 
   app.patch<{ Params: { symbol: string } }>('/api/watchlist/:symbol', async (req, reply) => {
@@ -83,16 +93,23 @@ export async function watchlistRoutes(app: FastifyInstance): Promise<void> {
     }
     if (q.unacknowledged === 'true') filters.push(eq(alertEvents.acknowledged, false));
 
-    const rows = db
+    // Context ranked in SQL, not after the fact: capping to 200 rows on
+    // triggeredAt alone, then sorting by context afterward, would let a
+    // holding-context alert be excluded by the LIMIT before the sort ever
+    // saw it — the exact scenario a big market day produces, since unwatched
+    // alerts vastly outnumber holdings on any real evaluation run. Ranking
+    // first means the 200-row cap always keeps holdings, then watchlist,
+    // before it starts dropping unwatched rows.
+    return db
       .select()
       .from(alertEvents)
       .where(filters.length ? and(...filters) : undefined)
-      .orderBy(desc(alertEvents.triggeredAt))
+      .orderBy(
+        sql`case ${alertEvents.context} when 'holding' then 0 when 'watchlist' then 1 else 2 end`,
+        desc(alertEvents.triggeredAt),
+      )
       .limit(200)
       .all();
-
-    const rank = { holding: 0, watchlist: 1, unwatched: 2 } as const;
-    return rows.sort((a, b) => rank[a.context] - rank[b.context]);
   });
 
   app.post<{ Params: { id: string } }>('/api/signals/:id/ack', async (req, reply) => {
