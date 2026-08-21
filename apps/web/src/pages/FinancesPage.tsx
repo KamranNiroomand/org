@@ -71,6 +71,7 @@ export function FinancesPage() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['transactions'] });
       void qc.invalidateQueries({ queryKey: ['summary'] });
+      void qc.invalidateQueries({ queryKey: ['refunds'] });
     },
   });
 
@@ -87,7 +88,7 @@ export function FinancesPage() {
     mutationFn: (vars: { id: string; includeInStats: boolean }) =>
       api.patch(`/api/accounts/${vars.id}`, { includeInStats: vars.includeInStats }),
     onSuccess: () => {
-      for (const key of ['accounts', 'summary', 'cashflow', 'budgets', 'transactions']) {
+      for (const key of ['accounts', 'summary', 'cashflow', 'budgets', 'transactions', 'refunds']) {
         void qc.invalidateQueries({ queryKey: [key] });
       }
     },
@@ -143,13 +144,13 @@ export function FinancesPage() {
             <StatTile label="Payments" value={m(summary.payments)} />
           )}
           {summary?.refunds !== null && summary?.refunds !== undefined && (
-            <button
-              type="button"
+            <StatTile
+              label="Refunds"
+              value={m(summary.refunds)}
+              tone="positive"
               onClick={() => setRefundsOpen(true)}
-              className="rounded-xl text-left transition-opacity hover:opacity-80"
-            >
-              <StatTile label="Refunds" value={m(summary.refunds)} tone="positive" />
-            </button>
+              ariaLabel="View refund transactions"
+            />
           )}
           {summary?.interest !== null && summary?.interest !== undefined && (
             <StatTile label="Interest" value={m(summary.interest)} tone="positive" />
@@ -229,7 +230,9 @@ export function FinancesPage() {
                           : 'Excluded from totals, charts, and transactions — click to include'
                       }
                       aria-label={
-                        a.includeInStats ? `Exclude ${a.name}` : `Include ${a.name}`
+                        a.includeInStats
+                          ? `Exclude ${a.name} from totals, charts, and transactions`
+                          : `Include ${a.name} in totals, charts, and transactions`
                       }
                       aria-pressed={a.includeInStats}
                       className="rounded-md p-1 text-faint transition-colors hover:bg-bg-subtle hover:text-text"
