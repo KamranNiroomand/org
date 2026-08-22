@@ -18,6 +18,7 @@ import sys
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from app.classify import SymbolRow, classify_universe
 from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import RankedContract, latest_model_dir, load_model, rank_day, score_held_contracts
 
@@ -167,6 +168,37 @@ def theoretical(request: TheoreticalRequest) -> dict[str, float]:
         "vega": g.vega,
         "theta": g.theta,
     }
+
+
+class UniverseSymbol(BaseModel):
+    symbol: str
+    #: Deliberately not `Field(min_length=1)`: this is a batch endpoint, and
+    #: Pydantic validates the whole list atomically — rejecting the request
+    #: over one blank name would fail classification for the other ~7,000
+    #: rows too. `classify_universe`'s own length guard handles a blank name
+    #: per-row instead, which is what a batch of this shape actually needs.
+    name: str
+
+
+class ClassifyUniverseRequest(BaseModel):
+    symbols: list[UniverseSymbol]
+
+
+class ClassifyUniverseResponse(BaseModel):
+    #: Keyed by symbol; only warrants/units/rights are present — see
+    #: classify_universe's own docstring for why absence, not a "common"
+    #: value, is what marks a symbol as real common stock.
+    excluded: dict[str, str]
+
+
+@app.post("/classify-universe", response_model=ClassifyUniverseResponse)
+def classify_universe_endpoint(request: ClassifyUniverseRequest) -> ClassifyUniverseResponse:
+    """Separates SPAC-derivative warrants/units/rights from real common stock
+    across a full exchange symbol directory — see classify.py's module
+    docstring for why this can't be done by ticker shape alone.
+    """
+    rows = [SymbolRow(s.symbol, s.name) for s in request.symbols]
+    return ClassifyUniverseResponse(excluded=classify_universe(rows))
 
 
 class RankRequest(BaseModel):

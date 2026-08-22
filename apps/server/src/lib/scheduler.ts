@@ -120,9 +120,11 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
 
     // --- Market universe ----------------------------------------------------
     /**
-     * Around seven thousand symbols, roughly fifty seconds. Nightly is the
-     * right cadence: listings change slowly, and market cap, P/E and sector
-     * barely move intraday. The open page re-quotes only what it displays.
+     * A few thousand symbols after SPAC warrant/unit/right derivatives are
+     * classified out (see universe.ts's own `classifyUniverse` call), roughly
+     * a minute end to end. Nightly is the right cadence: listings change
+     * slowly, and market cap, P/E and sector barely move intraday. The open
+     * page re-quotes only what it displays.
      */
     let sweepSucceeded = false;
     try {
@@ -130,6 +132,13 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
       const swept = await sweepMarket();
       result.market = { universe: universe.total, quoted: swept.quoted };
       log.info(`Market: ${swept.quoted}/${universe.total} instruments quoted`);
+      if (universe.classificationSkipped) {
+        // Fails open by design (see universe.ts) — but silent every night
+        // would hide a sustained quant-sidecar outage behind what looks like
+        // ordinary listing churn in the added/updated/removed counts.
+        log.warn('Market: SPAC warrant/unit/right classification skipped — quant sidecar unreachable');
+        result.errors.push('Universe classification skipped: quant sidecar unreachable');
+      }
       sweepSucceeded = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
