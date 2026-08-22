@@ -34,7 +34,7 @@ function RunNotice({ result }: { result: RadarRunSummary }) {
   );
 }
 
-export function Radar() {
+export function Radar({ onDrillIn }: { onDrillIn?: (symbol: string) => void }) {
   const qc = useQueryClient();
 
   const { data, isLoading, isError } = useQuery({
@@ -95,14 +95,30 @@ export function Radar() {
                 <tr key={row.id} className="hover:bg-bg-subtle/60">
                   <td className="px-4 py-2 tnum text-faint">{row.rank}</td>
                   <td className="px-2 py-2">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-mono text-sm font-medium">{row.symbol}</span>
-                      {row.newHigh && (
-                        <Badge tone="positive">
-                          <TrendingUp className="size-3" />
-                        </Badge>
-                      )}
-                    </div>
+                    {onDrillIn ? (
+                      <button
+                        type="button"
+                        onClick={() => onDrillIn(row.symbol)}
+                        className="flex items-center gap-1.5 hover:underline"
+                        title={`Ask the panel about ${row.symbol}`}
+                      >
+                        <span className="font-mono text-sm font-medium">{row.symbol}</span>
+                        {row.newHigh && (
+                          <Badge tone="positive">
+                            <TrendingUp className="size-3" />
+                          </Badge>
+                        )}
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono text-sm font-medium">{row.symbol}</span>
+                        {row.newHigh && (
+                          <Badge tone="positive">
+                            <TrendingUp className="size-3" />
+                          </Badge>
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td className="px-2 py-2 text-right tnum font-medium">{row.score.toFixed(2)}</td>
                   <td

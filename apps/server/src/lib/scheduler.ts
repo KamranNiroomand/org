@@ -3,11 +3,11 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyBaseLogger } from 'fastify';
-import { asc } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 import { config } from '../config.js';
 import { nowIso } from './util.js';
 import { db } from '../db/index.js';
-import { holdings, watchlist } from '../db/schema.js';
+import { holdings, radarScores, watchlist } from '../db/schema.js';
 import { syncAllFeeds } from './calendarFeeds.js';
 import { sweepMarket } from './market.js';
 import { refreshUniverse } from './universe.js';
@@ -29,6 +29,7 @@ import { pullMarketSnapshot } from './options/marketPull.js';
 import { evaluatePriceAlerts } from './alerts/evaluate.js';
 import { createNewsAlerts } from './alerts/newsAlerts.js';
 import { runRadarScoring, type RadarRunSummary } from './radar/run.js';
+import { startPanelRun } from './agents/panel/run.js';
 
 /**
  * The nightly job.
@@ -727,18 +728,59 @@ export async function runRetrain(log: FastifyBaseLogger, reason: string): Promis
   return result;
 }
 
+/**
+ * Kicks off a panel run over tonight's radar shortlist — the top
+ * `PANEL_MAX_SYMBOLS_PER_NIGHTLY_SHORTLIST` symbols from the most recent
+ * `radarScores`, not the full market, per the plan's cost bound. A no-op
+ * (returns null, no `panelRuns` row) when the radar hasn't produced a
+ * shortlist yet, rather than an error — a fresh install's first night has
+ * nothing to run the panel over.
+ */
+function runNightlyPanel(log: FastifyBaseLogger): string | null {
+  const latestDay = db
+    .select({ tradingDay: radarScores.tradingDay })
+    .from(radarScores)
+    .orderBy(desc(radarScores.tradingDay))
+    .limit(1)
+    .get();
+  if (!latestDay) {
+    log.info('Nightly panel: no radar shortlist yet, skipping');
+    return null;
+  }
+
+  const shortlist = db
+    .select({ symbol: radarScores.symbol })
+    .from(radarScores)
+    .where(eq(radarScores.tradingDay, latestDay.tradingDay))
+    .orderBy(asc(radarScores.rank))
+    .limit(config.panel.maxSymbolsPerNightlyShortlist)
+    .all()
+    .map((r) => r.symbol);
+
+  const runId = startPanelRun({
+    trigger: 'nightly_radar',
+    query: null,
+    resolutionMethod: 'radar_shortlist',
+    symbols: shortlist,
+  });
+  log.info(`Nightly panel started (${runId}) over ${shortlist.length} radar shortlist symbol(s)`);
+  return runId;
+}
+
 let task: ReturnType<typeof cron.schedule> | null = null;
 let captureTask: ReturnType<typeof cron.schedule> | null = null;
 let retrainTask: ReturnType<typeof cron.schedule> | null = null;
 let textSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let watchlistTextSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let radarTask: ReturnType<typeof cron.schedule> | null = null;
+let panelTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
 let lastRetrainResult: RetrainJobResult | null = null;
 let lastTextSyncResult: TextSyncResult | null = null;
 let lastWatchlistTextSyncResult: WatchlistTextSyncResult | null = null;
 let lastRadarResult: RadarRunSummary | null = null;
+let lastPanelRunId: string | null = null;
 
 export const getLastNightlyResult = (): NightlyResult | null => lastResult;
 export const getLastCaptureResult = (): CaptureJobResult | null => lastCaptureResult;
@@ -746,6 +788,7 @@ export const getLastRetrainResult = (): RetrainJobResult | null => lastRetrainRe
 export const getLastTextSyncResult = (): TextSyncResult | null => lastTextSyncResult;
 export const getLastWatchlistTextSyncResult = (): WatchlistTextSyncResult | null => lastWatchlistTextSyncResult;
 export const getLastRadarResult = (): RadarRunSummary | null => lastRadarResult;
+export const getLastPanelRunId = (): string | null => lastPanelRunId;
 
 /** Next scheduled chain capture, for the UI to show. */
 export function getNextCaptureRun(): string | null {
@@ -774,6 +817,12 @@ export function getNextWatchlistTextSyncRun(): string | null {
 /** Next scheduled radar run, for the UI to show. */
 export function getNextRadarRun(): string | null {
   const next = radarTask?.getNextRun();
+  return next ? new Date(next).toISOString() : null;
+}
+
+/** Next scheduled panel run, for the UI to show. */
+export function getNextPanelRun(): string | null {
+  const next = panelTask?.getNextRun();
   return next ? new Date(next).toISOString() : null;
 }
 
@@ -818,6 +867,24 @@ export function startScheduler(log: FastifyBaseLogger): void {
       { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
     );
     log.info(`Radar scoring scheduled (${config.radarCron}), next run ${getNextRadarRun() ?? 'unknown'}`);
+  }
+
+  // Same reasoning as radar — org.db only, no MARKET_ROLE gate — but also
+  // needs a real Anthropic key, since every specialist/synthesis call in a
+  // panel run is an LLM call.
+  if (!config.anthropic.configured) {
+    log.info('Multi-agent panel not scheduled — ANTHROPIC_API_KEY is not set.');
+  } else if (!cron.validate(config.panel.cron)) {
+    log.error(`PANEL_CRON is not valid: "${config.panel.cron}" — panel disabled`);
+  } else {
+    panelTask = cron.schedule(
+      config.panel.cron,
+      () => {
+        lastPanelRunId = runNightlyPanel(log);
+      },
+      { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    );
+    log.info(`Multi-agent panel scheduled (${config.panel.cron}), next run ${getNextPanelRun() ?? 'unknown'}`);
   }
 
   if (!config.market.isRunner) {
@@ -930,4 +997,6 @@ export function stopScheduler(): void {
   watchlistTextSyncTask = null;
   radarTask?.stop();
   radarTask = null;
+  panelTask?.stop();
+  panelTask = null;
 }

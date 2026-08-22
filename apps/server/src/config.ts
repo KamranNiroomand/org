@@ -31,6 +31,17 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().default('claude-opus-5'),
 
+  // Multi-agent panel (Milestone 4) — the expensive, bounded-on-purpose part
+  // of the signal system. See lib/agents/panel/budget.ts's own module
+  // comment for why a hard call cap exists at all: this app already lost
+  // 321/566 symbols one night to an unpaced vendor call before that pacer
+  // was built, and an LLM panel needs the equivalent guard from day one.
+  PANEL_CRON: z.string().default('0 7 * * *'),
+  PANEL_SYMBOL_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  PANEL_MAX_SYMBOLS_PER_NIGHTLY_SHORTLIST: z.coerce.number().int().positive().default(10),
+  PANEL_MAX_SYMBOLS_PER_BOX_QUERY: z.coerce.number().int().positive().default(8),
+  PANEL_MAX_CALLS_PER_RUN: z.coerce.number().int().positive().default(150),
+
   // Options research. Market data lives in its own directory tree, separate
   // from org.db — see src/db/market/schema.ts for why.
   MARKET_DATA_DIR: z.string().optional(),
@@ -133,6 +144,14 @@ export const config = {
     apiKey: env.ANTHROPIC_API_KEY ?? null,
     model: env.ANTHROPIC_MODEL,
     configured: Boolean(env.ANTHROPIC_API_KEY),
+  },
+
+  panel: {
+    cron: env.PANEL_CRON,
+    symbolConcurrency: env.PANEL_SYMBOL_CONCURRENCY,
+    maxSymbolsPerNightlyShortlist: env.PANEL_MAX_SYMBOLS_PER_NIGHTLY_SHORTLIST,
+    maxSymbolsPerBoxQuery: env.PANEL_MAX_SYMBOLS_PER_BOX_QUERY,
+    maxCallsPerRun: env.PANEL_MAX_CALLS_PER_RUN,
   },
 
   /**

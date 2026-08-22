@@ -71,6 +71,13 @@
       "when": 1787333133422,
       "tag": "0009_groovy_hulk",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1787397408342,
+      "tag": "0010_silly_wendell_vaughn",
+      "breakpoints": true
     }
   ]
 }
