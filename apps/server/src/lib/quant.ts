@@ -99,8 +99,15 @@ export async function classifyUniverse(
   if (!res.ok) {
     throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
   }
-  const body = (await res.json()) as { excluded: Record<string, string> };
-  return body.excluded;
+  const body = (await res.json()) as { excluded?: unknown };
+  // A type assertion alone would trust a malformed 200 body (contract drift
+  // between this file and the sidecar's actual response shape) as if it were
+  // a real, empty result — silently classifying nothing instead of failing
+  // loud enough for universe.ts's catch to log it as the degradation it is.
+  if (typeof body.excluded !== 'object' || body.excluded === null) {
+    throw new QuantUnavailable('malformed response: missing "excluded"');
+  }
+  return body.excluded as Record<string, string>;
 }
 
 export async function quantHealthy(): Promise<boolean> {

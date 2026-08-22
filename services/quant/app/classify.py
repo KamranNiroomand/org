@@ -60,10 +60,19 @@ _CORPORATE_SUFFIXES = re.compile(
     r"|plc|l\.?p\.?|n\.?v\.?|s\.?a\.?"
     r"|group|holdings?|the"
     r")\b\.?",
-    re.IGNORECASE,
 )
 _PUNCTUATION = re.compile(r"[^\w\s]")
 _WHITESPACE = re.compile(r"\s+")
+
+#: A name shorter than this after normalization carries too little signal for
+#: a fuzzy match to mean anything — two blank or near-blank names score 100%
+#: similar to each other by construction, which would otherwise let a
+#: malformed or missing name field (an empty string is valid input; nothing
+#: upstream guarantees a non-empty company name) silently exclude an
+#: unrelated real instrument.
+_MIN_NORMALIZED_LENGTH = 3
+
+_CLASS_SUFFIX = re.compile(r"\bclass\s+([a-z0-9]+)\b")
 
 
 def normalize_name(name: str) -> str:
@@ -76,13 +85,27 @@ def normalize_name(name: str) -> str:
     return _WHITESPACE.sub(" ", stripped).strip()
 
 
+def _share_class(name: str) -> str | None:
+    """The share-class letter/number a name explicitly carries, if any —
+    `"Armada Acquisition Corp. III Class A"` -> `"a"`. Two names that each
+    name a *different* explicit class are two different securities no matter
+    how similar the rest of the name reads (`normalize_name` strips the class
+    marker entirely, which is correct when only one side has one — a warrant
+    listing rarely does — but would wrongly equate two distinct real share
+    classes if it were the only check)."""
+    match = _CLASS_SUFFIX.search(name.lower())
+    return match.group(1) if match else None
+
+
 @dataclass(frozen=True)
 class SymbolRow:
     symbol: str
     name: str
 
 
-def classify_universe(rows: list[SymbolRow]) -> dict[str, str]:
+def classify_universe(
+    rows: list[SymbolRow], similarity_threshold: int = NAME_SIMILARITY_THRESHOLD
+) -> dict[str, str]:
     """Returns, for every row that is a warrant/unit/right of another row in
     the same batch, `{symbol: "warrant" | "unit" | "right"}`. A symbol absent
     from the result is common stock as far as this function can tell — never
@@ -93,7 +116,22 @@ def classify_universe(rows: list[SymbolRow]) -> dict[str, str]:
     standalone stock that happens to end in W/U/R (`GROW`, "U.S. Global
     Investors, Inc. Class A", no separate `GRO` row in the batch) is never
     touched, and a same-shaped coincidence between two unrelated real
-    companies (`TKR`/`TK`) is correctly left alone too.
+    companies (`TKR`/`TK`) is correctly left alone too. Two further guards
+    against a false-positive exclusion — costlier here than elsewhere, since
+    `universe.ts`'s caller treats an excluded symbol as delisted and deletes
+    its row outright:
+
+    - A name that normalizes to fewer than `_MIN_NORMALIZED_LENGTH`
+      characters (blank, or boilerplate-only) is never matched against
+      anything — two blank names would otherwise score a meaningless 100%.
+    - Two names that each carry an *explicit, different* share class
+      (`"... Class A"` vs `"... Class B"`) are never matched even if
+      otherwise identical — those are two distinct real securities, and
+      `normalize_name` stripping both class markers would otherwise equate
+      them.
+
+    `similarity_threshold` is exposed for tests and for a future caller that
+    needs a different cutoff; every current caller uses the tuned default.
     """
     by_symbol = {row.symbol: row for row in rows}
     normalized_cache: dict[str, str] = {}
@@ -113,11 +151,21 @@ def classify_universe(rows: list[SymbolRow]) -> dict[str, str]:
             continue
 
         base_symbol = symbol[:-1]
-        if base_symbol not in by_symbol:
+        base_row = by_symbol.get(base_symbol)
+        if base_row is None:
             continue
 
-        similarity = fuzz.token_sort_ratio(normalized(symbol), normalized(base_symbol))
-        if similarity >= NAME_SIMILARITY_THRESHOLD:
+        candidate_class = _share_class(row.name)
+        base_class = _share_class(base_row.name)
+        if candidate_class is not None and base_class is not None and candidate_class != base_class:
+            continue
+
+        candidate_normalized, base_normalized = normalized(symbol), normalized(base_symbol)
+        if len(candidate_normalized) < _MIN_NORMALIZED_LENGTH or len(base_normalized) < _MIN_NORMALIZED_LENGTH:
+            continue
+
+        similarity = fuzz.token_sort_ratio(candidate_normalized, base_normalized)
+        if similarity >= similarity_threshold:
             excluded[symbol] = _KIND_BY_SUFFIX[suffix]
 
     return excluded

@@ -172,6 +172,11 @@ def theoretical(request: TheoreticalRequest) -> dict[str, float]:
 
 class UniverseSymbol(BaseModel):
     symbol: str
+    #: Deliberately not `Field(min_length=1)`: this is a batch endpoint, and
+    #: Pydantic validates the whole list atomically — rejecting the request
+    #: over one blank name would fail classification for the other ~7,000
+    #: rows too. `classify_universe`'s own length guard handles a blank name
+    #: per-row instead, which is what a batch of this shape actually needs.
     name: str
 
 

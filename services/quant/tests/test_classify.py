@@ -70,3 +70,31 @@ def test_normalize_name_does_not_collapse_genuinely_different_companies() -> Non
 
 def test_empty_batch_returns_empty() -> None:
     assert classify_universe([]) == {}
+
+
+def test_does_not_match_two_blank_names() -> None:
+    # normalize_name("") == normalize_name("") would otherwise score 100% —
+    # the exact false-positive a malformed or missing name field must not
+    # produce, since the caller deletes an excluded symbol outright.
+    rows = [SymbolRow("AB", ""), SymbolRow("ABW", "")]
+    assert classify_universe(rows) == {}
+
+
+def test_does_not_match_two_different_explicit_share_classes() -> None:
+    # Two distinct real securities of the same company, not a warrant of
+    # one and the common of the other — normalize_name alone would strip
+    # both class markers and wrongly equate them.
+    rows = [
+        SymbolRow("ABC", "Example Holdco Inc. Class A"),
+        SymbolRow("ABCW", "Example Holdco Inc. Class B"),
+    ]
+    assert classify_universe(rows) == {}
+
+
+def test_similarity_threshold_is_overridable() -> None:
+    rows = [
+        SymbolRow("AB", "Roughly Similar Corp"),
+        SymbolRow("ABW", "Roughly Similarish Corporation"),
+    ]
+    assert classify_universe(rows, similarity_threshold=101) == {}
+    assert classify_universe(rows, similarity_threshold=50) == {"ABW": "warrant"}

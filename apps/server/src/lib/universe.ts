@@ -204,8 +204,19 @@ function parseDirectory(
   return out;
 }
 
+export interface FetchUniverseResult {
+  rows: UniverseRow[];
+  /** True when the quant sidecar's classification pass didn't run this time
+   * (network error, timeout, malformed response) — the returned `rows` still
+   * include whatever Nasdaq-listed warrants/units/rights it would otherwise
+   * have excluded. Surfaced so a sustained outage shows up as a logged
+   * warning rather than a silent, unexplained swing in the nightly
+   * added/updated/removed counts. */
+  classificationSkipped: boolean;
+}
+
 /** Fetches the full universe. Throws only if both US directories fail. */
-export async function fetchUniverse(): Promise<UniverseRow[]> {
+export async function fetchUniverse(): Promise<FetchUniverseResult> {
   const [nasdaq, other] = await Promise.allSettled([
     fetchText(NASDAQ_LISTED),
     fetchText(OTHER_LISTED),
@@ -253,12 +264,30 @@ export async function fetchUniverse(): Promise<UniverseRow[]> {
   // sidecar hiccup degrades this one refresh to "keep the noise for another
   // day," never to blocking the universe (and everything downstream of it —
   // the market map, the radar, alerts) on a data-quality pass that isn't the
-  // reason this job runs.
+  // reason this job runs. See FetchUniverseResult.classificationSkipped for
+  // how that degradation is surfaced rather than silently swallowed.
+  //
+  // Only symbols shaped like a possible derivative (a bare W/U/R suffix)
+  // plus their would-be base ticker can ever be classified — sending the
+  // other ~85% of the universe, which can never match, would just be
+  // JSON weight the sidecar has to deserialize and iterate past for nothing.
+  const bySymbol = new Map(deduped.map((r) => [r.symbol, r]));
+  const candidates = new Set<string>();
+  for (const row of deduped) {
+    if (row.symbol.includes('-') || row.symbol.length < 2) continue;
+    if (!/[WUR]$/.test(row.symbol)) continue;
+    const base = row.symbol.slice(0, -1);
+    if (!bySymbol.has(base)) continue;
+    candidates.add(row.symbol);
+    candidates.add(base);
+  }
+  const toClassify = [...candidates].map((s) => ({ symbol: s, name: bySymbol.get(s)!.name }));
+
   try {
-    const excluded = await classifyUniverse(deduped.map((r) => ({ symbol: r.symbol, name: r.name })));
-    return deduped.filter((r) => !(r.symbol in excluded));
+    const excluded = await classifyUniverse(toClassify);
+    return { rows: deduped.filter((r) => !(r.symbol in excluded)), classificationSkipped: false };
   } catch {
-    return deduped;
+    return { rows: deduped, classificationSkipped: true };
   }
 }
 
@@ -267,6 +296,10 @@ export interface UniverseOutcome {
   updated: number;
   removed: number;
   total: number;
+  /** See FetchUniverseResult.classificationSkipped — carried through so the
+   * caller (scheduler.ts) can log it instead of a sustained sidecar outage
+   * silently reading as ordinary listing churn. */
+  classificationSkipped: boolean;
 }
 
 /**
@@ -276,12 +309,18 @@ export interface UniverseOutcome {
  * so a universe refresh never blanks the map while waiting for the next sweep.
  */
 export async function refreshUniverse(): Promise<UniverseOutcome> {
-  const incoming = await fetchUniverse();
+  const { rows: incoming, classificationSkipped } = await fetchUniverse();
   const existing = new Set(
     db.select({ symbol: instruments.symbol }).from(instruments).all().map((r) => r.symbol),
   );
 
-  const outcome: UniverseOutcome = { added: 0, updated: 0, removed: 0, total: incoming.length };
+  const outcome: UniverseOutcome = {
+    added: 0,
+    updated: 0,
+    removed: 0,
+    total: incoming.length,
+    classificationSkipped,
+  };
   const seen = new Set(incoming.map((r) => r.symbol));
 
   db.transaction((tx) => {
