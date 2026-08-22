@@ -18,6 +18,7 @@ import sys
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from app.classify import SymbolRow, classify_universe
 from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import RankedContract, latest_model_dir, load_model, rank_day, score_held_contracts
 
@@ -167,6 +168,32 @@ def theoretical(request: TheoreticalRequest) -> dict[str, float]:
         "vega": g.vega,
         "theta": g.theta,
     }
+
+
+class UniverseSymbol(BaseModel):
+    symbol: str
+    name: str
+
+
+class ClassifyUniverseRequest(BaseModel):
+    symbols: list[UniverseSymbol]
+
+
+class ClassifyUniverseResponse(BaseModel):
+    #: Keyed by symbol; only warrants/units/rights are present — see
+    #: classify_universe's own docstring for why absence, not a "common"
+    #: value, is what marks a symbol as real common stock.
+    excluded: dict[str, str]
+
+
+@app.post("/classify-universe", response_model=ClassifyUniverseResponse)
+def classify_universe_endpoint(request: ClassifyUniverseRequest) -> ClassifyUniverseResponse:
+    """Separates SPAC-derivative warrants/units/rights from real common stock
+    across a full exchange symbol directory — see classify.py's module
+    docstring for why this can't be done by ticker shape alone.
+    """
+    rows = [SymbolRow(s.symbol, s.name) for s in request.symbols]
+    return ClassifyUniverseResponse(excluded=classify_universe(rows))
 
 
 class RankRequest(BaseModel):

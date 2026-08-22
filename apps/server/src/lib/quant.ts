@@ -75,6 +75,34 @@ export class QuantUnavailable extends Error {
   }
 }
 
+/**
+ * Separates SPAC-derivative warrants/units/rights from real common stock —
+ * see `services/quant/app/classify.py`'s module docstring for why this needs
+ * real fuzzy name matching rather than a ticker-shape regex, and
+ * `universe.ts`'s own call site for what happens when the sidecar is down.
+ */
+export async function classifyUniverse(
+  rows: Array<{ symbol: string; name: string }>,
+): Promise<Record<string, string>> {
+  if (rows.length === 0) return {};
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/classify-universe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ symbols: rows }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (!res.ok) {
+    throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as { excluded: Record<string, string> };
+  return body.excluded;
+}
+
 export async function quantHealthy(): Promise<boolean> {
   try {
     const res = await fetch(`${config.market.quantUrl}/health`, {

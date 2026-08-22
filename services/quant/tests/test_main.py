@@ -31,6 +31,22 @@ def test_health() -> None:
     assert r.json()["ok"] is True
 
 
+def test_classify_universe_excludes_a_warrant_but_not_a_coincidental_collision() -> None:
+    r = client.post(
+        "/classify-universe",
+        json={
+            "symbols": [
+                {"symbol": "AACI", "name": "Armada Acquisition Corp. III Class A"},
+                {"symbol": "AACIW", "name": "Armada Acquisition Corp. III"},
+                {"symbol": "TK", "name": "Teekay Corporation Ltd."},
+                {"symbol": "TKR", "name": "Timken Company (The)"},
+            ]
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["excluded"] == {"AACIW": "warrant"}
+
+
 def test_prices_a_real_chain() -> None:
     rows = [
         {

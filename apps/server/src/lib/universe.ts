@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { instruments } from '../db/schema.js';
 import { TSX_COMPOSITE } from '../data/indices.js';
+import { classifyUniverse } from './quant.js';
 import { nowIso } from './util.js';
 
 /**
@@ -154,8 +155,14 @@ async function fetchText(url: string): Promise<string> {
  * Test issues are exchange scaffolding. ETFs are excluded because a market map
  * sized by market cap has no room for funds — a fund's assets are not a
  * company's value, and mixing them double-counts every holding. Preferreds,
- * warrants, units and rights are filtered by shape: they all carry suffix
- * punctuation that plain common stock never does.
+ * warrants, units and rights on the OTHER-listed (NYSE/AMEX) tape are filtered
+ * by shape here: they carry a dotted suffix plain common stock never does.
+ * The Nasdaq-listed tape carries no such marker — its warrants/units/rights
+ * are bare letters appended to the common's own ticker, indistinguishable by
+ * shape alone from an unrelated company that happens to have a similarly-
+ * shaped symbol — so those are caught downstream in `fetchUniverse` by the
+ * quant sidecar's `classify_universe`, which uses the company name (not just
+ * the ticker) to tell the two apart. See that module's own docstring.
  */
 function parseDirectory(
   text: string,
@@ -238,7 +245,21 @@ export async function fetchUniverse(): Promise<UniverseRow[]> {
   }
 
   // A symbol can appear on more than one tape; first listing wins.
-  return [...new Map(rows.map((r) => [r.symbol, r])).values()];
+  const deduped = [...new Map(rows.map((r) => [r.symbol, r])).values()];
+
+  // Nasdaq-listed warrants/units/rights (no dotted suffix — see
+  // parseDirectory's own doc comment) need the company name, not just the
+  // ticker, to tell apart from an unrelated real company. Fails open: a
+  // sidecar hiccup degrades this one refresh to "keep the noise for another
+  // day," never to blocking the universe (and everything downstream of it —
+  // the market map, the radar, alerts) on a data-quality pass that isn't the
+  // reason this job runs.
+  try {
+    const excluded = await classifyUniverse(deduped.map((r) => ({ symbol: r.symbol, name: r.name })));
+    return deduped.filter((r) => !(r.symbol in excluded));
+  } catch {
+    return deduped;
+  }
 }
 
 export interface UniverseOutcome {
