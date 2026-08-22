@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, RefreshCw, Radar as RadarIcon, TrendingUp } from 'lucide-react';
-import { Badge, Button, Card, CardHeader, Empty, Skeleton, cn } from '../ui';
+import { Badge, Button, Card, CardHeader, Empty, Notice, Skeleton, cn } from '../ui';
 import { api, type RadarResponse, type RadarRunSummary } from '../../lib/api';
 
 /**
@@ -27,14 +27,13 @@ function RunNowButton({ variant, onRun, pending }: { variant: 'ghost' | 'primary
 function RunNotice({ result }: { result: RadarRunSummary }) {
   if (result.errors.length === 0) return null;
   return (
-    <div className="flex items-start gap-2 border-b border-border bg-warning/10 px-4 py-2.5 text-xs text-warning">
-      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-      <span>{result.errors.join(' ')}</span>
-    </div>
+    <Notice tone="warning" icon={<AlertTriangle className="size-3.5" />}>
+      {result.errors.join(' ')}
+    </Notice>
   );
 }
 
-export function Radar() {
+export function Radar({ onDrillIn }: { onDrillIn?: (symbol: string) => void }) {
   const qc = useQueryClient();
 
   const { data, isLoading, isError } = useQuery({
@@ -55,9 +54,7 @@ export function Radar() {
         action={<RunNowButton variant="ghost" onRun={() => run.mutate()} pending={run.isPending} />}
       />
 
-      {data && (
-        <div className="border-b border-border bg-warning/5 px-4 py-2.5 text-xs text-muted">{data.disclaimer}</div>
-      )}
+      {data && <Notice>{data.disclaimer}</Notice>}
       {run.data && <RunNotice result={run.data} />}
 
       {isLoading ? (
@@ -95,14 +92,30 @@ export function Radar() {
                 <tr key={row.id} className="hover:bg-bg-subtle/60">
                   <td className="px-4 py-2 tnum text-faint">{row.rank}</td>
                   <td className="px-2 py-2">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-mono text-sm font-medium">{row.symbol}</span>
-                      {row.newHigh && (
-                        <Badge tone="positive">
-                          <TrendingUp className="size-3" />
-                        </Badge>
-                      )}
-                    </div>
+                    {onDrillIn ? (
+                      <button
+                        type="button"
+                        onClick={() => onDrillIn(row.symbol)}
+                        className="flex items-center gap-1.5 hover:underline"
+                        title={`Ask the panel about ${row.symbol}`}
+                      >
+                        <span className="font-mono text-sm font-medium">{row.symbol}</span>
+                        {row.newHigh && (
+                          <Badge tone="positive">
+                            <TrendingUp className="size-3" />
+                          </Badge>
+                        )}
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono text-sm font-medium">{row.symbol}</span>
+                        {row.newHigh && (
+                          <Badge tone="positive">
+                            <TrendingUp className="size-3" />
+                          </Badge>
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td className="px-2 py-2 text-right tnum font-medium">{row.score.toFixed(2)}</td>
                   <td

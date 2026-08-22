@@ -545,6 +545,96 @@ export const radarScores = sqliteTable(
   ],
 );
 
+/**
+ * One row per panel run — either the nightly pass over the radar's shortlist,
+ * or an on-demand box query. `symbols` is the resolved, bounded candidate
+ * list (never the full market); `callsMade` is written incrementally as
+ * calls happen, not just at the end, so a crash mid-run still leaves an
+ * honest count — the same reasoning as `capture_runs`' own incremental
+ * `symbolsDone` writes.
+ */
+export const panelRuns = sqliteTable(
+  'panel_runs',
+  {
+    id: id(),
+    trigger: text('trigger', { enum: ['nightly_radar', 'box_query'] }).notNull(),
+    /** Null for a radar-triggered run — there is no free-text question. */
+    query: text('query'),
+    resolutionMethod: text('resolution_method', {
+      enum: ['ticker_match', 'thematic_match', 'radar_shortlist'],
+    }).notNull(),
+    symbols: text('symbols', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    status: text('status', { enum: ['running', 'done', 'partial', 'failed'] })
+      .notNull()
+      .default('running'),
+    startedAt: text('started_at').notNull(),
+    finishedAt: text('finished_at'),
+    model: text('model').notNull(),
+    callsMade: integer('calls_made').notNull().default(0),
+    errors: text('errors', { mode: 'json' }).$type<string[]>().notNull().default([]),
+  },
+  (t) => [index('panel_runs_started_idx').on(t.startedAt)],
+);
+
+/**
+ * The panel's verdict for one symbol within one run — never `bullish`/
+ * `bearish`: `stance` stays off that axis entirely (see `synthesize.ts`) so
+ * the top-line result can never be read as a trade signal, only as "the
+ * panel found something concrete" or not.
+ */
+export const panelSymbolAnalyses = sqliteTable(
+  'panel_symbol_analyses',
+  {
+    id: id(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => panelRuns.id, { onDelete: 'cascade' }),
+    symbol: text('symbol').notNull(),
+    stance: text('stance', { enum: ['notable', 'mixed', 'not_notable'] }).notNull(),
+    summary: text('summary').notNull(),
+    agreements: text('agreements', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    disagreements: text('disagreements', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    openQuestions: text('open_questions', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    /** False from insert until the real synthesis lands. Without this, a run
+     * that crashes between the placeholder insert and the final update
+     * (budget exhaustion, a network failure) leaves a row with
+     * `stance: 'not_notable', summary: ''` that is bit-for-bit identical to
+     * a symbol the panel genuinely finished and found unremarkable — this
+     * column is the only thing that tells the two cases apart. */
+    synthesisComplete: integer('synthesis_complete', { mode: 'boolean' }).notNull().default(false),
+    createdAt: now(),
+  },
+  (t) => [uniqueIndex('panel_symbol_run_uq').on(t.runId, t.symbol)],
+);
+
+/**
+ * The literal thought process — one row per specialist, per round, per
+ * symbol. `respondingTo`/`revisedPosition` are null in round 1 (nothing to
+ * respond to yet) and set in round 2, which is conditioned on round 1's
+ * real transcript — see `specialists.ts`'s own doc comment for why that
+ * transcript, not a summary of it, is what round 2 actually reads.
+ */
+export const panelAgentTurns = sqliteTable(
+  'panel_agent_turns',
+  {
+    id: id(),
+    analysisId: text('analysis_id')
+      .notNull()
+      .references(() => panelSymbolAnalyses.id, { onDelete: 'cascade' }),
+    round: integer('round').notNull(),
+    agent: text('agent', { enum: ['momentum', 'fundamentals', 'news_sentiment', 'skeptic'] }).notNull(),
+    stance: text('stance', { enum: ['bullish', 'bearish', 'neutral'] }).notNull(),
+    confidence: text('confidence', { enum: ['low', 'medium', 'high'] }).notNull(),
+    reasoning: text('reasoning').notNull(),
+    citedInputs: text('cited_inputs', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    /** Round 1 only ever has null here — there is nothing to respond to yet. */
+    respondingTo: text('responding_to', { mode: 'json' }).$type<string[]>(),
+    revisedPosition: integer('revised_position', { mode: 'boolean' }),
+    createdAt: now(),
+  },
+  (t) => [index('panel_turns_analysis_round_idx').on(t.analysisId, t.round)],
+);
+
 export const fxRates = sqliteTable(
   'fx_rates',
   {

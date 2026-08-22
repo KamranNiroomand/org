@@ -1,0 +1,1 @@
+ALTER TABLE `panel_symbol_analyses` ADD `synthesis_complete` integer DEFAULT false NOT NULL;

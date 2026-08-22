@@ -181,6 +181,69 @@ export interface RadarRunsResponse {
   runs: RadarRun[];
 }
 
+export type Specialist = 'momentum' | 'fundamentals' | 'news_sentiment' | 'skeptic';
+
+export interface PanelAgentTurn {
+  id: string;
+  analysisId: string;
+  round: number;
+  agent: Specialist;
+  stance: 'bullish' | 'bearish' | 'neutral';
+  confidence: 'low' | 'medium' | 'high';
+  reasoning: string;
+  citedInputs: string[];
+  respondingTo: Specialist[] | null;
+  revisedPosition: boolean | null;
+  createdAt: string;
+}
+
+export interface PanelSymbolAnalysis {
+  id: string;
+  runId: string;
+  symbol: string;
+  stance: 'notable' | 'mixed' | 'not_notable';
+  summary: string;
+  agreements: string[];
+  disagreements: string[];
+  openQuestions: string[];
+  synthesisComplete: boolean;
+  createdAt: string;
+  turns: PanelAgentTurn[];
+}
+
+export interface PanelRun {
+  id: string;
+  trigger: 'nightly_radar' | 'box_query';
+  query: string | null;
+  resolutionMethod: 'ticker_match' | 'thematic_match' | 'radar_shortlist';
+  symbols: string[];
+  status: 'running' | 'done' | 'partial' | 'failed';
+  startedAt: string;
+  finishedAt: string | null;
+  model: string;
+  callsMade: number;
+  errors: string[];
+}
+
+export interface PanelRunDetail {
+  run: PanelRun;
+  analyses: PanelSymbolAnalysis[];
+  disclaimer: string;
+}
+
+export interface BoxQueryResponse {
+  runId: string;
+  resolvedSymbols: string[];
+  normalizedTheme: string | null;
+  disclaimer: string;
+}
+
+export interface PanelRunsResponse {
+  lastRunId: string | null;
+  nextRun: string | null;
+  runs: PanelRun[];
+}
+
 export interface PortfolioResponse {
   holdings: Array<{
     id: string;
