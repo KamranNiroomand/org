@@ -1,5 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../../../config.js';
+import { todayKey } from '../../util.js';
+import { getAnthropicClient } from './client.js';
 import { ANTHROPIC_CALL_OPTIONS, SPECIALISTS, type Round1Turn, type Round2Turn, type Specialist, type SymbolContext } from './types.js';
 
 /**
@@ -14,13 +15,6 @@ import { ANTHROPIC_CALL_OPTIONS, SPECIALISTS, type Round1Turn, type Round2Turn, 
  * position in round 2 is doing so because it read what the others actually
  * wrote, not because a synthesizer told it what they meant.
  */
-
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!config.anthropic.apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
-  client ??= new Anthropic({ apiKey: config.anthropic.apiKey });
-  return client;
-}
 
 const SHARED_RULES = `Rules every specialist follows, regardless of persona:
 
@@ -83,14 +77,20 @@ const CITED_INPUTS_SCHEMA = {
   description: 'The specific SymbolContext field names this reasoning actually rests on, e.g. "dayChangePercent", "radar.volumeRatio", "recentDocuments[0].sentiment".',
 };
 
+// Shared by both rounds' schemas, so a future change to one (a confidence
+// enum value, the citedInputs description) can't be applied to only one of
+// two independent copies — round2's own `reasoning` field still overrides
+// this with its own round-specific description below.
+const SHARED_TURN_PROPERTIES = {
+  stance: { type: 'string' as const, enum: ['bullish', 'bearish', 'neutral'] },
+  confidence: { type: 'string' as const, enum: ['low', 'medium', 'high'] },
+  reasoning: { type: 'string' as const, description: 'Two to four sentences, from your persona\'s lens only.' },
+  citedInputs: CITED_INPUTS_SCHEMA,
+};
+
 const ROUND1_SCHEMA = {
   type: 'object' as const,
-  properties: {
-    stance: { type: 'string' as const, enum: ['bullish', 'bearish', 'neutral'] },
-    confidence: { type: 'string' as const, enum: ['low', 'medium', 'high'] },
-    reasoning: { type: 'string' as const, description: 'Two to four sentences, from your persona\'s lens only.' },
-    citedInputs: CITED_INPUTS_SCHEMA,
-  },
+  properties: SHARED_TURN_PROPERTIES,
   required: ['stance', 'confidence', 'reasoning', 'citedInputs'],
   additionalProperties: false,
 };
@@ -98,13 +98,11 @@ const ROUND1_SCHEMA = {
 const ROUND2_SCHEMA = {
   type: 'object' as const,
   properties: {
-    stance: { type: 'string' as const, enum: ['bullish', 'bearish', 'neutral'] },
-    confidence: { type: 'string' as const, enum: ['low', 'medium', 'high'] },
+    ...SHARED_TURN_PROPERTIES,
     reasoning: {
       type: 'string' as const,
       description: 'Two to four sentences. Must engage directly with at least one other panelist\'s specific point.',
     },
-    citedInputs: CITED_INPUTS_SCHEMA,
     respondingTo: {
       type: 'array' as const,
       items: { type: 'string' as const, enum: SPECIALISTS },
@@ -120,7 +118,12 @@ const ROUND2_SCHEMA = {
 };
 
 function contextMessage(ctx: SymbolContext): string {
-  return `SymbolContext for ${ctx.symbol}:\n\n${JSON.stringify(ctx, null, 2)}`;
+  // recentDocuments carries only each document's absolute publishedAt —
+  // without today's date as an anchor, "recency" has no meaning, and the
+  // news_sentiment persona's own instruction to call out thin/stale
+  // coverage is unenforceable (see this repo's own PR review that caught
+  // this gap).
+  return `Today's date: ${todayKey()}\n\nSymbolContext for ${ctx.symbol}:\n\n${JSON.stringify(ctx, null, 2)}`;
 }
 
 /** Round 1's real transcript, formatted plainly — this is what round 2's
@@ -140,7 +143,7 @@ export async function runRound1(agent: Specialist, ctx: SymbolContext): Promise<
     throw new Error('ANTHROPIC_API_KEY is not set — the panel cannot run without it.');
   }
 
-  const response = await getClient().messages.create(
+  const response = await getAnthropicClient().messages.create(
     {
       model: config.anthropic.model,
       max_tokens: 4_000,
@@ -164,7 +167,7 @@ export async function runRound2(agent: Specialist, ctx: SymbolContext, round1: R
     throw new Error('ANTHROPIC_API_KEY is not set — the panel cannot run without it.');
   }
 
-  const response = await getClient().messages.create(
+  const response = await getAnthropicClient().messages.create(
     {
       model: config.anthropic.model,
       max_tokens: 4_000,

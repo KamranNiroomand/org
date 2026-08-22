@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { FastifyBaseLogger } from 'fastify';
 import { asc, desc, eq } from 'drizzle-orm';
 import { config } from '../config.js';
-import { nowIso } from './util.js';
+import { nowIso, todayKey } from './util.js';
 import { db } from '../db/index.js';
 import { holdings, radarScores, watchlist } from '../db/schema.js';
 import { syncAllFeeds } from './calendarFeeds.js';
@@ -735,6 +735,13 @@ export async function runRetrain(log: FastifyBaseLogger, reason: string): Promis
  * (returns null, no `panelRuns` row) when the radar hasn't produced a
  * shortlist yet, rather than an error — a fresh install's first night has
  * nothing to run the panel over.
+ *
+ * Also a no-op when the most recent shortlist isn't *today's* — the same
+ * staleness class `evaluatePriceAlerts` guards against via `sweepSucceeded`
+ * and the radar's own `STALE_INSTRUMENTS_HOURS` check. Without this, a
+ * `RADAR_CRON` failure or misconfiguration would have the panel silently
+ * spend real LLM budget re-reasoning about a shortlist that's days old,
+ * with nothing recording that the input was stale.
  */
 function runNightlyPanel(log: FastifyBaseLogger): string | null {
   const latestDay = db
@@ -745,6 +752,10 @@ function runNightlyPanel(log: FastifyBaseLogger): string | null {
     .get();
   if (!latestDay) {
     log.info('Nightly panel: no radar shortlist yet, skipping');
+    return null;
+  }
+  if (latestDay.tradingDay !== todayKey()) {
+    log.warn(`Nightly panel: radar's most recent shortlist is from ${latestDay.tradingDay}, not today — skipping`);
     return null;
   }
 

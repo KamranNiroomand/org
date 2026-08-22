@@ -1,6 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../../../config.js';
 import { formatRound1Transcript } from './specialists.js';
+import { getAnthropicClient } from './client.js';
 import { ANTHROPIC_CALL_OPTIONS, type Round1Turn, type Round2Turn, type SymbolContext, type SynthesisResult } from './types.js';
 
 /**
@@ -14,13 +14,6 @@ import { ANTHROPIC_CALL_OPTIONS, type Round1Turn, type Round2Turn, type SymbolCo
  * one that agrees unanimously, since "notable" means the panel found
  * something concrete to say, not that it leans one way.
  */
-
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!config.anthropic.apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
-  client ??= new Anthropic({ apiKey: config.anthropic.apiKey });
-  return client;
-}
 
 const SYSTEM = `You summarize a four-specialist panel's discussion of one
 stock or ETF into a faithful record of what was actually said. You are not a
@@ -82,7 +75,7 @@ export async function runSynthesis(
     )
     .join('\n\n');
 
-  const response = await getClient().messages.create(
+  const response = await getAnthropicClient().messages.create(
     {
       model: config.anthropic.model,
       max_tokens: 4_000,

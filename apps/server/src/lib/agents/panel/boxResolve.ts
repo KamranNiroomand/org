@@ -20,7 +20,10 @@ function resolveDirectMatches(query: string): string[] {
   if (trimmed.length === 0) return [];
 
   const upper = trimmed.toUpperCase();
-  if (/^[A-Z]{1,6}(-[A-Z])?(\.[A-Z]{1,3})?$/.test(upper)) {
+  // The class-suffix group allows multiple letters, not just one — Canadian
+  // unit/preferred tickers use multi-letter suffixes (AP-UN.TO, CAR-UN.TO),
+  // not just the single-letter US share-class pattern (BBD-B.TO).
+  if (/^[A-Z]{1,6}(-[A-Z]+)?(\.[A-Z]{1,3})?$/.test(upper)) {
     const bySymbol = db.select({ symbol: instruments.symbol }).from(instruments).where(eq(instruments.symbol, upper)).all();
     if (bySymbol.length > 0) return bySymbol.map((r) => r.symbol);
   }

@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../../../config.js';
+import { getAnthropicClient } from './client.js';
 import { ANTHROPIC_CALL_OPTIONS } from './types.js';
 
 /**
@@ -14,13 +14,6 @@ import { ANTHROPIC_CALL_OPTIONS } from './types.js';
  * silently resolve to zero real symbols downstream instead of failing
  * loudly enough to notice.
  */
-
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!config.anthropic.apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
-  client ??= new Anthropic({ apiKey: config.anthropic.apiKey });
-  return client;
-}
 
 const SYSTEM = `You turn a person's open-ended question about the stock market
 into a structured theme, using ONLY the sector list you are given. You do not
@@ -82,7 +75,7 @@ export async function resolveThemeQuery(query: string, availableSectors: string[
     throw new Error('ANTHROPIC_API_KEY is not set — thematic resolution cannot run without it.');
   }
 
-  const response = await getClient().messages.create(
+  const response = await getAnthropicClient().messages.create(
     {
       model: config.anthropic.model,
       max_tokens: 1_000,

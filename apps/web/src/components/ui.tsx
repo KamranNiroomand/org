@@ -209,6 +209,38 @@ export function Badge({
 }
 
 /**
+ * A persistent inline banner — a disclaimer that must travel with the data
+ * it describes, or a "this didn't do what you expected" notice, always
+ * visible rather than a dismissible toast. One shared component so tone and
+ * spacing can't drift apart between call sites the way two hand-rolled
+ * copies already did once (a disclaimer banner and a run-notice banner,
+ * each reinvented per tab that needed one).
+ */
+export function Notice({
+  tone = 'muted',
+  icon,
+  children,
+}: {
+  tone?: 'muted' | 'warning' | 'negative';
+  icon?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        'flex items-start gap-2 border-b border-border px-4 py-2.5 text-xs',
+        tone === 'muted' && 'bg-warning/5 text-muted',
+        tone === 'warning' && 'bg-warning/10 text-warning',
+        tone === 'negative' && 'bg-negative/10 text-negative',
+      )}
+    >
+      {icon && <span className="mt-0.5 shrink-0">{icon}</span>}
+      <span>{children}</span>
+    </div>
+  );
+}
+
+/**
  * Empty states carry a suggestion, not just an apology. A blank tab should tell
  * you what to do next.
  */

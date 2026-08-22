@@ -76,7 +76,26 @@ function ListSection({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-export function PanelResult({ analysis, pending }: { analysis: PanelSymbolAnalysis; pending?: boolean }) {
+export function PanelResult({
+  analysis,
+  pending,
+  stillRunning = pending,
+}: {
+  analysis: PanelSymbolAnalysis;
+  /** True whenever the synthesis hasn't landed yet — including a symbol
+   * left permanently incomplete by a 'partial'/'failed' run, not only one
+   * that's actively in progress. Never render `analysis.stance` as a real
+   * verdict while this is true — the placeholder `not_notable` underneath
+   * it means nothing yet. */
+  pending?: boolean;
+  /** Whether the run is still actually working on this symbol right now —
+   * only this state gets the spinning "running" badge. Defaults to
+   * `pending` for a caller with no independent way to know the run finished
+   * (e.g. Radar's own drill-in preview), but Ask.tsx passes it explicitly
+   * so a symbol left incomplete by a finished 'partial' run reads as
+   * "incomplete", not as a spinner that will never resolve. */
+  stillRunning?: boolean;
+}) {
   const agents: Specialist[] = ['momentum', 'fundamentals', 'news_sentiment', 'skeptic'];
 
   return (
@@ -85,7 +104,7 @@ export function PanelResult({ analysis, pending }: { analysis: PanelSymbolAnalys
         <span className="font-mono text-sm font-semibold">{analysis.symbol}</span>
         {pending ? (
           <Badge tone="neutral">
-            <RefreshCw className="size-3 animate-spin" /> running
+            {stillRunning && <RefreshCw className="size-3 animate-spin" />} {stillRunning ? 'running' : 'incomplete'}
           </Badge>
         ) : (
           <Badge tone={SYNTHESIS_TONE[analysis.stance]}>{analysis.stance.replace('_', ' ')}</Badge>

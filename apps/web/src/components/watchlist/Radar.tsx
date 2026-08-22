@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, RefreshCw, Radar as RadarIcon, TrendingUp } from 'lucide-react';
-import { Badge, Button, Card, CardHeader, Empty, Skeleton, cn } from '../ui';
+import { Badge, Button, Card, CardHeader, Empty, Notice, Skeleton, cn } from '../ui';
 import { api, type RadarResponse, type RadarRunSummary } from '../../lib/api';
 
 /**
@@ -27,10 +27,9 @@ function RunNowButton({ variant, onRun, pending }: { variant: 'ghost' | 'primary
 function RunNotice({ result }: { result: RadarRunSummary }) {
   if (result.errors.length === 0) return null;
   return (
-    <div className="flex items-start gap-2 border-b border-border bg-warning/10 px-4 py-2.5 text-xs text-warning">
-      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-      <span>{result.errors.join(' ')}</span>
-    </div>
+    <Notice tone="warning" icon={<AlertTriangle className="size-3.5" />}>
+      {result.errors.join(' ')}
+    </Notice>
   );
 }
 
@@ -55,9 +54,7 @@ export function Radar({ onDrillIn }: { onDrillIn?: (symbol: string) => void }) {
         action={<RunNowButton variant="ghost" onRun={() => run.mutate()} pending={run.isPending} />}
       />
 
-      {data && (
-        <div className="border-b border-border bg-warning/5 px-4 py-2.5 text-xs text-muted">{data.disclaimer}</div>
-      )}
+      {data && <Notice>{data.disclaimer}</Notice>}
       {run.data && <RunNotice result={run.data} />}
 
       {isLoading ? (

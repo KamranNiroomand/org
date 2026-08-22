@@ -595,6 +595,13 @@ export const panelSymbolAnalyses = sqliteTable(
     agreements: text('agreements', { mode: 'json' }).$type<string[]>().notNull().default([]),
     disagreements: text('disagreements', { mode: 'json' }).$type<string[]>().notNull().default([]),
     openQuestions: text('open_questions', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    /** False from insert until the real synthesis lands. Without this, a run
+     * that crashes between the placeholder insert and the final update
+     * (budget exhaustion, a network failure) leaves a row with
+     * `stance: 'not_notable', summary: ''` that is bit-for-bit identical to
+     * a symbol the panel genuinely finished and found unremarkable — this
+     * column is the only thing that tells the two cases apart. */
+    synthesisComplete: integer('synthesis_complete', { mode: 'boolean' }).notNull().default(false),
     createdAt: now(),
   },
   (t) => [uniqueIndex('panel_symbol_run_uq').on(t.runId, t.symbol)],

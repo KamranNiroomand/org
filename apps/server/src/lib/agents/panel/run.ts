@@ -8,19 +8,51 @@ import { buildSymbolContext } from './context.js';
 import { runRound1, runRound2 } from './specialists.js';
 import { runSynthesis } from './synthesize.js';
 import { PANEL_AGENT_CONCURRENCY, PanelBudgetExceeded, withBudget, type CallBudgeted } from './budget.js';
-import { SPECIALISTS, type Round1Turn, type Round2Turn } from './types.js';
+import { SPECIALISTS, type Specialist, type Round1Turn, type Round2Turn } from './types.js';
+
+/**
+ * Runs one round for every specialist, tolerating individual failures
+ * instead of the fail-fast semantics a bare `Promise.all` (via `mapLimit`)
+ * would give: a network blip or a mid-round budget exhaustion on one
+ * specialist must not discard the other three specialists' already-paid-for
+ * results. Each agent's own error (including `PanelBudgetExceeded`) is
+ * caught individually; the caller decides what an empty or partial result
+ * means for the symbol as a whole.
+ */
+async function collectRound<T extends { agent: Specialist }>(
+  callBudgeted: CallBudgeted,
+  runCall: (agent: Specialist) => Promise<T>,
+): Promise<{ turns: T[]; budgetError: PanelBudgetExceeded | null; errors: string[] }> {
+  const errors: string[] = [];
+  let budgetError: PanelBudgetExceeded | null = null;
+  const settled = await mapLimit(SPECIALISTS, PANEL_AGENT_CONCURRENCY, async (agent): Promise<T | null> => {
+    try {
+      return await callBudgeted(() => runCall(agent));
+    } catch (err) {
+      if (err instanceof PanelBudgetExceeded) budgetError = err;
+      errors.push(`${agent}: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  });
+  return { turns: settled.filter((t): t is T => t !== null), budgetError, errors };
+}
 
 /**
  * Orchestrates one symbol end to end: round 1 (4 parallel, independent
- * calls) → persist those turns → round 2 (4 parallel calls, each reading
- * round 1's real transcript) → persist those turns → synthesis → update the
- * symbol's `panelSymbolAnalyses` row with the real verdict.
+ * calls) → persist whichever succeeded → round 2 (4 parallel calls, each
+ * reading round 1's real transcript) → persist whichever succeeded →
+ * synthesis → update the symbol's `panelSymbolAnalyses` row with the real
+ * verdict and mark it complete.
  *
  * The analysis row is created with placeholder values *before* any call
  * runs, not after — so a crash partway through (a budget exhaustion, a
  * network failure) still leaves the turns that did complete attached to a
  * real row, readable via `GET /api/signals/panel/:runId`, rather than
  * orphaned or lost because the parent row was never inserted.
+ * `synthesisComplete` (false until the final update) is what actually
+ * distinguishes that partial/interrupted state from a symbol the panel
+ * genuinely finished and rated `not_notable` — the placeholder values alone
+ * are indistinguishable from a real "found nothing" verdict.
  */
 async function runPanelForSymbol(callBudgeted: CallBudgeted, runId: string, symbol: string): Promise<void> {
   const ctx = buildSymbolContext(symbol);
@@ -37,21 +69,30 @@ async function runPanelForSymbol(callBudgeted: CallBudgeted, runId: string, symb
       agreements: [],
       disagreements: [],
       openQuestions: [],
+      synthesisComplete: false,
       createdAt: nowIso(),
     })
     .run();
 
-  const round1 = await mapLimit(SPECIALISTS, PANEL_AGENT_CONCURRENCY, (agent) =>
-    callBudgeted(() => runRound1(agent, ctx)),
-  );
-  persistTurns(analysisId, 1, round1);
+  const round1 = await collectRound<Round1Turn>(callBudgeted, (agent) => runRound1(agent, ctx));
+  if (round1.turns.length > 0) persistTurns(analysisId, 1, round1.turns);
+  if (round1.turns.length === 0) {
+    throw round1.budgetError ?? new Error(`${symbol}: every round-1 specialist call failed (${round1.errors.join('; ')})`);
+  }
 
-  const round2 = await mapLimit(SPECIALISTS, PANEL_AGENT_CONCURRENCY, (agent) =>
-    callBudgeted(() => runRound2(agent, ctx, round1)),
-  );
-  persistTurns(analysisId, 2, round2);
+  const round2 = await collectRound<Round2Turn>(callBudgeted, (agent) => runRound2(agent, ctx, round1.turns));
+  if (round2.turns.length > 0) persistTurns(analysisId, 2, round2.turns);
 
-  const synthesis = await callBudgeted(() => runSynthesis(ctx, round1, round2));
+  // Stop here — without a full picture from at least one round, synthesis
+  // would just spend the last of an exhausted budget restating a partial
+  // transcript, or (for a non-budget failure) summarizing round 1 alone as
+  // if round 2's cross-examination never happened.
+  if (round1.budgetError || round2.budgetError) throw (round1.budgetError ?? round2.budgetError)!;
+  if (round2.turns.length === 0) {
+    throw new Error(`${symbol}: every round-2 specialist call failed (${round2.errors.join('; ')})`);
+  }
+
+  const synthesis = await callBudgeted(() => runSynthesis(ctx, round1.turns, round2.turns));
   db.update(panelSymbolAnalyses)
     .set({
       stance: synthesis.stance,
@@ -59,6 +100,7 @@ async function runPanelForSymbol(callBudgeted: CallBudgeted, runId: string, symb
       agreements: synthesis.agreements,
       disagreements: synthesis.disagreements,
       openQuestions: synthesis.openQuestions,
+      synthesisComplete: true,
     })
     .where(eq(panelSymbolAnalyses.id, analysisId))
     .run();
@@ -92,12 +134,16 @@ export interface StartPanelRunParams {
   symbols: string[];
 }
 
-/** Guards against a second box query while one is already running —
- * same shape as `capturing`/`watchlistTextSyncing` in scheduler.ts. Scoped
- * to box queries only: the nightly radar-triggered run and a box query
- * overlapping is an unlikely timing coincidence, not the double-click a
- * person can actually trigger by hand, so it isn't worth rejecting. */
+/** Guards against a second run of the same trigger overlapping with one
+ * already in progress — same shape as `capturing`/`watchlistTextSyncing` in
+ * scheduler.ts. Kept separate per trigger, not one shared flag: a box query
+ * and the nightly radar run overlapping is an unlikely timing coincidence,
+ * not something worth rejecting, but two *nightly* runs overlapping (a slow
+ * run still going when the next night's `PANEL_CRON` tick fires) is exactly
+ * the unbounded-concurrency risk `withBudget` exists to prevent — each
+ * would get its own budget counter and double real spend/concurrency. */
 let boxQueryRunning = false;
+let nightlyPanelRunning = false;
 
 /**
  * Creates the `panelRuns` bookkeeping row and returns its id immediately —
@@ -128,6 +174,13 @@ export function startPanelRun(params: StartPanelRunParams): string {
       .run();
     return runId;
   }
+  if (params.trigger === 'nightly_radar' && nightlyPanelRunning) {
+    db.update(panelRuns)
+      .set({ status: 'failed', finishedAt: nowIso(), errors: ['A nightly panel run was already in progress; skipped this run.'] })
+      .where(eq(panelRuns.id, runId))
+      .run();
+    return runId;
+  }
 
   if (params.symbols.length === 0) {
     // Nothing resolved — a genuinely empty candidate set, not a failure of
@@ -142,6 +195,7 @@ export function startPanelRun(params: StartPanelRunParams): string {
   }
 
   if (params.trigger === 'box_query') boxQueryRunning = true;
+  if (params.trigger === 'nightly_radar') nightlyPanelRunning = true;
 
   void executePanelRun(runId, params.symbols)
     .catch((err) => {
@@ -157,6 +211,7 @@ export function startPanelRun(params: StartPanelRunParams): string {
     })
     .finally(() => {
       if (params.trigger === 'box_query') boxQueryRunning = false;
+      if (params.trigger === 'nightly_radar') nightlyPanelRunning = false;
     });
 
   return runId;
@@ -173,8 +228,14 @@ async function executePanelRun(runId: string, symbols: string[]): Promise<void> 
     // begun yet — mapLimit's workers each check this before pulling their
     // next item, so an exhausted budget stops new work within one symbol's
     // worth of latency rather than only after every worker happens to hit
-    // the cap independently.
-    if (hitBudget) return;
+    // the cap independently. Recorded explicitly, not silently — without
+    // this, a skipped symbol has no panelSymbolAnalyses row and no errors
+    // entry naming it, so a client has no way to tell "never got to this
+    // one" apart from "still in progress" while polling a finished run.
+    if (hitBudget) {
+      errors.push(`${symbol}: skipped — panel budget already exhausted`);
+      return;
+    }
     try {
       await runPanelForSymbol(callBudgeted, runId, symbol);
       completed += 1;

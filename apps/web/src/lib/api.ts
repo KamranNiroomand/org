@@ -206,6 +206,7 @@ export interface PanelSymbolAnalysis {
   agreements: string[];
   disagreements: string[];
   openQuestions: string[];
+  synthesisComplete: boolean;
   createdAt: string;
   turns: PanelAgentTurn[];
 }

@@ -45,22 +45,34 @@ export function buildSymbolContext(symbol: string): SymbolContext | null {
         .get()
     : undefined;
 
-  const vendorSymbol = toVendorSymbol(symbol);
-  const recentDocuments = marketDb
-    .select({
-      title: documents.title,
-      summary: documents.summary,
-      publishedAt: documents.publishedAt,
-      source: documents.source,
-      sentiment: docMentions.sentiment,
-      eventType: documents.eventType,
-    })
-    .from(docMentions)
-    .innerJoin(documents, eq(docMentions.documentId, documents.id))
-    .where(eq(docMentions.underlying, vendorSymbol))
-    .orderBy(desc(documents.publishedAt))
-    .limit(MAX_RECENT_DOCUMENTS)
-    .all();
+  // toVendorSymbol only ever replaces a hyphen with a dot (BRK-B -> BRK.B),
+  // correct for a US share class. A Canadian symbol that ALSO carries a
+  // hyphen before its exchange suffix (BBD-B.TO, AP-UN.TO) already has a
+  // dot — the blind replace mangles it into a symbol that doesn't exist
+  // (BBD.B.TO), which would silently return zero rows and read as "no
+  // coverage" rather than "looked up wrong". No US symbol legitimately
+  // carries both a hyphen and a dot, so that combination is the safe,
+  // precise signal to skip the lookup entirely rather than risk a wrong
+  // conversion — this vendor has no real Canadian news coverage to find
+  // anyway, so an empty recentDocuments here isn't a real loss.
+  const isUnsafeToConvert = symbol.includes('-') && symbol.includes('.');
+  const recentDocuments = isUnsafeToConvert
+    ? []
+    : marketDb
+        .select({
+          title: documents.title,
+          summary: documents.summary,
+          publishedAt: documents.publishedAt,
+          source: documents.source,
+          sentiment: docMentions.sentiment,
+          eventType: documents.eventType,
+        })
+        .from(docMentions)
+        .innerJoin(documents, eq(docMentions.documentId, documents.id))
+        .where(eq(docMentions.underlying, toVendorSymbol(symbol)))
+        .orderBy(desc(documents.publishedAt))
+        .limit(MAX_RECENT_DOCUMENTS)
+        .all();
 
   return {
     symbol: row.symbol,

@@ -37,7 +37,14 @@ const schema = z.object({
   // 321/566 symbols one night to an unpaced vendor call before that pacer
   // was built, and an LLM panel needs the equivalent guard from day one.
   PANEL_CRON: z.string().default('0 7 * * *'),
-  PANEL_SYMBOL_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  // Each symbol already runs 4 specialists concurrently — a symbol
+  // concurrency above 1 multiplies that, so 2 symbols in flight means up to
+  // 8 simultaneous Anthropic calls. withBudget caps total *spend*, not
+  // concurrent *rate*, so this is the actual knob against tripping
+  // claude-opus-5's per-minute/concurrent limits. Sequential across symbols
+  // by default — a nightly run has no deadline to hit, so there's nothing
+  // bought by parallelizing symbols that isn't also a rate-limit risk.
+  PANEL_SYMBOL_CONCURRENCY: z.coerce.number().int().positive().default(1),
   PANEL_MAX_SYMBOLS_PER_NIGHTLY_SHORTLIST: z.coerce.number().int().positive().default(10),
   PANEL_MAX_SYMBOLS_PER_BOX_QUERY: z.coerce.number().int().positive().default(8),
   PANEL_MAX_CALLS_PER_RUN: z.coerce.number().int().positive().default(150),
