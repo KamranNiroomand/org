@@ -335,6 +335,19 @@ export async function captureChains(
       .run();
   }
 
+  // Surfaced via the optional provider interface, not a concrete import of
+  // polygon.ts — a run that finishes with the pacer still throttled below
+  // baseline gets a visible, named reason in the same place every other
+  // per-symbol failure already shows up, instead of "this took much longer
+  // than usual" being a mystery only a server-log dive could explain.
+  const rateLimitState = provider.rateLimitState?.();
+  if (rateLimitState?.throttled) {
+    summary.errors.push(
+      `Vendor rate-limit pacer ended this run still throttled at ${rateLimitState.multiplier.toFixed(1)}x ` +
+        `the configured baseline — real throughput was lower than POLYGON_MAX_REQUESTS_PER_MINUTE implies.`,
+    );
+  }
+
   summary.finishedAt = nowIso();
   marketDb
     .update(captureRuns)
