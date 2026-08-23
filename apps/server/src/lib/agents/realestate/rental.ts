@@ -1,6 +1,6 @@
 import { config } from '../../../config.js';
 import { getAnthropicClient } from '../panel/client.js';
-import { propertyContextMessage } from './context.js';
+import { lastTextBlockText, propertyContextMessage } from './context.js';
 import { ANTHROPIC_SEARCH_CALL_OPTIONS, type ComputedFinancials, type PropertyInput, type RentalAgentResult } from './types.js';
 
 /**
@@ -79,13 +79,6 @@ const ROUND2_SCHEMA = {
   additionalProperties: false,
 };
 
-function lastTextBlockText(content: Array<{ type: string; text?: string }>): string {
-  for (let i = content.length - 1; i >= 0; i--) {
-    const block = content[i];
-    if (block && block.type === 'text' && typeof block.text === 'string') return block.text;
-  }
-  throw new Error('Claude returned no text content for the rental agent');
-}
 
 interface AgentResponse {
   result: RentalAgentResult;

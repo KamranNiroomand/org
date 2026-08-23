@@ -138,7 +138,10 @@ async function executeRealEstateRun(runId: string, input: PropertyInput, compute
   persist({
     managerResult,
     balancePlacement,
-    synthesisComplete: true,
+    // True only when the manager's real result actually landed — matching
+    // the panel's own synthesisComplete, which is likewise never set on a
+    // path where synthesis failed.
+    synthesisComplete: managerResult !== null,
     status: managerResult && errors.length === 0 ? 'done' : 'partial',
     finishedAt: nowIso(),
     errors,

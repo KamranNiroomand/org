@@ -27,7 +27,10 @@ export function BalanceChart({ placement }: { placement: BalancePlacement | null
     );
   }
 
-  const point = [{ x: placement.cashFlowScore, y: placement.appreciationScore ?? 0 }];
+  // Never plot a missing appreciation score as 0 — that reads as "worst
+  // possible outlook" on this axis, not "unknown". No point is drawn until
+  // there's a real score for both axes.
+  const point = placement.appreciationScore === null ? [] : [{ x: placement.cashFlowScore, y: placement.appreciationScore }];
 
   return (
     <div>
@@ -76,7 +79,9 @@ export function BalanceChart({ placement }: { placement: BalancePlacement | null
         </ResponsiveContainer>
       </div>
       {placement.appreciationScore === null && (
-        <p className="mt-1.5 text-[11px] text-faint">Appreciation score unavailable — plotted at 0 as a placeholder.</p>
+        <p className="mt-1.5 text-[11px] text-faint">
+          Appreciation score unavailable — the location agent didn't produce one, so no point is plotted.
+        </p>
       )}
     </div>
   );

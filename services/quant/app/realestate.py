@@ -338,31 +338,52 @@ class HorizonProjection(BaseModel):
 
 
 def project_horizons(inputs: HorizonInputs, years: tuple[int, ...] = (7, 10, 15)) -> list[HorizonProjection]:
+    """Every horizon shares the same underlying amortization schedule, so
+    the per-year interest and the running after-tax cash flow are each
+    computed once in a single pass here, then indexed per horizon below —
+    not rebuilt or rescanned once per horizon, which would rescan the early
+    years (and rebuild the whole schedule for the balance) once per horizon
+    for no reason: nothing before the amortization inputs change between
+    horizons in the same request.
+    """
     max_year = max(years)
     full_schedule = amortization_schedule(
         inputs.loan_principal, inputs.mortgage_rate, inputs.amortization_years, max_year * 12
     )
 
+    interest_by_year: dict[int, float] = {}
+    for row in full_schedule:
+        y = (row.month - 1) // 12 + 1
+        interest_by_year[y] = interest_by_year.get(y, 0.0) + row.interest
+
+    # Prefix sum of after-tax cash flow, year 1..max_year, computed once.
+    cumulative_after_tax_by_year: dict[int, float] = {}
+    running = 0.0
+    for y in range(1, max_year + 1):
+        tax_this_year = annual_rental_income_tax(
+            inputs.annual_rent,
+            interest_by_year.get(y, 0.0),
+            inputs.annual_property_tax,
+            inputs.annual_insurance,
+            inputs.annual_maintenance,
+            inputs.annual_mgmt_fee,
+            inputs.annual_hoa,
+            inputs.marginal_tax_rate,
+        )
+        running += inputs.monthly_pretax_cash_flow * 12 - tax_this_year
+        cumulative_after_tax_by_year[y] = running
+
     results: list[HorizonProjection] = []
     for year in years:
         value = projected_value(inputs.purchase_price, year)
-        balance = remaining_balance(inputs.loan_principal, inputs.mortgage_rate, inputs.amortization_years, year * 12)
+        # full_schedule already covers exactly [0, max_year*12) months; a
+        # shorter mortgage term means fewer rows than that (capped by
+        # amortization_schedule itself), in which case the loan is already
+        # paid off by this horizon and the balance is 0 — same semantics
+        # remaining_balance itself would have returned.
+        balance = full_schedule[year * 12 - 1].balance if year * 12 <= len(full_schedule) else 0.0
         equity = value - balance
-
-        accumulated_after_tax = 0.0
-        for y in range(1, year + 1):
-            interest_this_year = annual_interest_paid(full_schedule, y)
-            tax_this_year = annual_rental_income_tax(
-                inputs.annual_rent,
-                interest_this_year,
-                inputs.annual_property_tax,
-                inputs.annual_insurance,
-                inputs.annual_maintenance,
-                inputs.annual_mgmt_fee,
-                inputs.annual_hoa,
-                inputs.marginal_tax_rate,
-            )
-            accumulated_after_tax += inputs.monthly_pretax_cash_flow * 12 - tax_this_year
+        accumulated_after_tax = cumulative_after_tax_by_year[year]
 
         selling_costs = value * inputs.realtor_commission_pct / 100.0 + inputs.legal_fees
         acb = inputs.purchase_price + inputs.closing_costs_added_to_acb

@@ -65,7 +65,24 @@ function centsBreakdown(breakdown: Record<string, number>): Record<string, numbe
   return Object.fromEntries(Object.entries(breakdown).map(([k, v]) => [k, toCents(v)]));
 }
 
+/**
+ * Rounds once per independent quantity, then derives every value that's
+ * arithmetically dependent on another by integer arithmetic on the
+ * already-rounded cents — never by independently rounding the Python side's
+ * float twice. Two fields rounded separately from a shared float can
+ * disagree by a cent (e.g. `equity = value - balance` holds exactly in
+ * `realestate.py`, but `toCents(value) - toCents(balance)` need not equal
+ * `toCents(equity)`), and those exact fields sit side by side in the
+ * horizons table in `AnalysisResult.tsx` — a discrepancy there reads as a
+ * real bug, not a rounding artifact.
+ */
 function toComputedFinancials(raw: RawComputedFinancials): ComputedFinancials {
+  const breakdownCents = centsBreakdown(raw.monthly_cash_flow.breakdown);
+  const netCents = Object.values(breakdownCents).reduce((sum, v) => sum + v, 0);
+
+  const provincialCents = toCents(raw.land_transfer_tax.provincial);
+  const municipalCents = toCents(raw.land_transfer_tax.municipal);
+
   return {
     purchasePriceCents: toCents(raw.purchase_price),
     downPaymentAmountCents: toCents(raw.down_payment_amount),
@@ -75,30 +92,39 @@ function toComputedFinancials(raw: RawComputedFinancials): ComputedFinancials {
     cmhcPremiumPstCents: toCents(raw.cmhc_premium_pst),
     cmhcNote: raw.cmhc_note,
     landTransferTax: {
-      provincialCents: toCents(raw.land_transfer_tax.provincial),
-      municipalCents: toCents(raw.land_transfer_tax.municipal),
-      totalCents: toCents(raw.land_transfer_tax.total),
+      provincialCents,
+      municipalCents,
+      totalCents: provincialCents + municipalCents,
       modeled: raw.land_transfer_tax.modeled,
     },
     totalClosingCostsCents: toCents(raw.total_closing_costs),
     totalCashInvestedCents: toCents(raw.total_cash_invested),
-    monthlyCashFlow: { netCents: toCents(raw.monthly_cash_flow.net), breakdown: centsBreakdown(raw.monthly_cash_flow.breakdown) },
+    monthlyCashFlow: { netCents, breakdown: breakdownCents },
     annualNoiCents: toCents(raw.annual_noi),
     capRatePct: raw.cap_rate_pct,
     cashOnCashReturnPct: raw.cash_on_cash_return_pct,
     cashFlowAxisScore: raw.cash_flow_axis_score,
     assumedAnnualAppreciationRate: raw.assumed_annual_appreciation_rate,
-    horizons: raw.horizons.map((h) => ({
-      year: h.year,
-      projectedValueCents: toCents(h.projected_value),
-      remainingBalanceCents: toCents(h.remaining_balance),
-      equityCents: toCents(h.equity),
-      accumulatedAfterTaxCashFlowCents: toCents(h.accumulated_after_tax_cash_flow),
-      saleSellingCostsCents: toCents(h.sale_selling_costs),
-      capitalGainsTaxCents: toCents(h.capital_gains_tax),
-      saleEquityAfterTaxCents: toCents(h.sale_equity_after_tax),
-      totalNetProceedsAfterTaxCents: toCents(h.total_net_proceeds_after_tax),
-    })),
+    horizons: raw.horizons.map((h) => {
+      const projectedValueCents = toCents(h.projected_value);
+      const remainingBalanceCents = toCents(h.remaining_balance);
+      const equityCents = projectedValueCents - remainingBalanceCents;
+      const accumulatedAfterTaxCashFlowCents = toCents(h.accumulated_after_tax_cash_flow);
+      const saleSellingCostsCents = toCents(h.sale_selling_costs);
+      const capitalGainsTaxCents = toCents(h.capital_gains_tax);
+      const saleEquityAfterTaxCents = equityCents - saleSellingCostsCents - capitalGainsTaxCents;
+      return {
+        year: h.year,
+        projectedValueCents,
+        remainingBalanceCents,
+        equityCents,
+        accumulatedAfterTaxCashFlowCents,
+        saleSellingCostsCents,
+        capitalGainsTaxCents,
+        saleEquityAfterTaxCents,
+        totalNetProceedsAfterTaxCents: accumulatedAfterTaxCashFlowCents + saleEquityAfterTaxCents,
+      };
+    }),
   };
 }
 
@@ -139,6 +165,15 @@ export async function computeFinancials(input: PropertyInput): Promise<ComputedF
     const detail = await res.text().catch(() => '');
     throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`);
   }
-  const raw = (await res.json()) as RawComputedFinancials;
-  return toComputedFinancials(raw);
+  try {
+    const raw = (await res.json()) as RawComputedFinancials;
+    return toComputedFinancials(raw);
+  } catch (err) {
+    // A 200 with an unparseable or shape-drifted body is still "the sidecar
+    // isn't giving usable results" from this caller's perspective — the
+    // route only special-cases QuantUnavailable into a clean 503, so an
+    // ordinary SyntaxError/TypeError here would otherwise surface as a
+    // generic 500.
+    throw new QuantUnavailable(`malformed response body: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }

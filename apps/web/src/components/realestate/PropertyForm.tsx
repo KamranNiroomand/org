@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { parseMoney } from '@org/shared';
 import { Button, Card, CardHeader, Input, Notice, Select, Textarea } from '../ui';
 import { api, type AnalyzePropertyResponse, type Province, type PropertyInput } from '../../lib/api';
+import { useSettings } from '../../lib/settings';
 
 /**
  * The property intake form. Every field maps directly onto `PropertyInput`
@@ -68,9 +69,9 @@ const EMPTY: FormState = {
   listingDescription: '',
 };
 
-function centsOr(value: string, fallbackCents: number): number {
+function centsOr(value: string, fallbackCents: number, currency: string): number {
   if (value.trim() === '') return fallbackCents;
-  return parseMoney(value, 'CAD')?.cents ?? fallbackCents;
+  return parseMoney(value, currency)?.cents ?? fallbackCents;
 }
 
 function numOr(value: string, fallback: number): number {
@@ -85,29 +86,29 @@ function intOrNull(value: string): number | null {
   return Number.isFinite(n) ? Math.round(n) : null;
 }
 
-function buildPropertyInput(f: FormState): PropertyInput {
+function buildPropertyInput(f: FormState, currency: string): PropertyInput {
   return {
     address: f.address.trim(),
-    askingPriceCents: centsOr(f.askingPrice, 0),
+    askingPriceCents: centsOr(f.askingPrice, 0, currency),
     propertyType: f.propertyType.trim() || 'House',
     beds: intOrNull(f.beds),
     baths: f.baths.trim() === '' ? null : Number(f.baths),
     sqft: intOrNull(f.sqft),
     yearBuilt: intOrNull(f.yearBuilt),
-    hoaFeeCentsMonthly: centsOr(f.hoaFeeMonthly, 0),
-    estimatedAnnualPropertyTaxCents: centsOr(f.estimatedAnnualPropertyTax, 0),
-    estimatedAnnualInsuranceCents: centsOr(f.estimatedAnnualInsurance, 120_000),
+    hoaFeeCentsMonthly: centsOr(f.hoaFeeMonthly, 0, currency),
+    estimatedAnnualPropertyTaxCents: centsOr(f.estimatedAnnualPropertyTax, 0, currency),
+    estimatedAnnualInsuranceCents: centsOr(f.estimatedAnnualInsurance, 120_000, currency),
     downPaymentPct: numOr(f.downPaymentPct, 20),
     mortgageRatePct: numOr(f.mortgageRatePct, 5.5),
     amortizationYears: numOr(f.amortizationYears, 25),
-    expectedMonthlyRentCents: centsOr(f.expectedMonthlyRent, 0),
+    expectedMonthlyRentCents: centsOr(f.expectedMonthlyRent, 0, currency),
     marginalTaxRatePct: numOr(f.marginalTaxRatePct, 40),
     province: f.province,
     city: f.city.trim() || null,
     isPrimaryResidence: f.isPrimaryResidence,
     realtorCommissionPct: numOr(f.realtorCommissionPct, 5),
-    legalFeesCents: centsOr(f.legalFees, 150_000),
-    otherClosingCostsCents: centsOr(f.otherClosingCosts, 80_000),
+    legalFeesCents: centsOr(f.legalFees, 150_000, currency),
+    otherClosingCostsCents: centsOr(f.otherClosingCosts, 80_000, currency),
     maintenanceReservePct: numOr(f.maintenanceReservePct, 5),
     vacancyAllowancePct: numOr(f.vacancyAllowancePct, 4),
     propertyMgmtFeePct: numOr(f.propertyMgmtFeePct, 0),
@@ -130,11 +131,13 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 export function PropertyForm({ onStarted }: { onStarted: (res: AnalyzePropertyResponse) => void }) {
+  const { baseCurrency } = useSettings();
+  const currency = baseCurrency || 'CAD';
   const [f, setF] = useState<FormState>(EMPTY);
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setF((prev) => ({ ...prev, [key]: value }));
 
   const submit = useMutation({
-    mutationFn: () => api.post<AnalyzePropertyResponse>('/api/realestate/analyze', buildPropertyInput(f)),
+    mutationFn: () => api.post<AnalyzePropertyResponse>('/api/realestate/analyze', buildPropertyInput(f, currency)),
     onSuccess: onStarted,
   });
 
