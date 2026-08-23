@@ -5,19 +5,21 @@ import { formatMoney, money, parseMoney } from '@org/shared';
 import { AllocationBars, StatTile } from '../components/charts';
 import { MarketMap } from '../components/MarketMap';
 import { OptionsTab } from '../components/options/OptionsTab';
+import { RealEstateTab } from '../components/realestate/RealEstateTab';
 import { WatchlistTab } from '../components/watchlist/WatchlistTab';
 import { Page, PageHeader } from '../components/PageHeader';
 import { Badge, Button, Card, CardHeader, Empty, Input, Skeleton, cn } from '../components/ui';
 import { api, type PortfolioResponse } from '../lib/api';
 import { useSettings } from '../lib/settings';
 
-type Tab = 'market' | 'portfolio' | 'options' | 'watchlist' | 'screener';
+type Tab = 'market' | 'portfolio' | 'options' | 'watchlist' | 'realestate' | 'screener';
 
 const TABS: Array<[Tab, string]> = [
   ['market', 'Market'],
   ['portfolio', 'Portfolio'],
   ['options', 'Options'],
   ['watchlist', 'Watchlist'],
+  ['realestate', 'Real Estate'],
   ['screener', 'Screener'],
 ];
 
@@ -120,6 +122,8 @@ export function InvestmentsPage() {
         {tab === 'options' && <OptionsTab />}
 
         {tab === 'watchlist' && <WatchlistTab />}
+
+        {tab === 'realestate' && <RealEstateTab />}
 
         {tab === 'screener' && (
           <Placeholder
