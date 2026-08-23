@@ -63,14 +63,52 @@ const MAX_RETRIES = 4;
  * on this one clock rather than actually overlapping on the wire — correct
  * for staying under budget, but it means that `Promise.all` no longer buys
  * real parallelism, only readability.
+ *
+ * That fix cut losses from 321/566 to 145/566 on the next real run, not to
+ * zero — meaning `POLYGON_MAX_REQUESTS_PER_MINUTE` (default 60) is still
+ * optimistic against the account's actual entitlement, which this app has no
+ * way to read from the vendor directly. Rather than guess a second static
+ * number, the pace now adapts: every 429 slows the shared rate down
+ * (`BACKOFF_GROWTH`×, capped at `MAX_BACKOFF_MULTIPLIER`), and a long enough
+ * run of clean responses eases it back toward the configured baseline. The
+ * configured rate becomes a ceiling this converges toward, not a number
+ * assumed correct from the first request.
  */
+const BASE_REQUEST_INTERVAL_MS = 60_000 / config.market.polygonMaxRequestsPerMinute;
+const MAX_BACKOFF_MULTIPLIER = 8;
+const BACKOFF_GROWTH = 1.5;
+/** Consecutive clean responses required before easing the slowdown back —
+ * deliberately high: recovering too eagerly just walks back into the same
+ * 429s the backoff was slowing down for. */
+const RECOVERY_STREAK = 40;
+const RECOVERY_STEP = 0.85;
+
 let nextRequestAt = 0;
-const requestIntervalMs = 60_000 / config.market.polygonMaxRequestsPerMinute;
+let backoffMultiplier = 1;
+let consecutiveSuccesses = 0;
+
 async function paceRequest(): Promise<void> {
   const now = Date.now();
   const scheduledAt = Math.max(now, nextRequestAt);
-  nextRequestAt = scheduledAt + requestIntervalMs;
+  nextRequestAt = scheduledAt + BASE_REQUEST_INTERVAL_MS * backoffMultiplier;
   if (scheduledAt > now) await sleep(scheduledAt - now);
+}
+
+/** Called on every 429, from any caller sharing this pacer — see the module
+ * comment above for why the shared rate slows down rather than just this
+ * one caller retrying. */
+function recordRateLimited(): void {
+  backoffMultiplier = Math.min(MAX_BACKOFF_MULTIPLIER, backoffMultiplier * BACKOFF_GROWTH);
+  consecutiveSuccesses = 0;
+}
+
+function recordSuccess(): void {
+  if (backoffMultiplier === 1) return;
+  consecutiveSuccesses += 1;
+  if (consecutiveSuccesses >= RECOVERY_STREAK) {
+    backoffMultiplier = Math.max(1, backoffMultiplier * RECOVERY_STEP);
+    consecutiveSuccesses = 0;
+  }
 }
 
 interface PolygonEnvelope<T> {
@@ -143,10 +181,15 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<PolygonEnvelo
       continue;
     }
 
-    if (res.ok) return (await res.json()) as PolygonEnvelope<T>;
+    if (res.ok) {
+      recordSuccess();
+      return (await res.json()) as PolygonEnvelope<T>;
+    }
 
     const body = await res.text().catch(() => '');
     lastError = `${res.status} ${res.statusText}${body ? ` — ${body.slice(0, 300)}` : ''}`;
+
+    if (res.status === 429) recordRateLimited();
 
     const retryable = res.status === 429 || res.status >= 500;
     if (!retryable || attempt === MAX_RETRIES) {
