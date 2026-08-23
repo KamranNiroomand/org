@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.classify import SymbolRow, classify_universe
+from app.exit import ExitTarget, compute_initial_exit_target, evaluate_exit
 from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import RankedContract, latest_model_dir, load_model, rank_day, score_held_contracts
 
@@ -236,15 +237,34 @@ class RankedContractResponse(BaseModel):
     ev: float
     ev_per_risk: float
     prob_profit: float
+    #: A first-pass exit plan, populated only for a fresh entry candidate
+    #: (`/rank`, where `entry_day`/`horizon` are known) — null for a
+    #: position-health re-score (`/position-health`), which reports EV
+    #: against a target the position already has recorded elsewhere. See
+    #: exit.py's own module docstring: explicitly a tunable starting rule,
+    #: not a validated one.
+    suggested_target_exit_price: float | None = None
+    suggested_stop_loss_price: float | None = None
+    suggested_target_exit_date: str | None = None
 
     @classmethod
-    def from_ranked(cls, c: RankedContract) -> "RankedContractResponse":
+    def from_ranked(
+        cls, c: RankedContract, entry_day: str | None = None, horizon: int | None = None
+    ) -> "RankedContractResponse":
+        target = (
+            compute_initial_exit_target(c.market_price, c.expiry, entry_day, horizon)
+            if entry_day is not None and horizon is not None
+            else None
+        )
         return cls(
             occ_symbol=c.occ_symbol, underlying=c.underlying, expiry=c.expiry, type=c.type,
             strike=c.strike, dte=c.dte, market_price=c.market_price, market_iv=c.market_iv,
             forecast_vol=c.forecast_vol, forecast_drift=c.forecast_drift,
             forecast_value=c.forecast_value, ev=c.ev, ev_per_risk=c.ev_per_risk,
             prob_profit=c.prob_profit,
+            suggested_target_exit_price=target.target_exit_price if target else None,
+            suggested_stop_loss_price=target.stop_loss_price if target else None,
+            suggested_target_exit_date=target.target_exit_date if target else None,
         )
 
 
@@ -276,11 +296,12 @@ def rank(request: RankRequest) -> RankResponse:
         # this whole shared sidecar process down with it.
         raise HTTPException(status_code=409, detail=str(e)) from e
 
+    horizon = manifest.get("horizon")
     return RankResponse(
         model_run_id=manifest["run_id"],
         model_beats_baseline=manifest["metrics"]["beats_baseline"],
         model_information_coefficient=manifest["metrics"]["information_coefficient"],
-        contracts=[RankedContractResponse.from_ranked(c) for c in ranked],
+        contracts=[RankedContractResponse.from_ranked(c, entry_day=request.day, horizon=horizon) for c in ranked],
     )
 
 
@@ -333,4 +354,64 @@ def position_health(request: PositionHealthRequest) -> PositionHealthResponse:
             occ: (RankedContractResponse.from_ranked(c) if c is not None else None)
             for occ, c in scored.items()
         },
+    )
+
+
+class ExitTargetRequest(BaseModel):
+    target_exit_price: float
+    stop_loss_price: float
+    target_exit_date: str
+
+
+class ExitDecisionRequest(BaseModel):
+    """Everything `evaluate_exit` needs, all of it already known to the
+    caller — see exit.py's own module docstring for why this endpoint never
+    touches the model or the database: Node already has a live price (from
+    its own Polygon fetch) and today's EV/news view (from the once-daily
+    `/position-health` call), and re-deriving either here on every intraday
+    tick would be the unpaced-cost mistake this project has already made
+    once with the options vendor itself.
+    """
+
+    current_price: float
+    dte: int = Field(ge=0)
+    target: ExitTargetRequest
+    entry_ev: float | None = None
+    current_ev: float | None = None
+    new_documents_count: int = 0
+
+
+class ExitDecisionResponse(BaseModel):
+    action: str
+    new_target_exit_price: float | None
+    new_target_exit_date: str | None
+    reason: str
+    triggered_by: str
+
+
+@app.post("/exit-decision", response_model=ExitDecisionResponse)
+def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
+    """The recheck an open position gets every time the intraday exit job
+    fires — see `apps/server/src/lib/options/exitEngine.ts`.
+    """
+    target = ExitTarget(
+        target_exit_price=request.target.target_exit_price,
+        stop_loss_price=request.target.stop_loss_price,
+        target_exit_date=request.target.target_exit_date,
+        reason="",
+    )
+    decision = evaluate_exit(
+        current_price=request.current_price,
+        dte=request.dte,
+        target=target,
+        entry_ev=request.entry_ev,
+        current_ev=request.current_ev,
+        new_documents_count=request.new_documents_count,
+    )
+    return ExitDecisionResponse(
+        action=decision.action,
+        new_target_exit_price=decision.new_target_exit_price,
+        new_target_exit_date=decision.new_target_exit_date,
+        reason=decision.reason,
+        triggered_by=decision.triggered_by,
     )

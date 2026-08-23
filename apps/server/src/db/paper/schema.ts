@@ -69,6 +69,28 @@ export const paperOrders = sqliteTable(
     /** 'manual' today; 'model' once a ranked signal can place its own orders. */
     source: text('source', { enum: ['manual', 'model'] }).notNull().default('manual'),
     notes: text('notes'),
+    /**
+     * The exit plan, present only on a `source: 'model'` order the exit
+     * engine manages (see `exitEngine.ts`) — null for a manual order, which
+     * has no automated exit to track. All three null together, or all set:
+     * a position never carries a price target without a date or vice versa.
+     * Initial values come from `services/quant/app/exit.py`'s
+     * `compute_initial_exit_target`; the profit target and date can move
+     * over the position's life — see `paperExitRevisions` for the history
+     * of why. The stop-loss does not move once set: a moving stop is a
+     * different (and easy to get wrong) strategy this v1 does not attempt.
+     */
+    targetExitPriceE4: integer('target_exit_price_e4'),
+    stopLossPriceE4: integer('stop_loss_price_e4'),
+    targetExitDate: text('target_exit_date'),
+    /**
+     * The ranked signal's expected value at the moment this order opened —
+     * the reference point `exitEngine.ts` compares against on every
+     * recheck to detect a sign flip (see exit.py's `evaluate_exit`). Null
+     * for a manual order, which has no ranking EV to record.
+     */
+    entryEv: real('entry_ev'),
+    exitUpdatedAt: text('exit_updated_at'),
     openedAt: text('opened_at').notNull(),
     closedAt: text('closed_at'),
   },
@@ -76,6 +98,34 @@ export const paperOrders = sqliteTable(
     index('paper_orders_status_idx').on(t.status),
     index('paper_orders_occ_idx').on(t.occSymbol),
   ],
+);
+
+/**
+ * Why a position's exit target moved, not just its current value.
+ *
+ * `exitEngine.ts` runs intraday and can revise `paperOrders.targetExitPriceE4`/
+ * `targetExitDate` every time it fires — a bare "current target" column with
+ * no history would make it impossible to tell whether the model is behaving
+ * sensibly over time or flapping. Same "show your work" instinct as the
+ * multi-agent panel's per-round transcript.
+ */
+export const paperExitRevisions = sqliteTable(
+  'paper_exit_revisions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    orderId: text('order_id')
+      .notNull()
+      .references(() => paperOrders.id, { onDelete: 'cascade' }),
+    revisedAt: text('revised_at').notNull(),
+    oldTargetExitPriceE4: integer('old_target_exit_price_e4'),
+    newTargetExitPriceE4: integer('new_target_exit_price_e4'),
+    oldTargetExitDate: text('old_target_exit_date'),
+    newTargetExitDate: text('new_target_exit_date'),
+    reason: text('reason').notNull(),
+    /** Whether a deterministic rule or an LLM escalation decided this — see exitEngine.ts. */
+    triggeredBy: text('triggered_by', { enum: ['rule', 'llm'] }).notNull(),
+  },
+  (t) => [index('paper_exit_revisions_order_idx').on(t.orderId)],
 );
 
 /**
