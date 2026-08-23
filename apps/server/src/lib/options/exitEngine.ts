@@ -5,13 +5,28 @@ import { marketDb } from '../../db/market/index.js';
 import { optionContracts } from '../../db/market/schema.js';
 import { paperDb } from '../../db/paper/index.js';
 import { paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
-import { adviseOnExit } from '../agents/exitAdvisor.js';
+import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
 import { closeOrder } from '../paper.js';
 import { evaluateExit, positionHealth as scoreHeldContracts, QuantUnavailable } from '../quant.js';
 import { readDocumentsSince } from '../text/news.js';
 import { nowIso, todayKey } from '../util.js';
 import { PolygonProvider } from './polygon.js';
 import type { OptionsProvider } from './provider.js';
+
+/**
+ * The quant/LLM calls this orchestrator makes, injectable the same way
+ * `capture.ts` injects an `OptionsProvider` — so a test can exercise the
+ * actual close/revise/escalate branching without a live Python sidecar or
+ * a live Anthropic key, rather than only ever exercising the "unavailable"
+ * fallback path.
+ */
+export interface ExitEngineDeps {
+  evaluateExit: typeof evaluateExit;
+  scoreHeldContracts: typeof scoreHeldContracts;
+  adviseOnExit: (input: Parameters<typeof adviseOnExit>[0]) => Promise<ExitAdvisorResult>;
+}
+
+const defaultDeps: ExitEngineDeps = { evaluateExit, scoreHeldContracts, adviseOnExit };
 
 /**
  * The intraday recheck for every open, model-managed paper position — see
@@ -53,6 +68,7 @@ function managedOpenOrders() {
 export async function runExitEngine(
   log: FastifyBaseLogger,
   provider: OptionsProvider = new PolygonProvider(),
+  deps: ExitEngineDeps = defaultDeps,
 ): Promise<ExitEngineSummary> {
   const startedAt = nowIso();
   const summary: ExitEngineSummary = {
@@ -96,7 +112,7 @@ export async function runExitEngine(
       let currentEv: number | undefined;
       let modelBeatsBaseline = false;
       try {
-        const health = await scoreHeldContracts(todayKey(), [
+        const health = await deps.scoreHeldContracts(todayKey(), [
           { occSymbol: order.occSymbol, underlying: contract.underlying },
         ]);
         currentEv = health.contracts[order.occSymbol]?.ev ?? undefined;
@@ -108,7 +124,7 @@ export async function runExitEngine(
         if (!(err instanceof QuantUnavailable)) throw err;
       }
 
-      const decision = await evaluateExit({
+      const decision = await deps.evaluateExit({
         currentPriceE4: quote.bidE4,
         dte,
         target: {
@@ -145,7 +161,7 @@ export async function runExitEngine(
       }
       summary.llmCallsMade += 1;
 
-      const advice = await adviseOnExit({
+      const advice = await deps.adviseOnExit({
         occSymbol: order.occSymbol,
         underlying: contract.underlying,
         escalationReason: decision.reason,

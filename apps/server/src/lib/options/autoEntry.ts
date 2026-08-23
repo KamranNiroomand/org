@@ -52,10 +52,17 @@ function pickCandidate(contracts: RankedContract[], heldUnderlyings: Set<string>
   return eligible.reduce((best, c) => (c.ev > best.ev ? c : best));
 }
 
-export async function runAutoEntry(day: string): Promise<AutoEntryResult> {
+/**
+ * `rankDay` is injectable — same reason `exitEngine.ts` injects its quant
+ * calls: the test suite's `QUANT_URL` is pinned unreachable (see
+ * vitest.config.ts), so exercising the actual candidate-selection logic
+ * needs a real ranked list supplied directly, not just the honest
+ * "sidecar unavailable" fallback.
+ */
+export async function runAutoEntry(day: string, rankDayFn: typeof rankDay = rankDay): Promise<AutoEntryResult> {
   let ranked: RankedContract[];
   try {
-    ranked = (await rankDay(day, 25, true)).contracts;
+    ranked = (await rankDayFn(day, 25, true)).contracts;
   } catch (err) {
     const reason =
       err instanceof QuantRefusal || err instanceof QuantUnavailable
