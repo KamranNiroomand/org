@@ -65,7 +65,18 @@ function chainFromFixture(): ChainQuote[] {
 class StubProvider implements OptionsProvider {
   readonly name = 'stub';
   calls = 0;
-  constructor(private readonly failOn: Set<string> = new Set()) {}
+  readonly rateLimitState?: () => { throttled: boolean; multiplier: number };
+
+  constructor(
+    private readonly failOn: Set<string> = new Set(),
+    rateLimit?: { throttled: boolean; multiplier: number },
+  ) {
+    // A real OptionsProvider either has this method or doesn't — matched
+    // here by only assigning it when a test actually wants rate-limit
+    // state reported, rather than always defining it and returning
+    // undefined (which the interface's optional-method contract disallows).
+    if (rateLimit) this.rateLimitState = () => rateLimit;
+  }
 
   async fetchChain(request: ChainRequest): Promise<ChainQuote[]> {
     this.calls += 1;
@@ -141,6 +152,18 @@ describe('chain capture', () => {
     await captureChains(new StubProvider(), ['NVDA']);
     const after = marketDb.select().from(optionQuotes).all().length;
     expect(after).toBe(before);
+  });
+
+  it('notes a still-throttled rate-limit pacer in the run summary', async () => {
+    const provider = new StubProvider(undefined, { throttled: true, multiplier: 4 });
+    const summary = await captureChains(provider, ['NVDA']);
+    expect(summary.errors.some((e) => e.includes('still throttled at 4.0x'))).toBe(true);
+  });
+
+  it('says nothing about the pacer when the provider reports no throttling', async () => {
+    const provider = new StubProvider(undefined, { throttled: false, multiplier: 1 });
+    const summary = await captureChains(provider, ['NVDA']);
+    expect(summary.errors.some((e) => e.includes('throttled'))).toBe(false);
   });
 
   it('keeps going when one underlying fails, and records why', async () => {

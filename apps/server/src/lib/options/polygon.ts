@@ -63,14 +63,82 @@ const MAX_RETRIES = 4;
  * on this one clock rather than actually overlapping on the wire — correct
  * for staying under budget, but it means that `Promise.all` no longer buys
  * real parallelism, only readability.
+ *
+ * That fix cut losses from 321/566 to 145/566 on the next real run, not to
+ * zero — meaning `POLYGON_MAX_REQUESTS_PER_MINUTE` (default 60) is still
+ * optimistic against the account's actual entitlement, which this app has no
+ * way to read from the vendor directly. Rather than guess a second static
+ * number, the pace now adapts: a 429 slows the shared rate down
+ * (`BACKOFF_GROWTH`×, capped at `MAX_BACKOFF_MULTIPLIER`), and a quiet period
+ * with no 429s eases it back toward the configured baseline. The configured
+ * rate becomes a ceiling this converges toward, not a number assumed correct
+ * from the first request.
+ *
+ * Two things this got wrong on the first pass, caught in review before ever
+ * running against production traffic:
+ *
+ * - Growth is counted once per *logical request* (`get()`'s own retry loop
+ *   sets `rateLimited` at most once — see below), not once per HTTP attempt.
+ *   `get()` retries the same request up to `MAX_RETRIES` times; counting
+ *   every attempt let one unlucky request's own retry chain alone walk the
+ *   shared multiplier to the cap in seconds, conflating "one request had a
+ *   bad time" with "the vendor is broadly rate-limiting everyone."
+ * - Recovery is gated on *wall-clock quiet time* since the last 429
+ *   (`RECOVERY_QUIET_MS`), not a counter of consecutive clean responses. A
+ *   streak counter can never reach its threshold — and the pacer can never
+ *   recover, for the rest of the process's life — against a background rate
+ *   of occasional 429s that never quite goes to zero; time-based recovery
+ *   only needs one actual quiet stretch, however many requests that takes.
  */
+const BASE_REQUEST_INTERVAL_MS = 60_000 / config.market.polygonMaxRequestsPerMinute;
+const MAX_BACKOFF_MULTIPLIER = 8;
+const BACKOFF_GROWTH = 1.5;
+/** How long a quiet stretch (no 429s) has to be before easing the slowdown
+ * back a step — and the minimum spacing between easing steps, so recovery
+ * still takes several such intervals to fully unwind rather than snapping
+ * back the instant one interval passes. */
+const RECOVERY_QUIET_MS = 2 * 60_000;
+const RECOVERY_STEP = 0.85;
+
 let nextRequestAt = 0;
-const requestIntervalMs = 60_000 / config.market.polygonMaxRequestsPerMinute;
+let backoffMultiplier = 1;
+let lastRateLimitedAt = 0;
+let lastRecoveryStepAt = 0;
+
 async function paceRequest(): Promise<void> {
+  maybeRecover();
   const now = Date.now();
   const scheduledAt = Math.max(now, nextRequestAt);
-  nextRequestAt = scheduledAt + requestIntervalMs;
+  nextRequestAt = scheduledAt + BASE_REQUEST_INTERVAL_MS * backoffMultiplier;
   if (scheduledAt > now) await sleep(scheduledAt - now);
+}
+
+/** Called at most once per logical request, from any caller sharing this
+ * pacer — see the module comment above for why the shared rate slows down
+ * rather than just this one caller's own retry backoff. */
+function recordRateLimited(): void {
+  backoffMultiplier = Math.min(MAX_BACKOFF_MULTIPLIER, backoffMultiplier * BACKOFF_GROWTH);
+  lastRateLimitedAt = Date.now();
+}
+
+/** Eases the slowdown back one step once both the most recent 429 and the
+ * most recent easing step are far enough in the past — checked on every
+ * paced request rather than only on success, so recovery still progresses
+ * even if nothing calls back in after a long quiet stretch. */
+function maybeRecover(): void {
+  if (backoffMultiplier === 1) return;
+  const now = Date.now();
+  if (now - lastRateLimitedAt < RECOVERY_QUIET_MS) return;
+  if (now - lastRecoveryStepAt < RECOVERY_QUIET_MS) return;
+  backoffMultiplier = Math.max(1, backoffMultiplier * RECOVERY_STEP);
+  lastRecoveryStepAt = now;
+}
+
+/** For a caller (capture.ts) to note in its own run summary when a run
+ * finishes with the shared pacer still throttled — this module has no
+ * logger of its own to report that fact through directly. */
+function getPolygonBackoffMultiplier(): number {
+  return backoffMultiplier;
 }
 
 interface PolygonEnvelope<T> {
@@ -131,6 +199,11 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<PolygonEnvelo
   url.searchParams.set('apiKey', apiKey());
 
   let lastError = '';
+  // Set at most once per call to get(), regardless of how many of its own
+  // retry attempts hit 429 — see recordRateLimited's own doc comment for
+  // why one flaky request retrying 5 times must not count as 5 independent
+  // rate-limit signals against the shared pacer.
+  let rateLimitedThisCall = false;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     let res: Response;
     try {
@@ -147,6 +220,11 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<PolygonEnvelo
 
     const body = await res.text().catch(() => '');
     lastError = `${res.status} ${res.statusText}${body ? ` — ${body.slice(0, 300)}` : ''}`;
+
+    if (res.status === 429 && !rateLimitedThisCall) {
+      recordRateLimited();
+      rateLimitedThisCall = true;
+    }
 
     const retryable = res.status === 429 || res.status >= 500;
     if (!retryable || attempt === MAX_RETRIES) {
@@ -202,6 +280,11 @@ function contractType(raw: string | undefined): OptionType | null {
 
 export class PolygonProvider implements OptionsProvider {
   readonly name = 'polygon';
+
+  rateLimitState(): { throttled: boolean; multiplier: number } {
+    const multiplier = getPolygonBackoffMultiplier();
+    return { throttled: multiplier > 1, multiplier };
+  }
 
   async fetchChain(request: ChainRequest): Promise<ChainQuote[]> {
     if (request.asOfDay) {
