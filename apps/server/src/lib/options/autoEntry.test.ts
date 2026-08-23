@@ -1,7 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { formatOccSymbol, toE4 } from '@org/shared';
-import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
 import { runMarketMigrations } from '../../db/market/migrate.js';
 import { optionContracts } from '../../db/market/schema.js';
@@ -62,21 +61,15 @@ function rankFn(contracts: RankedContract[]): (day: string, top?: number, force?
   return async () => ({ model_run_id: 'test', model_beats_baseline: false, model_information_coefficient: 0, contracts });
 }
 
-const originalMinEvPerRisk = config.market.autoEntry.minEvPerRisk;
-const originalMinProbProfit = config.market.autoEntry.minProbProfit;
-
+// Exercised against the real ambient defaults (AUTO_ENTRY_MIN_EV_PER_RISK
+// 0.05, AUTO_ENTRY_MIN_PROB_PROFIT 0.5 — see config.ts), not overridden:
+// `config` is deliberately read-only in this codebase, and the fixtures
+// below are chosen to sit clearly above or below those real defaults.
 beforeEach(() => {
   runMarketMigrations();
   runPaperMigrations();
   paperDb.delete(paperOrders).run();
   marketDb.delete(optionContracts).run();
-  config.market.autoEntry.minEvPerRisk = 0.05;
-  config.market.autoEntry.minProbProfit = 0.5;
-});
-
-afterEach(() => {
-  config.market.autoEntry.minEvPerRisk = originalMinEvPerRisk;
-  config.market.autoEntry.minProbProfit = originalMinProbProfit;
 });
 
 describe('runAutoEntry', () => {

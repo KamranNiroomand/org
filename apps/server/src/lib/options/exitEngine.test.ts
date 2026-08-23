@@ -1,8 +1,7 @@
-import { beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import pino from 'pino';
 import { formatOccSymbol, toE4 } from '@org/shared';
-import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
 import { runMarketMigrations } from '../../db/market/migrate.js';
 import { optionContracts } from '../../db/market/schema.js';
@@ -109,9 +108,9 @@ const NEVER_REVIEW_DEPS: ExitEngineDeps = {
   adviseOnExit: async () => {
     throw new Error('adviseOnExit should not be called on this path');
   },
+  anthropicConfigured: false,
+  maxCallsPerRun: 30,
 };
-
-const originalMaxCalls = config.market.exitRecheck.maxCallsPerRun;
 
 beforeEach(() => {
   runMarketMigrations();
@@ -120,10 +119,6 @@ beforeEach(() => {
   paperDb.delete(paperOrders).run();
   marketDb.delete(optionContracts).run();
   seedContract();
-});
-
-afterEach(() => {
-  config.market.exitRecheck.maxCallsPerRun = originalMaxCalls;
 });
 
 describe('runExitEngine', () => {
@@ -189,9 +184,6 @@ describe('runExitEngine', () => {
   });
 
   it('escalates to review but records an error rather than closing when ANTHROPIC_API_KEY is not set', async () => {
-    // Ambient test config has no ANTHROPIC_API_KEY (see vitest.config.ts) —
-    // config.anthropic.configured is already false here, no stubbing needed.
-    expect(config.anthropic.configured).toBe(false);
     const id = openManagedPosition();
     const deps: ExitEngineDeps = {
       ...NEVER_REVIEW_DEPS,
@@ -211,90 +203,78 @@ describe('runExitEngine', () => {
   });
 
   it('records a revision and updates the target when the advisor moves it', async () => {
-    config.anthropic.configured = true;
-    try {
-      const id = openManagedPosition();
-      const deps: ExitEngineDeps = {
-        ...NEVER_REVIEW_DEPS,
-        evaluateExit: async () => ({
-          action: 'needs_review',
-          newTargetExitPriceE4: null,
-          newTargetExitDate: null,
-          reason: 'new documents',
-          triggeredBy: 'new_news',
-        }),
-        adviseOnExit: async () => ({
-          action: 'move_target',
-          newTargetExitPriceE4: toE4(1.8),
-          newTargetExitDate: '2026-09-10',
-          reasoning: 'Thesis strengthened by the new filing.',
-          citedInputs: ['newDocuments'],
-        }),
-      };
-      const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
-      expect(summary.revised).toBe(1);
-      const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
-      expect(order.targetExitPriceE4).toBe(toE4(1.8));
-      expect(order.targetExitDate).toBe('2026-09-10');
-      const revisions = paperDb.select().from(paperExitRevisions).where(eq(paperExitRevisions.orderId, id)).all();
-      expect(revisions).toHaveLength(1);
-      expect(revisions[0]!.triggeredBy).toBe('llm');
-      expect(revisions[0]!.oldTargetExitPriceE4).toBe(toE4(1.5));
-    } finally {
-      config.anthropic.configured = false;
-    }
+    const id = openManagedPosition();
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      anthropicConfigured: true,
+      evaluateExit: async () => ({
+        action: 'needs_review',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'new documents',
+        triggeredBy: 'new_news',
+      }),
+      adviseOnExit: async () => ({
+        action: 'move_target',
+        newTargetExitPriceE4: toE4(1.8),
+        newTargetExitDate: '2026-09-10',
+        reasoning: 'Thesis strengthened by the new filing.',
+        citedInputs: ['newDocuments'],
+      }),
+    };
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+    expect(summary.revised).toBe(1);
+    const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
+    expect(order.targetExitPriceE4).toBe(toE4(1.8));
+    expect(order.targetExitDate).toBe('2026-09-10');
+    const revisions = paperDb.select().from(paperExitRevisions).where(eq(paperExitRevisions.orderId, id)).all();
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]!.triggeredBy).toBe('llm');
+    expect(revisions[0]!.oldTargetExitPriceE4).toBe(toE4(1.5));
   });
 
   it('closes the position when the advisor itself recommends exiting', async () => {
-    config.anthropic.configured = true;
-    try {
-      const id = openManagedPosition();
-      const deps: ExitEngineDeps = {
-        ...NEVER_REVIEW_DEPS,
-        evaluateExit: async () => ({
-          action: 'needs_review',
-          newTargetExitPriceE4: null,
-          newTargetExitDate: null,
-          reason: 'EV flipped sign',
-          triggeredBy: 'ev_sign_flip',
-        }),
-        adviseOnExit: async () => ({
-          action: 'exit_now',
-          newTargetExitPriceE4: null,
-          newTargetExitDate: null,
-          reasoning: 'The flip reflects a real, durable change.',
-          citedInputs: ['currentEv'],
-        }),
-      };
-      const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
-      expect(summary.closed).toBe(1);
-      expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('closed');
-    } finally {
-      config.anthropic.configured = false;
-    }
+    const id = openManagedPosition();
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      anthropicConfigured: true,
+      evaluateExit: async () => ({
+        action: 'needs_review',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'EV flipped sign',
+        triggeredBy: 'ev_sign_flip',
+      }),
+      adviseOnExit: async () => ({
+        action: 'exit_now',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reasoning: 'The flip reflects a real, durable change.',
+        citedInputs: ['currentEv'],
+      }),
+    };
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+    expect(summary.closed).toBe(1);
+    expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('closed');
   });
 
   it('stops spending once the LLM call budget for the run is exhausted', async () => {
-    config.anthropic.configured = true;
-    config.market.exitRecheck.maxCallsPerRun = 0;
-    try {
-      openManagedPosition();
-      const deps: ExitEngineDeps = {
-        ...NEVER_REVIEW_DEPS,
-        evaluateExit: async () => ({
-          action: 'needs_review',
-          newTargetExitPriceE4: null,
-          newTargetExitDate: null,
-          reason: 'new documents',
-          triggeredBy: 'new_news',
-        }),
-      };
-      const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
-      expect(summary.status).toBe('partial');
-      expect(summary.llmCallsMade).toBe(0);
-      expect(summary.errors.some((e) => e.includes('budget exhausted'))).toBe(true);
-    } finally {
-      config.anthropic.configured = false;
-    }
+    openManagedPosition();
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      anthropicConfigured: true,
+      maxCallsPerRun: 0,
+      evaluateExit: async () => ({
+        action: 'needs_review',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'new documents',
+        triggeredBy: 'new_news',
+      }),
+    };
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+    expect(summary.status).toBe('partial');
+    expect(summary.llmCallsMade).toBe(0);
+    expect(summary.errors.some((e) => e.includes('budget exhausted'))).toBe(true);
   });
 });

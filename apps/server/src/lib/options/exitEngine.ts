@@ -24,9 +24,20 @@ export interface ExitEngineDeps {
   evaluateExit: typeof evaluateExit;
   scoreHeldContracts: typeof scoreHeldContracts;
   adviseOnExit: (input: Parameters<typeof adviseOnExit>[0]) => Promise<ExitAdvisorResult>;
+  /** `config.anthropic.configured`/`config.market.exitRecheck.maxCallsPerRun`
+   * by default — injected, like the calls above, so a test can flip them
+   * without fighting `config`'s deliberate read-only typing. */
+  anthropicConfigured: boolean;
+  maxCallsPerRun: number;
 }
 
-const defaultDeps: ExitEngineDeps = { evaluateExit, scoreHeldContracts, adviseOnExit };
+const defaultDeps: ExitEngineDeps = {
+  evaluateExit,
+  scoreHeldContracts,
+  adviseOnExit,
+  anthropicConfigured: config.anthropic.configured,
+  maxCallsPerRun: config.market.exitRecheck.maxCallsPerRun,
+};
 
 /**
  * The intraday recheck for every open, model-managed paper position — see
@@ -148,13 +159,13 @@ export async function runExitEngine(
 
       // needs_review — the only outcome that may spend an LLM call.
       summary.escalated += 1;
-      if (!config.anthropic.configured) {
+      if (!deps.anthropicConfigured) {
         summary.errors.push(
           `${order.occSymbol}: escalated to review (${decision.reason}) but ANTHROPIC_API_KEY is not set — left on hold`,
         );
         continue;
       }
-      if (summary.llmCallsMade >= config.market.exitRecheck.maxCallsPerRun) {
+      if (summary.llmCallsMade >= deps.maxCallsPerRun) {
         summary.status = 'partial';
         summary.errors.push(`${order.occSymbol}: exit-recheck LLM budget exhausted — left on hold`);
         continue;
@@ -216,4 +227,16 @@ export async function runExitEngine(
 
   summary.finishedAt = nowIso();
   return summary;
+}
+
+/** Every recorded revision, newest first per order — for the UI's timeline. */
+export function revisionsByOrder(): Map<string, Array<typeof paperExitRevisions.$inferSelect>> {
+  const rows = paperDb.select().from(paperExitRevisions).orderBy(paperExitRevisions.id).all();
+  const byOrder = new Map<string, Array<typeof paperExitRevisions.$inferSelect>>();
+  for (const row of rows) {
+    const existing = byOrder.get(row.orderId) ?? [];
+    existing.unshift(row); // newest first — ascending id order, prepended.
+    byOrder.set(row.orderId, existing);
+  }
+  return byOrder;
 }

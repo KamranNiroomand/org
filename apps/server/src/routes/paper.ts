@@ -6,6 +6,7 @@ import { paperDb } from '../db/paper/index.js';
 import { paperEquity, paperOrders } from '../db/paper/schema.js';
 import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct } from '../lib/paper.js';
 import { computePositionHealth, latestCapturedTradingDay, latestPositionHealth } from '../lib/options/positionHealth.js';
+import { runExitEngine, revisionsByOrder } from '../lib/options/exitEngine.js';
 
 /**
  * Paper trading with artificial money.
@@ -71,10 +72,15 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
     const equity = paperDb.select().from(paperEquity).orderBy(paperEquity.day).all();
     const orders = paperDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all();
     const healthByOrder = latestPositionHealth();
+    const revisionsByOrderId = revisionsByOrder();
     return {
       startingBalanceE4: config.market.paperStartingBalanceE4,
       equity,
-      orders: orders.map((o) => ({ ...o, health: healthByOrder.get(o.id) ?? null })),
+      orders: orders.map((o) => ({
+        ...o,
+        health: healthByOrder.get(o.id) ?? null,
+        exitRevisions: revisionsByOrderId.get(o.id) ?? [],
+      })),
     };
   });
 
@@ -95,6 +101,9 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
     const day = latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
     return computePositionHealth(day);
   });
+
+  /** Manual trigger — the intraday cron (EXIT_RECHECK_CRON) calls the same function. */
+  app.post('/api/paper/exit-recheck', async (req) => runExitEngine(req.log));
 
   app.get<{ Params: { id: string } }>('/api/paper/orders/:id/return', async (req, reply) => {
     const order = paperDb.select().from(paperOrders).all().find((o) => o.id === req.params.id);

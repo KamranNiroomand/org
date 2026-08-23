@@ -25,6 +25,8 @@ import { ingestNewsForUniverse } from './text/news.js';
 import { ingestEdgarForUniverse } from './text/edgar.js';
 import { classifyUnclassifiedDocuments } from './text/classify.js';
 import { computePositionHealth, latestCapturedTradingDay } from './options/positionHealth.js';
+import { runAutoEntry } from './options/autoEntry.js';
+import { runExitEngine, type ExitEngineSummary } from './options/exitEngine.js';
 import { pullMarketSnapshot } from './options/marketPull.js';
 import { evaluatePriceAlerts } from './alerts/evaluate.js';
 import { createNewsAlerts } from './alerts/newsAlerts.js';
@@ -512,6 +514,9 @@ export interface CaptureJobResult {
   priced: number;
   rateRows: number;
   quantAvailable: boolean;
+  /** The day's auto-entry attempt — see autoEntry.ts. Null until capture reaches that step. */
+  autoEntryOccSymbol: string | null;
+  autoEntrySkippedReason: string | null;
   errors: string[];
 }
 
@@ -531,6 +536,8 @@ export async function runOptionsCapture(
     priced: 0,
     rateRows: 0,
     quantAvailable: false,
+    autoEntryOccSymbol: null,
+    autoEntrySkippedReason: null,
     errors: [],
   };
 
@@ -586,6 +593,21 @@ export async function runOptionsCapture(
     {
       const tradingDay = new Date().toISOString().slice(0, 10);
       await runPaperMaintenance(log, tradingDay);
+
+      // After marking/health-checking existing positions against tonight's
+      // fresh quotes: whether to open a new one — see autoEntry.ts. Right
+      // here because this is the first point in the nightly job where
+      // today's quotes actually exist to rank against.
+      try {
+        const entry = await runAutoEntry(tradingDay);
+        result.autoEntryOccSymbol = entry.openedOccSymbol;
+        result.autoEntrySkippedReason = entry.skippedReason;
+        if (entry.openedOccSymbol) {
+          log.info(`Auto-entry opened ${entry.openedOccSymbol}`);
+        }
+      } catch (err) {
+        result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     // Text used to ingest here, once a night — now on its own faster cron
@@ -794,6 +816,7 @@ let textSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let watchlistTextSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let radarTask: ReturnType<typeof cron.schedule> | null = null;
 let panelTask: ReturnType<typeof cron.schedule> | null = null;
+let exitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
 let lastRetrainResult: RetrainJobResult | null = null;
@@ -801,6 +824,7 @@ let lastTextSyncResult: TextSyncResult | null = null;
 let lastWatchlistTextSyncResult: WatchlistTextSyncResult | null = null;
 let lastRadarResult: RadarRunSummary | null = null;
 let lastPanelRunId: string | null = null;
+let lastExitRecheckResult: ExitEngineSummary | null = null;
 
 export const getLastNightlyResult = (): NightlyResult | null => lastResult;
 export const getLastCaptureResult = (): CaptureJobResult | null => lastCaptureResult;
@@ -809,6 +833,7 @@ export const getLastTextSyncResult = (): TextSyncResult | null => lastTextSyncRe
 export const getLastWatchlistTextSyncResult = (): WatchlistTextSyncResult | null => lastWatchlistTextSyncResult;
 export const getLastRadarResult = (): RadarRunSummary | null => lastRadarResult;
 export const getLastPanelRunId = (): string | null => lastPanelRunId;
+export const getLastExitRecheckResult = (): ExitEngineSummary | null => lastExitRecheckResult;
 
 /** Next scheduled chain capture, for the UI to show. */
 export function getNextCaptureRun(): string | null {
@@ -831,6 +856,12 @@ export function getNextRetrainRun(): string | null {
 /** Next scheduled watchlist text sync, for the UI to show. */
 export function getNextWatchlistTextSyncRun(): string | null {
   const next = watchlistTextSyncTask?.getNextRun();
+  return next ? new Date(next).toISOString() : null;
+}
+
+/** Next scheduled exit recheck, for the UI to show. */
+export function getNextExitRecheckRun(): string | null {
+  const next = exitRecheckTask?.getNextRun();
   return next ? new Date(next).toISOString() : null;
 }
 
@@ -905,6 +936,33 @@ export function startScheduler(log: FastifyBaseLogger): void {
       { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
     );
     log.info(`Multi-agent panel scheduled (${config.panel.cron}), next run ${getNextPanelRun() ?? 'unknown'}`);
+  }
+
+  // The adaptive exit engine — paper.db has no MARKET_ROLE gate (a paper
+  // trade opens from whichever machine someone is looking at the UI on,
+  // exactly the reasoning `runPaperMaintenance` already documents), so
+  // this schedules on any machine with a Polygon key, reader or runner —
+  // it only needs a live quote for the handful of positions it manages,
+  // not the full nightly capture.
+  if (!config.market.configured) {
+    log.info('Exit recheck not scheduled — POLYGON_API_KEY is not set.');
+  } else if (!cron.validate(config.market.exitRecheck.cron)) {
+    log.error(`EXIT_RECHECK_CRON is not valid: "${config.market.exitRecheck.cron}" — exit recheck disabled`);
+  } else {
+    exitRecheckTask = cron.schedule(
+      config.market.exitRecheck.cron,
+      () => {
+        void runExitEngine(log).then((r) => {
+          lastExitRecheckResult = r;
+        });
+      },
+      // Eastern, same as capture/text-sync — market hours, not local time.
+      { timezone: config.market.captureTimezone },
+    );
+    log.info(
+      `Exit recheck scheduled (${config.market.exitRecheck.cron} ` +
+        `${config.market.captureTimezone}), next run ${getNextExitRecheckRun() ?? 'unknown'}`,
+    );
   }
 
   if (!config.market.isRunner) {
@@ -1019,4 +1077,6 @@ export function stopScheduler(): void {
   radarTask = null;
   panelTask?.stop();
   panelTask = null;
+  exitRecheckTask?.stop();
+  exitRecheckTask = null;
 }
