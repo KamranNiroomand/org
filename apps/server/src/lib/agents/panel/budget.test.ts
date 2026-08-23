@@ -4,7 +4,7 @@ import { db } from '../../../db/index.js';
 import { runMigrations } from '../../../db/migrate.js';
 import { panelRuns } from '../../../db/schema.js';
 import { newId, nowIso } from '../../util.js';
-import { CALLS_PER_SYMBOL, PANEL_AGENT_CONCURRENCY, PanelBudgetExceeded, withBudget } from './budget.js';
+import { CALLS_PER_SYMBOL, PANEL_AGENT_CONCURRENCY, PanelBudgetExceeded, withPanelBudget } from './budget.js';
 
 beforeEach(() => {
   runMigrations();
@@ -27,10 +27,10 @@ function seedRun(): string {
   return id;
 }
 
-describe('withBudget', () => {
+describe('withPanelBudget', () => {
   it('allows calls up to the configured ceiling', async () => {
     const runId = seedRun();
-    const callBudgeted = withBudget(runId, 3);
+    const callBudgeted = withPanelBudget(runId, 3);
 
     await callBudgeted(() => Promise.resolve('a'));
     await callBudgeted(() => Promise.resolve('b'));
@@ -42,7 +42,7 @@ describe('withBudget', () => {
 
   it('throws PanelBudgetExceeded once the ceiling is passed, without running the call', async () => {
     const runId = seedRun();
-    const callBudgeted = withBudget(runId, 1);
+    const callBudgeted = withPanelBudget(runId, 1);
     let ran = false;
 
     await callBudgeted(() => Promise.resolve('a'));
@@ -58,7 +58,7 @@ describe('withBudget', () => {
 
   it('shares one counter across every call, not one per call site', async () => {
     const runId = seedRun();
-    const callBudgeted = withBudget(runId, 2);
+    const callBudgeted = withPanelBudget(runId, 2);
 
     await Promise.all([1, 2].map(() => callBudgeted(() => Promise.resolve(null))));
     await expect(callBudgeted(() => Promise.resolve(null))).rejects.toThrow(PanelBudgetExceeded);

@@ -275,3 +275,155 @@ export interface PortfolioResponse {
   usdCad: number | null;
   stale: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Real-estate investment assistant
+// ---------------------------------------------------------------------------
+
+export type Province = 'ON' | 'OTHER';
+
+export interface PropertyInput {
+  address: string;
+  askingPriceCents: number;
+  propertyType: string;
+  beds: number | null;
+  baths: number | null;
+  sqft: number | null;
+  yearBuilt: number | null;
+  hoaFeeCentsMonthly: number;
+  estimatedAnnualPropertyTaxCents: number;
+  estimatedAnnualInsuranceCents: number;
+  downPaymentPct: number;
+  mortgageRatePct: number;
+  amortizationYears: number;
+  expectedMonthlyRentCents: number;
+  marginalTaxRatePct: number;
+  province: Province;
+  city: string | null;
+  isPrimaryResidence: boolean;
+  realtorCommissionPct: number;
+  legalFeesCents: number;
+  otherClosingCostsCents: number;
+  maintenanceReservePct: number;
+  vacancyAllowancePct: number;
+  propertyMgmtFeePct: number;
+  listingDescription: string | null;
+}
+
+export interface LandTransferTax {
+  provincialCents: number;
+  municipalCents: number;
+  totalCents: number;
+  modeled: boolean;
+}
+
+export interface MonthlyCashFlow {
+  netCents: number;
+  breakdown: Record<string, number>;
+}
+
+export interface HorizonProjection {
+  year: number;
+  projectedValueCents: number;
+  remainingBalanceCents: number;
+  equityCents: number;
+  accumulatedAfterTaxCashFlowCents: number;
+  saleSellingCostsCents: number;
+  capitalGainsTaxCents: number;
+  saleEquityAfterTaxCents: number;
+  totalNetProceedsAfterTaxCents: number;
+}
+
+export interface ComputedFinancials {
+  purchasePriceCents: number;
+  downPaymentAmountCents: number;
+  loanPrincipalCents: number;
+  monthlyMortgagePaymentCents: number;
+  cmhcPremiumCents: number;
+  cmhcPremiumPstCents: number;
+  cmhcNote: string | null;
+  landTransferTax: LandTransferTax;
+  totalClosingCostsCents: number;
+  totalCashInvestedCents: number;
+  monthlyCashFlow: MonthlyCashFlow;
+  annualNoiCents: number;
+  capRatePct: number;
+  cashOnCashReturnPct: number;
+  cashFlowAxisScore: number;
+  assumedAnnualAppreciationRate: number;
+  horizons: HorizonProjection[];
+}
+
+export interface LocationAgentResult {
+  areaAssessment: 'strong' | 'average' | 'weak';
+  confidence: 'low' | 'medium' | 'high';
+  reasoning: string;
+  schoolsAndCrimeSummary: string;
+  comparableSalesSummary: string;
+  appreciationOutlookScore: number;
+  citedFindings: string[];
+  sourcesUsed: string[];
+  revisedFromRound1: boolean | null;
+  responseToOtherAgent: string | null;
+}
+
+export interface RentalAgentResult {
+  rentEstimateLowCents: number;
+  rentEstimateHighCents: number;
+  rentabilityAssessment: 'strong' | 'average' | 'weak';
+  confidence: 'low' | 'medium' | 'high';
+  reasoning: string;
+  comparableRentsSummary: string;
+  demandFactors: string[];
+  citedFindings: string[];
+  sourcesUsed: string[];
+  revisedFromRound1: boolean | null;
+  responseToOtherAgent: string | null;
+}
+
+export interface ManagerSynthesisResult {
+  overallVerdict: 'strong_opportunity' | 'workable' | 'weak_fit';
+  narrativeSummary: string;
+  keyRisks: string[];
+  conflicts: string[];
+  horizonNotes: { year7: string; year10: string; year15: string };
+}
+
+export interface BalancePlacement {
+  cashFlowScore: number;
+  appreciationScore: number | null;
+}
+
+export interface RealEstateRun {
+  id: string;
+  status: 'running' | 'done' | 'partial' | 'failed';
+  startedAt: string;
+  finishedAt: string | null;
+  model: string;
+  callsMade: number;
+  webSearchesUsed: number;
+  errors: string[];
+  propertyInput: PropertyInput;
+  computedFinancials: ComputedFinancials;
+  locationRound1: LocationAgentResult | null;
+  locationRound2: LocationAgentResult | null;
+  rentalRound1: RentalAgentResult | null;
+  rentalRound2: RentalAgentResult | null;
+  managerResult: ManagerSynthesisResult | null;
+  balancePlacement: BalancePlacement | null;
+  synthesisComplete: boolean;
+}
+
+export interface RealEstateRunDetail {
+  run: RealEstateRun;
+  disclaimer: string;
+}
+
+export interface AnalyzePropertyResponse {
+  runId: string;
+  disclaimer: string;
+}
+
+export interface RealEstateRunsResponse {
+  runs: RealEstateRun[];
+}
