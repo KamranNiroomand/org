@@ -494,6 +494,64 @@ def rank_day(
     return ranked[:top]
 
 
+def select_entries(
+    candidates: list[RankedContract],
+    held_underlyings: set[str],
+    available_capital: float,
+    open_position_count: int,
+    max_concurrent_positions: int,
+    max_new_positions: int,
+    min_ev_per_risk: float,
+    min_prob_profit: float,
+    multiplier: int = DEFAULT_MULTIPLIER,
+) -> list[RankedContract]:
+    """Capital-constrained entry selection — how many positions to open
+    today is decided by what the market actually offers, not a fixed count.
+
+    Replaces the original "pick exactly one winner" rule, which had a real
+    hole found live: with no price cap anywhere, the top-ranked contract on
+    a real day cost $122,440 for one contract — more than the whole paper
+    account. Here a candidate is only accepted if its full cost
+    (`market_price * multiplier`) fits within the capital still remaining
+    after every earlier (higher-EV) acceptance, so the account can never be
+    committed past what it actually has.
+
+    Selection is greedy by EV, deliberately: the ranked list is already
+    sorted by the model's own preference, and a knapsack-optimal packing
+    that skips the model's best pick to squeeze in two lesser ones would
+    substitute a capital-efficiency objective for the model's ranking. One
+    accepted contract per underlying per day, and never an underlying
+    already held — both are the same one-position-per-underlying rule
+    autoEntry.ts has enforced since it existed (doubling a name doubles
+    exposure to one forecast, not diversification).
+
+    A day with one real, affordable opportunity opens one position; a day
+    with five genuinely independent ones opens up to `max_new_positions`;
+    a day where one name dominates the whole board still opens at most one.
+    """
+    remaining = available_capital
+    room = max(0, max_concurrent_positions - open_position_count)
+    budget_slots = min(room, max_new_positions)
+    taken_underlyings: set[str] = set()
+    selected: list[RankedContract] = []
+
+    for c in sorted(candidates, key=lambda c: c.ev, reverse=True):
+        if len(selected) >= budget_slots:
+            break
+        if c.ev_per_risk < min_ev_per_risk or c.prob_profit < min_prob_profit:
+            continue
+        if c.underlying in held_underlyings or c.underlying in taken_underlyings:
+            continue
+        cost = c.market_price * multiplier
+        if cost > remaining:
+            continue
+        selected.append(c)
+        taken_underlyings.add(c.underlying)
+        remaining -= cost
+
+    return selected
+
+
 def score_held_contracts(
     contracts: list[dict],
     trading_day: str,

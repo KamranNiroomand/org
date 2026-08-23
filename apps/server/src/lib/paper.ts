@@ -159,6 +159,40 @@ export function tradeReturnPct(entryPriceE4: number, currentPriceE4: number): nu
   return ((currentPriceE4 - entryPriceE4) / entryPriceE4) * 100;
 }
 
+export interface AccountCapacity {
+  /** Uncommitted cash, E4: starting balance minus what open positions cost to enter. */
+  freeCashE4: number;
+  openPositionCount: number;
+  heldUnderlyings: string[];
+}
+
+/**
+ * What the account can actually still deploy right now — the input
+ * auto-entry's capital constraint is computed from.
+ *
+ * Cash is measured at **entry cost**, not current mark: the question this
+ * answers is "how many more dollars can be committed", and an open
+ * position's unrealized gain isn't spendable until it closes. Deliberately
+ * conservative in the same direction as the rest of this module (marks use
+ * the bid, fills use the ask) — overstating buying power is the failure
+ * that actually costs something.
+ */
+export function accountCapacity(): AccountCapacity {
+  const open = paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all();
+  let committedE4 = 0;
+  const heldUnderlyings = new Set<string>();
+  for (const o of open) {
+    const { multiplier } = contractMultiplier(o.occSymbol);
+    committedE4 += o.entryPriceE4 * o.quantity * multiplier;
+    if (o.underlying) heldUnderlyings.add(o.underlying);
+  }
+  return {
+    freeCashE4: Math.max(0, config.market.paperStartingBalanceE4 - committedE4),
+    openPositionCount: open.length,
+    heldUnderlyings: [...heldUnderlyings],
+  };
+}
+
 export interface MarkResult {
   tradingDay: string;
   marked: number;

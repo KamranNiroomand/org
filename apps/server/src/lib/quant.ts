@@ -235,6 +235,61 @@ export async function positionHealth(day: string, contracts: HeldContract[]): Pr
   return (await res.json()) as PositionHealthResult;
 }
 
+export interface SelectEntriesInput {
+  day: string;
+  heldUnderlyings: string[];
+  availableCapital: number;
+  openPositionCount: number;
+  maxConcurrentPositions: number;
+  maxNewPositions: number;
+  minEvPerRisk: number;
+  minProbProfit: number;
+}
+
+export interface SelectEntriesResult {
+  model_run_id: string;
+  model_beats_baseline: boolean;
+  selected: RankedContract[];
+}
+
+/**
+ * Ranks and then capital-constrains today's entry candidates in one call —
+ * see `select_entries` in `services/quant/app/rank.py` for the allocation
+ * rule. The account's real state (available capital, open position count,
+ * held underlyings) is supplied by the caller; the selection itself is
+ * Python's, so the sizing logic lives with the rest of the decision math.
+ */
+export async function selectEntries(input: SelectEntriesInput): Promise<SelectEntriesResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/select-entries`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        day: input.day,
+        held_underlyings: input.heldUnderlyings,
+        available_capital: input.availableCapital,
+        open_position_count: input.openPositionCount,
+        max_concurrent_positions: input.maxConcurrentPositions,
+        max_new_positions: input.maxNewPositions,
+        min_ev_per_risk: input.minEvPerRisk,
+        min_prob_profit: input.minProbProfit,
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (res.status === 409) {
+    const body = (await res.json()) as { detail: string };
+    throw new QuantRefusal(body.detail);
+  }
+  if (!res.ok) {
+    throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as SelectEntriesResult;
+}
+
 export interface ExitTarget {
   targetExitPriceE4: number;
   stopLossPriceE4: number;

@@ -2,126 +2,115 @@ import { eq } from 'drizzle-orm';
 import { config } from '../../config.js';
 import { paperDb } from '../../db/paper/index.js';
 import { paperOrders } from '../../db/paper/schema.js';
-import { openOrder, PaperError } from '../paper.js';
-import { rankDay, QuantRefusal, QuantUnavailable, type RankedContract } from '../quant.js';
+import { accountCapacity, openOrder, PaperError } from '../paper.js';
+import { selectEntries, QuantRefusal, QuantUnavailable, type RankedContract } from '../quant.js';
 import { nowIso } from '../util.js';
 
 /**
- * Once/day, alongside the existing rank refresh: opens the top-ranked
- * contract clearing both bars in `config.market.autoEntry` as a
- * `source: 'model'` paper order, carrying the exit target
- * `services/quant/app/exit.py` already suggested for it — see the
- * "Options model" plan's Phase 1 for why this exists: a signal that only
- * ever shows a ranked list is a signal you have to act on by hand, and
- * that was the actual complaint this was built to answer.
+ * Once/day, alongside the existing rank refresh: opens every contract the
+ * quant sidecar's `select_entries` picks as a `source: 'model'` paper
+ * order, each carrying the exit target `services/quant/app/exit.py`
+ * suggested for it — see the "Options model" plan's Phase 1 for why this
+ * exists: a signal that only ever shows a ranked list is a signal you have
+ * to act on by hand, and that was the actual complaint this was built to
+ * answer.
  *
- * Both bars are explicitly a first-pass sanity floor, not a backtested
- * threshold — same honesty framing as the radar's own eligibility floor
- * elsewhere in this codebase. One position at a time per underlying: opening
- * a second position on a name already held would double exposure to the
- * same forecast, not diversify it.
+ * **How many positions is a market question, not a constant.** The count
+ * falls out of how many genuinely independent, affordable candidates clear
+ * the bar on a given day, bounded by the account's real free cash and the
+ * concurrent/daily caps in `config.market.autoEntry`. The allocation rule
+ * itself lives in Python with the rest of the decision math — see
+ * `select_entries`, including the real $122,440-per-contract candidate
+ * that proved an explicit capital constraint was not optional.
  */
 
 export interface AutoEntryResult {
   day: string;
-  openedOccSymbol: string | null;
-  orderId: string | null;
+  opened: Array<{ occSymbol: string; orderId: string }>;
   skippedReason: string | null;
 }
 
 /**
- * Reads the underlying straight off each open order — denormalized at open
- * time in `openOrder` (see `paperOrders.underlying`'s own doc comment) —
- * rather than re-resolving it via a live join to `optionContracts`. That
- * join is exactly what used to break this guarantee: a contract pruned or
- * expired out of the corpus while its order was still open would silently
- * drop out of the held-set, letting a second position open on the same
- * name. Only pre-migration rows (`underlying` still null) fall through
- * this check — a one-time gap that closes as those orders close.
+ * `selectEntries` is injectable — same reason `exitEngine.ts` injects its
+ * quant calls: the test suite's `QUANT_URL` is pinned unreachable (see
+ * vitest.config.ts), so exercising the actual open-and-persist loop needs
+ * a real selection supplied directly, not just the honest "sidecar
+ * unavailable" fallback.
  */
-function alreadyHeldUnderlyings(): Set<string> {
-  const open = paperDb.select({ underlying: paperOrders.underlying }).from(paperOrders).where(eq(paperOrders.status, 'open')).all();
-  return new Set(open.map((o) => o.underlying).filter((u): u is string => u !== null));
-}
+export async function runAutoEntry(
+  day: string,
+  selectEntriesFn: typeof selectEntries = selectEntries,
+): Promise<AutoEntryResult> {
+  const capacity = accountCapacity();
+  const availableCapital =
+    (capacity.freeCashE4 / 10_000) * (1 - config.market.autoEntry.capitalReservePct);
 
-function hasExitTarget(c: RankedContract): boolean {
-  return c.suggested_target_exit_price !== null && c.suggested_stop_loss_price !== null && c.suggested_target_exit_date !== null;
-}
-
-function pickCandidate(contracts: RankedContract[], heldUnderlyings: Set<string>): RankedContract | null {
-  const eligible = contracts
-    .filter((c) => c.ev_per_risk >= config.market.autoEntry.minEvPerRisk)
-    .filter((c) => c.prob_profit >= config.market.autoEntry.minProbProfit)
-    .filter((c) => !heldUnderlyings.has(c.underlying))
-    // A candidate this can't compute an exit plan for can't be auto-managed
-    // — opening it anyway would leave a `source: 'model'` position with no
-    // target that exitEngine.ts's managedOpenOrders() can never see again.
-    // Better to skip it for today than open something silently unmanaged.
-    .filter(hasExitTarget);
-  if (eligible.length === 0) return null;
-  return eligible.reduce((best, c) => (c.ev > best.ev ? c : best));
-}
-
-/**
- * `rankDay` is injectable — same reason `exitEngine.ts` injects its quant
- * calls: the test suite's `QUANT_URL` is pinned unreachable (see
- * vitest.config.ts), so exercising the actual candidate-selection logic
- * needs a real ranked list supplied directly, not just the honest
- * "sidecar unavailable" fallback.
- */
-export async function runAutoEntry(day: string, rankDayFn: typeof rankDay = rankDay): Promise<AutoEntryResult> {
-  let ranked: RankedContract[];
+  let selected: RankedContract[];
   try {
-    ranked = (await rankDayFn(day, 25, true)).contracts;
+    selected = (
+      await selectEntriesFn({
+        day,
+        heldUnderlyings: capacity.heldUnderlyings,
+        availableCapital,
+        openPositionCount: capacity.openPositionCount,
+        maxConcurrentPositions: config.market.autoEntry.maxConcurrentPositions,
+        maxNewPositions: config.market.autoEntry.maxNewPositionsPerDay,
+        minEvPerRisk: config.market.autoEntry.minEvPerRisk,
+        minProbProfit: config.market.autoEntry.minProbProfit,
+      })
+    ).selected;
   } catch (err) {
     const reason =
       err instanceof QuantRefusal || err instanceof QuantUnavailable
         ? err.message
         : err instanceof Error
           ? err.message
-          : 'Ranking failed for an unknown reason';
-    return { day, openedOccSymbol: null, orderId: null, skippedReason: reason };
+          : 'Entry selection failed for an unknown reason';
+    return { day, opened: [], skippedReason: reason };
   }
 
-  const candidate = pickCandidate(ranked, alreadyHeldUnderlyings());
-  if (!candidate) {
+  if (selected.length === 0) {
     return {
       day,
-      openedOccSymbol: null,
-      orderId: null,
+      opened: [],
       skippedReason:
-        'No contract cleared the auto-entry bar today, or every eligible underlying already has an open position.',
+        'No contract cleared the auto-entry bar today, or none fit the account’s remaining capital and position limits.',
     };
   }
 
-  let orderId: string;
-  try {
-    orderId = openOrder({
-      occSymbol: candidate.occ_symbol,
-      quantity: 1,
-      entryPriceE4: Math.round(candidate.market_price * 10_000),
-      source: 'model',
-      notes: `Auto-opened: EV ${candidate.ev.toFixed(2)}, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%.`,
-    });
-  } catch (err) {
-    const reason = err instanceof PaperError ? err.message : err instanceof Error ? err.message : 'Failed to open order';
-    return { day, openedOccSymbol: null, orderId: null, skippedReason: reason };
+  const opened: Array<{ occSymbol: string; orderId: string }> = [];
+  const failures: string[] = [];
+  for (const candidate of selected) {
+    try {
+      const orderId = openOrder({
+        occSymbol: candidate.occ_symbol,
+        quantity: 1,
+        entryPriceE4: Math.round(candidate.market_price * 10_000),
+        source: 'model',
+        notes: `Auto-opened: EV ${candidate.ev.toFixed(2)}, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%.`,
+      });
+      // select_entries only ever returns candidates whose exit plan was
+      // computable — it filters the rest out before allocating, so an
+      // opened position always has a target for the exit engine to manage.
+      paperDb
+        .update(paperOrders)
+        .set({
+          entryEv: candidate.ev,
+          targetExitPriceE4: Math.round(candidate.suggested_target_exit_price! * 10_000),
+          stopLossPriceE4: Math.round(candidate.suggested_stop_loss_price! * 10_000),
+          targetExitDate: candidate.suggested_target_exit_date!,
+          exitUpdatedAt: nowIso(),
+        })
+        .where(eq(paperOrders.id, orderId))
+        .run();
+      opened.push({ occSymbol: candidate.occ_symbol, orderId });
+    } catch (err) {
+      // One contract failing to open must not cost the rest of the day's
+      // selection — same per-item isolation as capture.ts's own loop.
+      const message = err instanceof PaperError ? err.message : err instanceof Error ? err.message : 'Failed to open order';
+      failures.push(`${candidate.occ_symbol}: ${message}`);
+    }
   }
 
-  // pickCandidate already required a full exit target (hasExitTarget) — a
-  // candidate without one is never selected, so this order is never left
-  // open without a target to manage.
-  paperDb
-    .update(paperOrders)
-    .set({
-      entryEv: candidate.ev,
-      targetExitPriceE4: Math.round(candidate.suggested_target_exit_price! * 10_000),
-      stopLossPriceE4: Math.round(candidate.suggested_stop_loss_price! * 10_000),
-      targetExitDate: candidate.suggested_target_exit_date!,
-      exitUpdatedAt: nowIso(),
-    })
-    .where(eq(paperOrders.id, orderId))
-    .run();
-
-  return { day, openedOccSymbol: candidate.occ_symbol, orderId, skippedReason: null };
+  return { day, opened, skippedReason: failures.length > 0 ? failures.join('; ') : null };
 }

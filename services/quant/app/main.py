@@ -21,7 +21,14 @@ from pydantic import BaseModel, Field
 from app.classify import SymbolRow, classify_universe
 from app.exit import ExitTarget, compute_initial_exit_target, evaluate_exit
 from app.pricing import american_price, bsm_greeks, implied_vol
-from app.rank import RankedContract, latest_model_dir, load_model, rank_day, score_held_contracts
+from app.rank import (
+    RankedContract,
+    latest_model_dir,
+    load_model,
+    rank_day,
+    score_held_contracts,
+    select_entries,
+)
 from app.realestate import (
     CashFlowResult,
     HorizonInputs,
@@ -445,6 +452,76 @@ def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
         new_target_exit_date=decision.new_target_exit_date,
         reason=decision.reason,
         triggered_by=decision.triggered_by,
+    )
+
+
+class SelectEntriesRequest(BaseModel):
+    """Capital-constrained entry selection for the auto-entry job — see
+    `select_entries`' own docstring for the allocation rule and the real
+    $122k-contract incident that motivated it. The caller (autoEntry.ts)
+    supplies the account's actual state; ranking happens here so the whole
+    decision is one call, not a ranked list shipped over and back.
+    """
+
+    day: str = Field(description="Trading day, YYYY-MM-DD.")
+    held_underlyings: list[str] = []
+    #: Dollars actually available to deploy, after the caller's own reserve.
+    available_capital: float = Field(ge=0)
+    open_position_count: int = Field(ge=0, default=0)
+    max_concurrent_positions: int = Field(gt=0)
+    max_new_positions: int = Field(gt=0)
+    min_ev_per_risk: float
+    min_prob_profit: float = Field(ge=0, le=1)
+    top: int = 25
+
+
+class SelectEntriesResponse(BaseModel):
+    model_run_id: str
+    model_beats_baseline: bool
+    #: Every selected contract carries a non-null suggested exit plan —
+    #: candidates whose plan can't be computed (see exit.py's refusal case)
+    #: are excluded before selection rather than opened unmanaged.
+    selected: list[RankedContractResponse]
+
+
+@app.post("/select-entries", response_model=SelectEntriesResponse)
+def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesResponse:
+    try:
+        model_dir = latest_model_dir()
+        _, manifest = load_model(model_dir)
+        ranked = rank_day(request.day, model_dir, top=request.top, force=True)
+    except SystemExit as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    horizon = manifest.get("horizon")
+    # A candidate with no computable exit plan can't be auto-managed —
+    # opening it would leave a position the exit engine never sees again.
+    # Excluded before allocation so it can't consume a selection slot.
+    plannable = [
+        c
+        for c in ranked
+        if horizon is not None
+        and _try_compute_exit_target(c.market_price, c.expiry, request.day, horizon) is not None
+    ]
+
+    selected = select_entries(
+        plannable,
+        held_underlyings=set(request.held_underlyings),
+        available_capital=request.available_capital,
+        open_position_count=request.open_position_count,
+        max_concurrent_positions=request.max_concurrent_positions,
+        max_new_positions=request.max_new_positions,
+        min_ev_per_risk=request.min_ev_per_risk,
+        min_prob_profit=request.min_prob_profit,
+    )
+
+    return SelectEntriesResponse(
+        model_run_id=manifest["run_id"],
+        model_beats_baseline=manifest["metrics"]["beats_baseline"],
+        selected=[
+            RankedContractResponse.from_ranked(c, entry_day=request.day, horizon=horizon)
+            for c in selected
+        ],
     )
 
 
