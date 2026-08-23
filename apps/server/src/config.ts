@@ -49,6 +49,12 @@ const schema = z.object({
   PANEL_MAX_SYMBOLS_PER_BOX_QUERY: z.coerce.number().int().positive().default(8),
   PANEL_MAX_CALLS_PER_RUN: z.coerce.number().int().positive().default(150),
 
+  // Real-estate investment assistant — location + rental agents (2 rounds
+  // each, web_search-enabled) plus one manager synthesis call. 5 is the
+  // exact call count the run actually makes (2 agents x 2 rounds + 1), same
+  // precision as PANEL_MAX_CALLS_PER_RUN's own sizing against CALLS_PER_SYMBOL.
+  RE_MAX_CALLS_PER_RUN: z.coerce.number().int().positive().default(5),
+
   // Options research. Market data lives in its own directory tree, separate
   // from org.db — see src/db/market/schema.ts for why.
   MARKET_DATA_DIR: z.string().optional(),
@@ -177,6 +183,10 @@ export const config = {
     maxSymbolsPerNightlyShortlist: env.PANEL_MAX_SYMBOLS_PER_NIGHTLY_SHORTLIST,
     maxSymbolsPerBoxQuery: env.PANEL_MAX_SYMBOLS_PER_BOX_QUERY,
     maxCallsPerRun: env.PANEL_MAX_CALLS_PER_RUN,
+  },
+
+  realEstate: {
+    maxCallsPerRun: env.RE_MAX_CALLS_PER_RUN,
   },
 
   /**

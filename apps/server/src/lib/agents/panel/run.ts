@@ -7,7 +7,7 @@ import { newId, nowIso } from '../../util.js';
 import { buildSymbolContext } from './context.js';
 import { runRound1, runRound2 } from './specialists.js';
 import { runSynthesis } from './synthesize.js';
-import { PANEL_AGENT_CONCURRENCY, PanelBudgetExceeded, withBudget, type CallBudgeted } from './budget.js';
+import { PANEL_AGENT_CONCURRENCY, PanelBudgetExceeded, withPanelBudget, type CallBudgeted } from './budget.js';
 import { SPECIALISTS, type Specialist, type Round1Turn, type Round2Turn } from './types.js';
 
 /**
@@ -218,7 +218,7 @@ export function startPanelRun(params: StartPanelRunParams): string {
 }
 
 async function executePanelRun(runId: string, symbols: string[]): Promise<void> {
-  const callBudgeted = withBudget(runId);
+  const callBudgeted = withPanelBudget(runId);
   const errors: string[] = [];
   let completed = 0;
   let hitBudget = false;

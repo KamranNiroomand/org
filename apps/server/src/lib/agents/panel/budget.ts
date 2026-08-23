@@ -14,9 +14,22 @@ import { SPECIALISTS } from './types.js';
  * after the bill arrives.
  */
 
-export class PanelBudgetExceeded extends Error {
+/** Generic base so `withBudget` doesn't have to hardcode which domain's
+ * error to throw — `PanelBudgetExceeded` here and
+ * `RealEstateBudgetExceeded` in `agents/realestate/budget.ts` both extend
+ * this, so a caller that only cares "did *some* budget blow" can catch the
+ * base, while `instanceof PanelBudgetExceeded` still identifies the panel's
+ * own specifically. */
+export class CallBudgetExceeded extends Error {
+  constructor(label: string, runId: string, calls: number) {
+    super(`${label} run ${runId} exceeded its call budget at ${calls} calls`);
+    this.name = 'CallBudgetExceeded';
+  }
+}
+
+export class PanelBudgetExceeded extends CallBudgetExceeded {
   constructor(runId: string, calls: number) {
-    super(`Panel run ${runId} exceeded its call budget at ${calls} calls`);
+    super('Panel', runId, calls);
     this.name = 'PanelBudgetExceeded';
   }
 }
@@ -36,19 +49,36 @@ export const CALLS_PER_SYMBOL = PANEL_AGENT_CONCURRENCY * 2 + 1;
 export type CallBudgeted = <T>(fn: () => Promise<T>) => Promise<T>;
 
 /**
- * Wraps every Anthropic call a panel run makes: increments and persists
- * `callsMade` on the run's `panelRuns` row *before* the call, not after —
- * a crash mid-call still leaves an honest count, the same reasoning as
- * `capture_runs`' own incremental `symbolsDone` writes — and throws
- * `PanelBudgetExceeded` once the configured ceiling is hit, so a bug or a
- * bad prompt can't turn into an unbounded bill.
+ * Wraps every LLM call a run makes: increments and persists a call count
+ * *before* the call, not after — a crash mid-call still leaves an honest
+ * count, the same reasoning as `capture_runs`' own incremental
+ * `symbolsDone` writes — and throws once the configured ceiling is hit, so
+ * a bug or a bad prompt can't turn into an unbounded bill.
+ *
+ * Generalized (rather than hardcoded to `panelRuns`) so the real-estate
+ * assistant's own run table can reuse this exact mechanism instead of a
+ * near-duplicate 15-line copy — see `agents/realestate/budget.ts`'s thin
+ * wrapper, and `withPanelBudget` below for the panel's own.
  */
-export function withBudget(runId: string, maxCalls: number = config.panel.maxCallsPerRun): CallBudgeted {
+export function withBudget(
+  runId: string,
+  maxCalls: number,
+  persistCallsMade: (runId: string, calls: number) => void,
+  makeExceeded: (runId: string, calls: number) => CallBudgetExceeded = (id, c) => new CallBudgetExceeded('Run', id, c),
+): CallBudgeted {
   let calls = 0;
   return async function callBudgeted<T>(fn: () => Promise<T>): Promise<T> {
     calls += 1;
-    if (calls > maxCalls) throw new PanelBudgetExceeded(runId, calls);
-    db.update(panelRuns).set({ callsMade: calls }).where(eq(panelRuns.id, runId)).run();
+    if (calls > maxCalls) throw makeExceeded(runId, calls);
+    persistCallsMade(runId, calls);
     return fn();
   };
+}
+
+function persistPanelCallsMade(runId: string, calls: number): void {
+  db.update(panelRuns).set({ callsMade: calls }).where(eq(panelRuns.id, runId)).run();
+}
+
+export function withPanelBudget(runId: string, maxCalls: number = config.panel.maxCallsPerRun): CallBudgeted {
+  return withBudget(runId, maxCalls, persistPanelCallsMade, (id, c) => new PanelBudgetExceeded(id, c));
 }

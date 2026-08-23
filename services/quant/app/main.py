@@ -22,6 +22,21 @@ from app.classify import SymbolRow, classify_universe
 from app.exit import ExitTarget, compute_initial_exit_target, evaluate_exit
 from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import RankedContract, latest_model_dir, load_model, rank_day, score_held_contracts
+from app.realestate import (
+    CashFlowResult,
+    HorizonInputs,
+    HorizonProjection,
+    LandTransferTax,
+    cap_rate_pct,
+    cash_flow_axis_score,
+    cash_on_cash_return_pct,
+    cmhc_premium,
+    cmhc_premium_pst,
+    land_transfer_tax,
+    monthly_cash_flow,
+    monthly_mortgage_payment,
+    project_horizons,
+)
 
 app = FastAPI(title="org-quant", version="0.1.0")
 
@@ -430,4 +445,153 @@ def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
         new_target_exit_date=decision.new_target_exit_date,
         reason=decision.reason,
         triggered_by=decision.triggered_by,
+    )
+
+
+class PropertyComputeRequest(BaseModel):
+    """One property's deterministic financials — see realestate.py's module
+    docstring for the unit/rate conventions (dollars, decimal rates)."""
+
+    purchase_price: float
+    down_payment_pct: float = Field(ge=5, le=100)
+    mortgage_rate: float
+    amortization_years: int = 25
+    #: 0 is a valid answer — not every listing is meant to be rented.
+    expected_monthly_rent: float = 0.0
+    annual_property_tax: float
+    hoa_monthly: float = 0.0
+    #: A rough Canadian home-insurance placeholder, editable in the UI —
+    #: not a quote.
+    annual_insurance: float = 1200.0
+    marginal_tax_rate: float
+    #: 'ON' fully models land transfer tax; anything else returns modeled=False.
+    province: str = "OTHER"
+    city: str | None = None
+    is_primary_residence: bool = True
+    realtor_commission_pct: float = 5.0
+    legal_fees: float = 1500.0
+    other_closing_costs: float = 800.0
+    maintenance_reserve_pct: float = 5.0
+    vacancy_allowance_pct: float = 4.0
+    property_mgmt_fee_pct: float = 0.0
+
+
+class ComputedFinancialsResponse(BaseModel):
+    purchase_price: float
+    down_payment_amount: float
+    #: Includes the financed CMHC premium, if any — the actual amount owed
+    #: month to month, not the pre-premium base loan.
+    loan_principal: float
+    monthly_mortgage_payment: float
+    cmhc_premium: float
+    cmhc_premium_pst: float
+    #: Set only when the scenario isn't really CMHC-insurable as modeled —
+    #: see realestate.py's cmhc_premium docstring.
+    cmhc_note: str | None
+    land_transfer_tax: LandTransferTax
+    total_closing_costs: float
+    total_cash_invested: float
+    monthly_cash_flow: CashFlowResult
+    annual_noi: float
+    cap_rate_pct: float
+    cash_on_cash_return_pct: float
+    cash_flow_axis_score: float
+    assumed_annual_appreciation_rate: float
+    horizons: list[HorizonProjection]
+
+
+@app.post("/realestate/compute", response_model=ComputedFinancialsResponse)
+def realestate_compute(request: PropertyComputeRequest) -> ComputedFinancialsResponse:
+    """Everything downstream of one property's numbers, assembled once here
+    so neither Node nor the LLM agents ever re-derive them — see
+    `apps/server/src/lib/agents/realestate/financials.ts` on the Node side."""
+    down_payment_amount = request.purchase_price * request.down_payment_pct / 100.0
+    base_loan = request.purchase_price - down_payment_amount
+
+    premium = cmhc_premium(base_loan, request.down_payment_pct)
+    premium_pst = cmhc_premium_pst(premium, request.province)
+    # The premium is financed into the mortgage itself, not paid in cash —
+    # only its PST is a closing-day cash cost. See realestate.py.
+    loan_principal = base_loan + premium
+    payment = monthly_mortgage_payment(loan_principal, request.mortgage_rate, request.amortization_years)
+
+    cmhc_note = None
+    if not request.is_primary_residence and request.down_payment_pct < 20.0:
+        cmhc_note = (
+            "Non-owner-occupied purchases are typically NOT CMHC-insurable and normally "
+            "require at least 20% down regardless — this premium is a what-if figure, not a real quote."
+        )
+
+    ltt = land_transfer_tax(request.purchase_price, request.province, request.city)
+    total_closing_costs = ltt.total + request.legal_fees + request.other_closing_costs + premium_pst
+    total_cash_invested = down_payment_amount + total_closing_costs
+
+    cash_flow = monthly_cash_flow(
+        rent=request.expected_monthly_rent,
+        mortgage_pi=payment,
+        property_tax_annual=request.annual_property_tax,
+        insurance_annual=request.annual_insurance,
+        hoa_monthly=request.hoa_monthly,
+        maintenance_reserve_pct=request.maintenance_reserve_pct,
+        vacancy_allowance_pct=request.vacancy_allowance_pct,
+        property_mgmt_fee_pct=request.property_mgmt_fee_pct,
+    )
+
+    annual_rent = request.expected_monthly_rent * 12
+    annual_maintenance = annual_rent * request.maintenance_reserve_pct / 100.0
+    annual_vacancy = annual_rent * request.vacancy_allowance_pct / 100.0
+    annual_mgmt_fee = annual_rent * request.property_mgmt_fee_pct / 100.0
+    annual_hoa = request.hoa_monthly * 12
+    annual_noi = (
+        annual_rent
+        - request.annual_property_tax
+        - request.annual_insurance
+        - annual_hoa
+        - annual_maintenance
+        - annual_vacancy
+        - annual_mgmt_fee
+    )
+
+    coc = cash_on_cash_return_pct(cash_flow.net * 12, total_cash_invested)
+    cf_score = cash_flow_axis_score(coc)
+
+    horizons = project_horizons(
+        HorizonInputs(
+            purchase_price=request.purchase_price,
+            loan_principal=loan_principal,
+            mortgage_rate=request.mortgage_rate,
+            amortization_years=request.amortization_years,
+            monthly_pretax_cash_flow=cash_flow.net,
+            annual_rent=annual_rent,
+            annual_property_tax=request.annual_property_tax,
+            annual_insurance=request.annual_insurance,
+            annual_maintenance=annual_maintenance,
+            annual_mgmt_fee=annual_mgmt_fee,
+            annual_hoa=annual_hoa,
+            marginal_tax_rate=request.marginal_tax_rate,
+            is_primary_residence=request.is_primary_residence,
+            realtor_commission_pct=request.realtor_commission_pct,
+            legal_fees=request.legal_fees,
+            closing_costs_added_to_acb=ltt.total + request.legal_fees + request.other_closing_costs,
+        )
+    )
+
+    return ComputedFinancialsResponse(
+        purchase_price=request.purchase_price,
+        down_payment_amount=down_payment_amount,
+        loan_principal=loan_principal,
+        monthly_mortgage_payment=payment,
+        cmhc_premium=premium,
+        cmhc_premium_pst=premium_pst,
+        cmhc_note=cmhc_note,
+        land_transfer_tax=ltt,
+        total_closing_costs=total_closing_costs,
+        total_cash_invested=total_cash_invested,
+        monthly_cash_flow=cash_flow,
+        annual_noi=annual_noi,
+        cap_rate_pct=cap_rate_pct(annual_noi, request.purchase_price),
+        cash_on_cash_return_pct=coc,
+        cash_flow_axis_score=cf_score,
+        assumed_annual_appreciation_rate=0.035,
+        horizons=horizons,
     )

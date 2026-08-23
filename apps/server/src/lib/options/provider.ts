@@ -97,6 +97,12 @@ export interface OptionsProvider {
   fetchChain(request: ChainRequest): Promise<ChainQuote[]>;
   fetchBars(symbol: string, from: string, to: string): Promise<DailyBar[]>;
   probe(): Promise<ProviderCapabilities>;
+  /** Optional: a provider with its own adaptive rate-limit pacer (see
+   * polygon.ts) can report whether it's currently slowed down below its
+   * configured baseline — surfaced by capture.ts in its own run summary so
+   * "this run took much longer than usual" has a visible cause, without
+   * capture.ts needing to know which concrete provider it's talking to. */
+  rateLimitState?(): { throttled: boolean; multiplier: number };
 }
 
 /** Thrown when the vendor answers, but with something we will not guess about. */

@@ -1,5 +1,13 @@
 import { relations } from 'drizzle-orm';
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import type {
+  BalancePlacement,
+  ComputedFinancials,
+  LocationAgentResult,
+  ManagerSynthesisResult,
+  PropertyInput,
+  RentalAgentResult,
+} from '../lib/agents/realestate/types.js';
 
 /**
  * Schema notes that apply throughout:
@@ -633,6 +641,48 @@ export const panelAgentTurns = sqliteTable(
     createdAt: now(),
   },
   (t) => [index('panel_turns_analysis_round_idx').on(t.analysisId, t.round)],
+);
+
+/**
+ * One row per real-estate analysis run. Unlike the stock panel (one run
+ * covers many symbols, a genuine one-to-many fan-out), one run here is
+ * always exactly one property analyzed by exactly two agents over two
+ * rounds plus one manager synthesis — a fixed shape, so each agent
+ * round's structured output gets its own nullable JSON column instead of
+ * a child `*_turns` table. `computedFinancials` is written at insert time
+ * (the sidecar call that produces it happens before this row exists at
+ * all — see `run.ts`), so a client polling mid-run already sees real
+ * numbers, not a placeholder.
+ */
+export const realEstateRuns = sqliteTable(
+  're_runs',
+  {
+    id: id(),
+    status: text('status', { enum: ['running', 'done', 'partial', 'failed'] })
+      .notNull()
+      .default('running'),
+    startedAt: text('started_at').notNull(),
+    finishedAt: text('finished_at'),
+    model: text('model').notNull(),
+    callsMade: integer('calls_made').notNull().default(0),
+    /** Visibility only — see `budget.ts`'s own comment on why this isn't
+     * enforced against the call budget. */
+    webSearchesUsed: integer('web_searches_used').notNull().default(0),
+    errors: text('errors', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    propertyInput: text('property_input', { mode: 'json' }).$type<PropertyInput>().notNull(),
+    computedFinancials: text('computed_financials', { mode: 'json' }).$type<ComputedFinancials>().notNull(),
+    locationRound1: text('location_round1', { mode: 'json' }).$type<LocationAgentResult>(),
+    locationRound2: text('location_round2', { mode: 'json' }).$type<LocationAgentResult>(),
+    rentalRound1: text('rental_round1', { mode: 'json' }).$type<RentalAgentResult>(),
+    rentalRound2: text('rental_round2', { mode: 'json' }).$type<RentalAgentResult>(),
+    managerResult: text('manager_result', { mode: 'json' }).$type<ManagerSynthesisResult>(),
+    balancePlacement: text('balance_placement', { mode: 'json' }).$type<BalancePlacement>(),
+    /** Same role as `panelSymbolAnalyses.synthesisComplete` — false until
+     * the manager's real result lands, so a run interrupted after the
+     * insert is never mistaken for one that finished. */
+    synthesisComplete: integer('synthesis_complete', { mode: 'boolean' }).notNull().default(false),
+  },
+  (t) => [index('re_runs_started_idx').on(t.startedAt)],
 );
 
 export const fxRates = sqliteTable(
