@@ -32,7 +32,7 @@ from app.features import (
     term_slope,
     underlying_features,
 )
-from app.db import connect, read_quotes
+from app.db import reading, read_quotes
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "options"
 NVDA = json.loads((FIXTURES / "nvda-chain.json").read_text())
@@ -218,7 +218,7 @@ def _underlying_with_multi_expiry_puts_and_calls() -> tuple[str, str] | None:
     so the tests that need it can skip with a clear reason instead of
     failing on a fresh checkout.
     """
-    with connect() as conn:
+    with reading() as conn:
         row = conn.execute(
             """
             SELECT c.underlying, q.trading_day

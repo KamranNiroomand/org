@@ -107,11 +107,11 @@ export async function runAutoEntry(
         entryPriceE4: Math.round(candidate.market_price * 10_000),
         source: 'model',
         notes: `Auto-opened: EV ${candidate.ev.toFixed(2)}, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%.`,
+        entryEv: candidate.ev,
         exitPlan: {
           targetExitPriceE4: Math.round(candidate.suggested_target_exit_price * 10_000),
           stopLossPriceE4: Math.round(candidate.suggested_stop_loss_price * 10_000),
           targetExitDate: candidate.suggested_target_exit_date,
-          entryEv: candidate.ev,
         },
       });
       opened.push({ occSymbol: candidate.occ_symbol, orderId });

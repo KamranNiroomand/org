@@ -68,8 +68,15 @@ export interface OpenOrderInput {
     targetExitPriceE4: number;
     stopLossPriceE4: number;
     targetExitDate: string;
-    entryEv: number;
   };
+  /**
+   * The ranked signal's expected value at the moment this order opened —
+   * the reference point the exit engine compares against to detect a sign
+   * flip. Separate from `exitPlan` because it describes the entry, not the
+   * exit: a caller can know the EV it acted on without having a
+   * deterministic exit plan to go with it.
+   */
+  entryEv?: number;
 }
 
 /**
@@ -134,7 +141,7 @@ export function openOrder(input: OpenOrderInput): string {
       targetExitPriceE4: input.exitPlan?.targetExitPriceE4 ?? null,
       stopLossPriceE4: input.exitPlan?.stopLossPriceE4 ?? null,
       targetExitDate: input.exitPlan?.targetExitDate ?? null,
-      entryEv: input.exitPlan?.entryEv ?? null,
+      entryEv: input.entryEv ?? null,
       exitUpdatedAt: input.exitPlan ? nowIso() : null,
       openedAt: nowIso(),
     })
