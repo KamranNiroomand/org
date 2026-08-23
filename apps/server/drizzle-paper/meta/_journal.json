@@ -15,6 +15,20 @@
       "when": 1787161098628,
       "tag": "0001_square_paibok",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787486687203,
+      "tag": "0002_cloudy_maximus",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787497663780,
+      "tag": "0003_warm_stick",
+      "breakpoints": true
     }
   ]
 }

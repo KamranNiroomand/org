@@ -105,6 +105,18 @@ export interface PositionHealth {
   computedAt: string;
 }
 
+export interface ExitRevision {
+  id: number;
+  orderId: string;
+  revisedAt: string;
+  oldTargetExitPriceE4: number | null;
+  newTargetExitPriceE4: number | null;
+  oldTargetExitDate: string | null;
+  newTargetExitDate: string | null;
+  reason: string;
+  triggeredBy: 'rule' | 'llm';
+}
+
 export interface PaperOrder {
   id: string;
   occSymbol: string;
@@ -117,9 +129,16 @@ export interface PaperOrder {
   exitBasis: 'measured' | 'modelled' | null;
   source: 'manual' | 'model';
   notes: string | null;
+  /** Present only on a `source: 'model'` order the exit engine manages — see exitEngine.ts. */
+  targetExitPriceE4: number | null;
+  stopLossPriceE4: number | null;
+  targetExitDate: string | null;
+  entryEv: number | null;
+  exitUpdatedAt: string | null;
   openedAt: string;
   closedAt: string | null;
   health: PositionHealth | null;
+  exitRevisions: ExitRevision[];
 }
 
 export interface PaperEquityPoint {
@@ -182,6 +201,17 @@ export const optionsApi = {
   markNow: () => api.post<{ tradingDay: string; marked: number; skipped: unknown[] }>('/api/paper/mark'),
   checkHealthNow: () =>
     api.post<{ tradingDay: string; scored: number; skipped: unknown[] }>('/api/paper/health'),
+  exitRecheckNow: () =>
+    api.post<{ checked: number; closed: number; revised: number; escalated: number; status: string; errors: string[] }>(
+      '/api/paper/exit-recheck',
+    ),
+
+  /** Most recent run first — see the `/api/quant/runs` route. `metrics.beats_baseline`
+   * is the one field that must never be hidden, per rank.py's own module docstring. */
+  modelRuns: (target: string) =>
+    api.get<Array<{ runId: string; target: string; metrics: { beats_baseline?: boolean } }>>(
+      `/api/quant/runs?target=${target}`,
+    ),
 
   rank: (day: string, top = 25, maxCapital?: number) =>
     api.get<RankResponse>(

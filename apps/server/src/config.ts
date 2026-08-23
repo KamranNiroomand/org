@@ -98,6 +98,24 @@ const schema = z.object({
   RETRAIN_CRON: z.string().default('0 8 * * 0'),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
+  // Auto-entry: once/day, the top-ranked contract clearing both bars below
+  // (and with no existing open position on its underlying) is opened
+  // automatically as a `source: 'model'` paper order — see autoEntry.ts.
+  // Explicitly a first-pass gate, same honesty framing as the radar's own
+  // eligibility floor: not backtested, just a sanity bar against opening
+  // something the ranking itself considers marginal.
+  AUTO_ENTRY_MIN_EV_PER_RISK: z.coerce.number().default(0.05),
+  AUTO_ENTRY_MIN_PROB_PROFIT: z.coerce.number().min(0).max(1).default(0.5),
+  // The adaptive exit engine — see exitEngine.ts and exit.py's own module
+  // docstring. Market hours only, matching TEXT_SYNC_CRON's cadence
+  // reasoning: nothing changes about a position's exit outside trading
+  // hours, so polling then would just spend budget on silence.
+  EXIT_RECHECK_CRON: z.string().default('*/15 9-16 * * 1-5'),
+  // Same naming tier and reasoning as PANEL_MAX_CALLS_PER_RUN — a hard
+  // ceiling on the LLM escalation path only (see exitEngine.ts's
+  // `needs_review` handling); the deterministic rule path in exit.py never
+  // spends an Anthropic call at all.
+  EXIT_RECHECK_MAX_CALLS_PER_RUN: z.coerce.number().int().positive().default(30),
   // SEC EDGAR's fair-access policy requires every request to identify a real
   // contact — an unidentified or generic User-Agent gets rate-limited or
   // blocked outright. No default: this one has to name a real person or org.
@@ -270,6 +288,16 @@ export const config = {
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
     edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,
+    /** See AUTO_ENTRY_MIN_EV_PER_RISK/AUTO_ENTRY_MIN_PROB_PROFIT above and autoEntry.ts. */
+    autoEntry: {
+      minEvPerRisk: env.AUTO_ENTRY_MIN_EV_PER_RISK,
+      minProbProfit: env.AUTO_ENTRY_MIN_PROB_PROFIT,
+    },
+    /** See EXIT_RECHECK_CRON/EXIT_RECHECK_MAX_CALLS_PER_RUN above and exitEngine.ts. */
+    exitRecheck: {
+      cron: env.EXIT_RECHECK_CRON,
+      maxCallsPerRun: env.EXIT_RECHECK_MAX_CALLS_PER_RUN,
+    },
   },
 
   syncCron: env.SYNC_CRON,

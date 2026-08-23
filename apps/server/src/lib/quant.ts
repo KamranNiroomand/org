@@ -46,6 +46,12 @@ export interface RankedContract {
   ev: number;
   ev_per_risk: number;
   prob_profit: number;
+  /** Populated on a fresh `/rank` entry candidate, null on a `/position-health`
+   * re-score — see `exit.py`'s `compute_initial_exit_target`. A tunable
+   * first-pass plan, not a validated one. */
+  suggested_target_exit_price: number | null;
+  suggested_stop_loss_price: number | null;
+  suggested_target_exit_date: string | null;
 }
 
 export interface RankResult {
@@ -227,4 +233,78 @@ export async function positionHealth(day: string, contracts: HeldContract[]): Pr
     throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as PositionHealthResult;
+}
+
+export interface ExitTarget {
+  targetExitPriceE4: number;
+  stopLossPriceE4: number;
+  targetExitDate: string;
+}
+
+export type ExitAction = 'hold' | 'exit_now' | 'needs_review';
+
+export interface ExitDecisionResult {
+  action: ExitAction;
+  newTargetExitPriceE4: number | null;
+  newTargetExitDate: string | null;
+  reason: string;
+  triggeredBy: string;
+}
+
+export interface EvaluateExitInput {
+  currentPriceE4: number;
+  dte: number;
+  target: ExitTarget;
+  entryEv?: number;
+  currentEv?: number;
+  newDocumentsCount?: number;
+}
+
+/**
+ * Every time the intraday exit job fires — see
+ * `apps/server/src/lib/options/exitEngine.ts` and `exit.py`'s own module
+ * docstring for why this never re-derives EV or re-runs the model itself:
+ * the caller already has a live price and today's once-daily health view,
+ * and this call is cheap arithmetic against both.
+ */
+export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisionResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/exit-decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        current_price: input.currentPriceE4 / 10_000,
+        dte: input.dte,
+        target: {
+          target_exit_price: input.target.targetExitPriceE4 / 10_000,
+          stop_loss_price: input.target.stopLossPriceE4 / 10_000,
+          target_exit_date: input.target.targetExitDate,
+        },
+        entry_ev: input.entryEv ?? null,
+        current_ev: input.currentEv ?? null,
+        new_documents_count: input.newDocumentsCount ?? 0,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (!res.ok) {
+    throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as {
+    action: ExitAction;
+    new_target_exit_price: number | null;
+    new_target_exit_date: string | null;
+    reason: string;
+    triggered_by: string;
+  };
+  return {
+    action: body.action,
+    newTargetExitPriceE4: body.new_target_exit_price !== null ? Math.round(body.new_target_exit_price * 10_000) : null,
+    newTargetExitDate: body.new_target_exit_date,
+    reason: body.reason,
+    triggeredBy: body.triggered_by,
+  };
 }

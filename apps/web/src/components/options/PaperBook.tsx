@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useState } from 'react';
+import { AlertTriangle } from 'lucide-react';
 import { formatMoney, money } from '@org/shared';
 import { Badge, Button, Card, CardHeader, Empty, Input, Skeleton, cn } from '../ui';
 import { StatTile } from '../charts';
@@ -162,18 +163,26 @@ function OrderRow({ order, onClosed }: { order: PaperOrder; onClosed: () => void
   const current = order.exitPriceE4 ?? order.entryPriceE4;
   const tradeReturn = ((current - order.entryPriceE4) / order.entryPriceE4) * 100;
 
+  const autoManaged = order.targetExitPriceE4 !== null;
+
   return (
     <div className="flex flex-wrap items-center gap-3 px-4 py-3 text-xs">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate font-mono">{order.occSymbol}</span>
           <Badge tone={order.status === 'open' ? 'accent' : 'neutral'}>{order.status}</Badge>
-          <Badge tone={order.source === 'model' ? 'accent' : 'neutral'}>{order.source}</Badge>
+          <Badge tone={autoManaged ? 'accent' : 'neutral'}>{autoManaged ? 'auto-managed' : order.source}</Badge>
         </div>
         <div className="tnum mt-0.5 text-muted">
           {order.quantity} @ {usd(order.entryPriceE4)}
           {order.entryBasis === 'modelled' && ' · estimated'}
         </div>
+        {autoManaged && order.status === 'open' && (
+          <div className="tnum mt-0.5 text-muted">
+            target {usd(order.targetExitPriceE4!)} · stop {usd(order.stopLossPriceE4!)} · by{' '}
+            {order.targetExitDate}
+          </div>
+        )}
       </div>
       <div className="tnum text-right">
         <div className={cn('font-medium', tradeReturn >= 0 ? 'text-positive' : 'text-negative')}>
@@ -201,6 +210,29 @@ function OrderRow({ order, onClosed }: { order: PaperOrder; onClosed: () => void
         </div>
       )}
       {order.status === 'open' && <PositionHealthLine health={order.health} />}
+      {autoManaged && order.exitRevisions.length > 0 && <ExitRevisionTimeline revisions={order.exitRevisions} />}
+    </div>
+  );
+}
+
+/**
+ * Why the exit target moved, not just its current value — one line per
+ * revision, newest first, in the same plain-text "show your work" style as
+ * `PositionHealthLine` and the multi-agent panel's own transcript.
+ */
+function ExitRevisionTimeline({ revisions }: { revisions: PaperOrder['exitRevisions'] }) {
+  return (
+    <div className="tnum flex w-full flex-col gap-1 border-t border-border/60 pt-1.5 text-[11px] text-muted">
+      {revisions.map((r) => (
+        <div key={r.id} className="flex flex-wrap items-center gap-x-2">
+          <Badge tone={r.triggeredBy === 'llm' ? 'warning' : 'neutral'}>{r.triggeredBy}</Badge>
+          <span>
+            target {r.oldTargetExitPriceE4 !== null ? usd(r.oldTargetExitPriceE4) : '—'} →{' '}
+            {r.newTargetExitPriceE4 !== null ? usd(r.newTargetExitPriceE4) : '—'}
+          </span>
+          <span className="truncate">{r.reason}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -251,10 +283,15 @@ export function PaperBook() {
     queryFn: () => optionsApi.paperEquity(),
     refetchInterval: 60_000,
   });
+  // Whether the signal behind every auto-managed order below has actually
+  // demonstrated an edge — see rank.py's own module docstring on why this
+  // fact must travel with the numbers, not be buried in a README.
+  const { data: runs } = useQuery({ queryKey: ['model-runs', 'dir'], queryFn: () => optionsApi.modelRuns('dir') });
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ['paper-equity'] });
   const mark = useMutation({ mutationFn: () => optionsApi.markNow(), onSuccess: invalidate });
   const checkHealth = useMutation({ mutationFn: () => optionsApi.checkHealthNow(), onSuccess: invalidate });
+  const exitRecheck = useMutation({ mutationFn: () => optionsApi.exitRecheckNow(), onSuccess: invalidate });
 
   if (isLoading) return <Skeleton className="h-64" />;
   if (!data) return null;
@@ -263,9 +300,21 @@ export function PaperBook() {
   const open = data.orders.filter((o) => o.status === 'open');
   const closed = data.orders.filter((o) => o.status === 'closed');
   const points = data.equity.map((e) => ({ day: e.day.slice(5), equity: e4ToUsd(e.totalEquityE4) }));
+  const autoManagedOpen = open.some((o) => o.targetExitPriceE4 !== null);
+  const latestRun = runs?.[0];
+  const modelBeatsBaseline = latestRun?.metrics?.beats_baseline ?? null;
 
   return (
     <div className="space-y-4">
+      {autoManagedOpen && modelBeatsBaseline === false && (
+        <div className="flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+          <AlertTriangle className="size-3.5 shrink-0" />
+          The model behind your auto-managed positions ({latestRun!.runId}) does not beat its own
+          out-of-fold baseline — every entry and exit below is acting on an unproven signal, not a
+          validated one.
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatTile label="Starting balance" value={usd(data.startingBalanceE4)} />
         <StatTile
@@ -301,9 +350,14 @@ export function PaperBook() {
           title="Positions"
           subtitle="Per-trade return — distinct from the account-level curve above"
           action={
-            <Button size="sm" variant="ghost" onClick={() => checkHealth.mutate()} disabled={checkHealth.isPending}>
-              Check health
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" variant="ghost" onClick={() => checkHealth.mutate()} disabled={checkHealth.isPending}>
+                Check health
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => exitRecheck.mutate()} disabled={exitRecheck.isPending}>
+                Exit recheck
+              </Button>
+            </div>
           }
         />
         {data.orders.length === 0 ? (
