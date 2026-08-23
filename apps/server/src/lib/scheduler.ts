@@ -199,6 +199,17 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
         log.info(`Market sync: ${pull.message}`);
         const tradingDay = latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
         await runPaperMaintenance(log, tradingDay);
+        // Same reasoning as runPaperMaintenance just above: a paper-trading
+        // decision belongs on whichever machine the corpus is fresh on, not
+        // only the runner. Without this, a reader-only setup would never
+        // get an auto-opened trade even though its own pull just gave it
+        // today's data to rank against.
+        try {
+          const entry = await runAutoEntry(tradingDay);
+          if (entry.openedOccSymbol) log.info(`Auto-entry opened ${entry.openedOccSymbol}`);
+        } catch (err) {
+          result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);
+        }
       } else {
         result.errors.push(`Market sync: ${pull.message}`);
       }

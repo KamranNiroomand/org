@@ -56,6 +56,16 @@ export const paperOrders = sqliteTable(
     id: text('id').primaryKey(),
     /** No FK — see the module docstring. Validated at write time instead. */
     occSymbol: text('occ_symbol').notNull(),
+    /**
+     * Denormalized at open time from the contract's own row, rather than
+     * re-derived later via a live join to `optionContracts` — a contract
+     * can be pruned or expire out of that table while its order is still
+     * open, and re-resolving "which underlying is this" on demand would
+     * then silently fail exactly when a caller (autoEntry.ts's own
+     * one-position-per-underlying guard) needs it most. Null only for
+     * orders opened before this column existed.
+     */
+    underlying: text('underlying'),
     side: text('side', { enum: ['long', 'short'] }).notNull().default('long'),
     quantity: integer('quantity').notNull(),
     /** Per-contract entry price, E4. The ask for a long — what it actually cost. */

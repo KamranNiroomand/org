@@ -69,6 +69,15 @@ def compute_initial_exit_target(
     short-dated contract bought against a longer-horizon forecast), the
     floor wins: there is no honest target date to suggest past a contract's
     own useful life.
+
+    Raises `ValueError` when the contract's entire remaining life is at or
+    inside `min_dte_floor` — a contract with 2 days to expiry and a 3-day
+    floor has no day left that both exists and clears the floor, and an
+    earlier version of this function silently clamped `horizon_days` up to
+    1 in that case, producing a target date *inside* the floor it was meant
+    to guarantee. The caller (see `main.py`'s `from_ranked`) treats this the
+    same as any other "no target computable" case: null suggested fields,
+    not a fabricated one.
     """
     if entry_price <= 0:
         raise ValueError(f"entry_price must be positive, got {entry_price}")
@@ -76,6 +85,14 @@ def compute_initial_exit_target(
     entry_date = date.fromisoformat(entry_day)
     expiry_date = date.fromisoformat(expiry)
     latest_sensible_day = (expiry_date - entry_date).days - min_dte_floor
+    if latest_sensible_day < 1:
+        raise ValueError(
+            f"{expiry} is only {(expiry_date - entry_date).days} day(s) out from {entry_day} — "
+            f"no target date exists that both exists and stays {min_dte_floor}+ day(s) clear of expiry."
+        )
+    # Safe now that latest_sensible_day >= 1 is guaranteed above: this only
+    # clamps a non-positive forecast_horizon_days up to 1, never back into
+    # the floor the guard above already ruled out.
     horizon_days = max(1, min(forecast_horizon_days, latest_sensible_day))
     target_date = entry_date + timedelta(days=horizon_days)
 

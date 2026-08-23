@@ -56,6 +56,44 @@ class TestComputeInitialExitTarget:
                 entry_price=0.0, expiry="2026-03-20", entry_day="2026-01-01", forecast_horizon_days=5
             )
 
+    def test_refuses_a_target_when_the_contracts_entire_life_is_inside_the_floor(self) -> None:
+        # 2 days to expiry against a 3-day floor: no day exists that both
+        # exists and clears the floor. Regression test for a version that
+        # silently clamped horizon_days back up to 1, landing the target
+        # date *inside* the floor it was supposed to guarantee.
+        with pytest.raises(ValueError):
+            compute_initial_exit_target(
+                entry_price=2.00,
+                expiry="2026-01-03",
+                entry_day="2026-01-01",
+                forecast_horizon_days=5,
+                min_dte_floor=3,
+            )
+
+    def test_refuses_a_target_when_expiry_lands_exactly_on_the_floor(self) -> None:
+        # (expiry - entry).days == min_dte_floor exactly: latest_sensible_day
+        # is 0, still no day clears the floor.
+        with pytest.raises(ValueError):
+            compute_initial_exit_target(
+                entry_price=2.00,
+                expiry="2026-01-04",
+                entry_day="2026-01-01",
+                forecast_horizon_days=5,
+                min_dte_floor=3,
+            )
+
+    def test_computes_a_target_at_the_one_day_boundary_clear_of_the_floor(self) -> None:
+        # (expiry - entry).days = 4, min_dte_floor = 3: exactly one real day
+        # (entry_day + 1) clears the floor, and this must not raise.
+        target = compute_initial_exit_target(
+            entry_price=2.00,
+            expiry="2026-01-05",
+            entry_day="2026-01-01",
+            forecast_horizon_days=5,
+            min_dte_floor=3,
+        )
+        assert target.target_exit_date == "2026-01-02"
+
 
 class TestEvaluateExit:
     def _target(self, **overrides) -> ExitTarget:

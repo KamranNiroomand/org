@@ -76,7 +76,7 @@ export function openOrder(input: OpenOrderInput): string {
     throw new PaperError(`quantity must be a positive integer, got ${input.quantity}`);
   }
 
-  contractMultiplier(input.occSymbol); // validates the contract exists
+  const { underlying } = contractMultiplier(input.occSymbol); // validates the contract exists
 
   let entryPriceE4: number;
   let entryBasis: 'measured' | 'modelled';
@@ -103,6 +103,7 @@ export function openOrder(input: OpenOrderInput): string {
     .values({
       id,
       occSymbol: input.occSymbol,
+      underlying,
       side: 'long',
       quantity: input.quantity,
       entryPriceE4,

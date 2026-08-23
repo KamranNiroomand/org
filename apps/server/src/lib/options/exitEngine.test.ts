@@ -9,9 +9,10 @@ import { paperDb } from '../../db/paper/index.js';
 import { runPaperMigrations } from '../../db/paper/migrate.js';
 import { paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
 import { openOrder } from '../paper.js';
+import { QuantRefusal } from '../quant.js';
 import { nowIso } from '../util.js';
 import type { ChainQuote, ChainRequest, DailyBar, OptionsProvider } from './provider.js';
-import { runExitEngine, type ExitEngineDeps } from './exitEngine.js';
+import { runExitEngine, revisionsByOrder, type ExitEngineDeps } from './exitEngine.js';
 
 /**
  * `evaluateExit`/`scoreHeldContracts`/`adviseOnExit` are injected (see
@@ -276,5 +277,101 @@ describe('runExitEngine', () => {
     expect(summary.status).toBe('partial');
     expect(summary.llmCallsMade).toBe(0);
     expect(summary.errors.some((e) => e.includes('budget exhausted'))).toBe(true);
+  });
+
+  it('refuses a second concurrent run while one is already in progress', async () => {
+    openManagedPosition();
+    let releaseFirst: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async (input) => {
+        await gate; // hold the first run open until the second has been attempted
+        return NEVER_REVIEW_DEPS.evaluateExit(input);
+      },
+    };
+    const first = runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+    // Give the first run a tick to set the lock before the second starts.
+    await new Promise((r) => setTimeout(r, 0));
+    const second = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), NEVER_REVIEW_DEPS);
+    expect(second.checked).toBe(0);
+    expect(second.errors.some((e) => e.includes('already in progress'))).toBe(true);
+    releaseFirst();
+    const firstResult = await first;
+    expect(firstResult.checked).toBe(1);
+  });
+
+  it('still runs the deterministic price/DTE checks when scoreHeldContracts refuses (QuantRefusal), not just when it is unreachable', async () => {
+    const id = openManagedPosition();
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      scoreHeldContracts: async () => {
+        throw new QuantRefusal('model does not beat baseline');
+      },
+      evaluateExit: async () => ({
+        action: 'exit_now',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'hit stop-loss',
+        triggeredBy: 'stop_loss',
+      }),
+    };
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(0.4))), deps);
+    expect(summary.closed).toBe(1);
+    expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('closed');
+  });
+
+  it('records an error rather than silently dropping a move_target advisory missing its target fields', async () => {
+    const id = openManagedPosition();
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      anthropicConfigured: true,
+      evaluateExit: async () => ({
+        action: 'needs_review',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'new documents',
+        triggeredBy: 'new_news',
+      }),
+      adviseOnExit: async () => ({
+        action: 'move_target',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reasoning: 'malformed response',
+        citedInputs: [],
+      }),
+    };
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+    expect(summary.revised).toBe(0);
+    expect(summary.errors.some((e) => e.includes('a missing target price/date'))).toBe(true);
+    expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('open');
+    expect(revisionsByOrder().get(id)).toBeUndefined();
+  });
+
+  it('bumps exitUpdatedAt after any advisor review, including a hold, so the same documents do not re-trigger the next recheck', async () => {
+    const id = openManagedPosition({ exitUpdatedAt: '2020-01-01T00:00:00.000Z' });
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      anthropicConfigured: true,
+      evaluateExit: async () => ({
+        action: 'needs_review',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'new documents',
+        triggeredBy: 'new_news',
+      }),
+      adviseOnExit: async () => ({
+        action: 'hold',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reasoning: 'One ambiguous headline is not grounds to exit.',
+        citedInputs: [],
+      }),
+    };
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+    const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
+    expect(order.exitUpdatedAt).not.toBe('2020-01-01T00:00:00.000Z');
   });
 });

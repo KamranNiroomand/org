@@ -121,6 +121,37 @@ describe('runAutoEntry', () => {
     expect(paperDb.select().from(paperOrders).all()).toHaveLength(1);
   });
 
+  it('still refuses a second position on an underlying whose contract has since been pruned from the corpus', async () => {
+    // Regression test: underlying used to be re-derived at check time via a
+    // live join to optionContracts, so a position whose contract had
+    // expired/been pruned would silently drop out of the held-set and a
+    // second position on the same name could open. underlying is now
+    // denormalized onto the order at open time, so this must still refuse.
+    const c = ranked();
+    contract(c.occ_symbol, 'NVDA');
+    openOrder({ occSymbol: c.occ_symbol, quantity: 1, entryPriceE4: toE4(1.5), source: 'model' });
+    marketDb.delete(optionContracts).run(); // the contract is gone; the open order remains
+
+    const result = await runAutoEntry('2026-08-18', rankFn([c]));
+
+    expect(result.openedOccSymbol).toBeNull();
+    expect(paperDb.select().from(paperOrders).all()).toHaveLength(1);
+  });
+
+  it('skips a candidate whose exit target could not be computed rather than opening it unmanaged', async () => {
+    const noTarget = ranked({
+      suggested_target_exit_price: null,
+      suggested_stop_loss_price: null,
+      suggested_target_exit_date: null,
+    });
+    contract(noTarget.occ_symbol, 'NVDA');
+
+    const result = await runAutoEntry('2026-08-18', rankFn([noTarget]));
+
+    expect(result.openedOccSymbol).toBeNull();
+    expect(paperDb.select().from(paperOrders).all()).toHaveLength(0);
+  });
+
   it('records a skip reason rather than throwing when the quant sidecar is unreachable', async () => {
     // No injected rankDayFn — exercises the real one against the suite's
     // pinned-unreachable QUANT_URL (see vitest.config.ts).

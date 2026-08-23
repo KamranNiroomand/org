@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { config } from '../../config.js';
 import { paperDb } from '../../db/paper/index.js';
 import { paperOrders } from '../../db/paper/schema.js';
-import { contractMultiplier, openOrder, PaperError } from '../paper.js';
+import { openOrder, PaperError } from '../paper.js';
 import { rankDay, QuantRefusal, QuantUnavailable, type RankedContract } from '../quant.js';
 import { nowIso } from '../util.js';
 
@@ -29,25 +29,35 @@ export interface AutoEntryResult {
   skippedReason: string | null;
 }
 
+/**
+ * Reads the underlying straight off each open order — denormalized at open
+ * time in `openOrder` (see `paperOrders.underlying`'s own doc comment) —
+ * rather than re-resolving it via a live join to `optionContracts`. That
+ * join is exactly what used to break this guarantee: a contract pruned or
+ * expired out of the corpus while its order was still open would silently
+ * drop out of the held-set, letting a second position open on the same
+ * name. Only pre-migration rows (`underlying` still null) fall through
+ * this check — a one-time gap that closes as those orders close.
+ */
 function alreadyHeldUnderlyings(): Set<string> {
-  const open = paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all();
-  const underlyings = new Set<string>();
-  for (const order of open) {
-    try {
-      underlyings.add(contractMultiplier(order.occSymbol).underlying);
-    } catch {
-      // Contract no longer resolvable (expired/removed) — irrelevant to
-      // "is this underlying already held", not this function's concern.
-    }
-  }
-  return underlyings;
+  const open = paperDb.select({ underlying: paperOrders.underlying }).from(paperOrders).where(eq(paperOrders.status, 'open')).all();
+  return new Set(open.map((o) => o.underlying).filter((u): u is string => u !== null));
+}
+
+function hasExitTarget(c: RankedContract): boolean {
+  return c.suggested_target_exit_price !== null && c.suggested_stop_loss_price !== null && c.suggested_target_exit_date !== null;
 }
 
 function pickCandidate(contracts: RankedContract[], heldUnderlyings: Set<string>): RankedContract | null {
   const eligible = contracts
     .filter((c) => c.ev_per_risk >= config.market.autoEntry.minEvPerRisk)
     .filter((c) => c.prob_profit >= config.market.autoEntry.minProbProfit)
-    .filter((c) => !heldUnderlyings.has(c.underlying));
+    .filter((c) => !heldUnderlyings.has(c.underlying))
+    // A candidate this can't compute an exit plan for can't be auto-managed
+    // — opening it anyway would leave a `source: 'model'` position with no
+    // target that exitEngine.ts's managedOpenOrders() can never see again.
+    // Better to skip it for today than open something silently unmanaged.
+    .filter(hasExitTarget);
   if (eligible.length === 0) return null;
   return eligible.reduce((best, c) => (c.ev > best.ev ? c : best));
 }
@@ -98,18 +108,20 @@ export async function runAutoEntry(day: string, rankDayFn: typeof rankDay = rank
     return { day, openedOccSymbol: null, orderId: null, skippedReason: reason };
   }
 
-  const update: Partial<typeof paperOrders.$inferInsert> = { entryEv: candidate.ev };
-  if (
-    candidate.suggested_target_exit_price !== null &&
-    candidate.suggested_stop_loss_price !== null &&
-    candidate.suggested_target_exit_date !== null
-  ) {
-    update.targetExitPriceE4 = Math.round(candidate.suggested_target_exit_price * 10_000);
-    update.stopLossPriceE4 = Math.round(candidate.suggested_stop_loss_price * 10_000);
-    update.targetExitDate = candidate.suggested_target_exit_date;
-    update.exitUpdatedAt = nowIso();
-  }
-  paperDb.update(paperOrders).set(update).where(eq(paperOrders.id, orderId)).run();
+  // pickCandidate already required a full exit target (hasExitTarget) — a
+  // candidate without one is never selected, so this order is never left
+  // open without a target to manage.
+  paperDb
+    .update(paperOrders)
+    .set({
+      entryEv: candidate.ev,
+      targetExitPriceE4: Math.round(candidate.suggested_target_exit_price! * 10_000),
+      stopLossPriceE4: Math.round(candidate.suggested_stop_loss_price! * 10_000),
+      targetExitDate: candidate.suggested_target_exit_date!,
+      exitUpdatedAt: nowIso(),
+    })
+    .where(eq(paperOrders.id, orderId))
+    .run();
 
   return { day, openedOccSymbol: candidate.occ_symbol, orderId, skippedReason: null };
 }

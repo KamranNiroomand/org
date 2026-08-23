@@ -222,6 +222,22 @@ class RankRequest(BaseModel):
     max_capital: float | None = Field(default=None, gt=0)
 
 
+def _try_compute_exit_target(
+    market_price: float, expiry: str, entry_day: str, horizon: int
+) -> ExitTarget | None:
+    """`compute_initial_exit_target` refuses (raises `ValueError`) when a
+    contract's remaining life leaves no day that both exists and clears its
+    DTE floor — see exit.py's own docstring. That is the same "no honest
+    target exists" case as `entry_day`/`horizon` being unknown, so it gets
+    the same treatment here: null suggested fields, not a crash of the
+    entire `/rank` response over one contract too close to expiry.
+    """
+    try:
+        return compute_initial_exit_target(market_price, expiry, entry_day, horizon)
+    except ValueError:
+        return None
+
+
 class RankedContractResponse(BaseModel):
     occ_symbol: str
     underlying: str
@@ -252,7 +268,7 @@ class RankedContractResponse(BaseModel):
         cls, c: RankedContract, entry_day: str | None = None, horizon: int | None = None
     ) -> "RankedContractResponse":
         target = (
-            compute_initial_exit_target(c.market_price, c.expiry, entry_day, horizon)
+            _try_compute_exit_target(c.market_price, c.expiry, entry_day, horizon)
             if entry_day is not None and horizon is not None
             else None
         )

@@ -1,0 +1,1 @@
+ALTER TABLE `paper_orders` ADD `underlying` text;
