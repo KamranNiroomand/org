@@ -375,3 +375,45 @@ describe('runExitEngine', () => {
     expect(order.exitUpdatedAt).not.toBe('2020-01-01T00:00:00.000Z');
   });
 });
+
+describe('runExitEngine revision atomicity', () => {
+  it('records the revision and the moved target as one unit, or neither', async () => {
+    const id = openManagedPosition();
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      anthropicConfigured: true,
+      evaluateExit: async () => ({
+        action: 'needs_review',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'new documents',
+        triggeredBy: 'new_news',
+      }),
+      adviseOnExit: async () => ({
+        action: 'move_target',
+        // A date the column accepts but that pairs with a price the
+        // revision row and the order must agree on — the point is that
+        // both rows reflect the same decision, never one without the other.
+        newTargetExitPriceE4: toE4(1.9),
+        newTargetExitDate: '2026-09-12',
+        reasoning: 'Filing supports holding longer.',
+        citedInputs: ['newDocuments'],
+      }),
+    };
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+
+    const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
+    const revisions = paperDb.select().from(paperExitRevisions).where(eq(paperExitRevisions.orderId, id)).all();
+
+    // Both sides of the transaction landed, and they agree.
+    expect(revisions).toHaveLength(1);
+    expect(order.targetExitPriceE4).toBe(toE4(1.9));
+    expect(order.targetExitDate).toBe('2026-09-12');
+    expect(revisions[0]!.newTargetExitPriceE4).toBe(order.targetExitPriceE4);
+    expect(revisions[0]!.newTargetExitDate).toBe(order.targetExitDate);
+    // And the revision recorded where it came *from*, so the audit trail
+    // reconstructs the whole path rather than just the current value.
+    expect(revisions[0]!.oldTargetExitPriceE4).toBe(toE4(1.5));
+  });
+});

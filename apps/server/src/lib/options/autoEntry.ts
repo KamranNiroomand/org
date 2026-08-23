@@ -1,10 +1,6 @@
-import { eq } from 'drizzle-orm';
 import { config } from '../../config.js';
-import { paperDb } from '../../db/paper/index.js';
-import { paperOrders } from '../../db/paper/schema.js';
 import { accountCapacity, openOrder, PaperError } from '../paper.js';
 import { selectEntries, QuantRefusal, QuantUnavailable, type RankedContract } from '../quant.js';
-import { nowIso } from '../util.js';
 
 /**
  * Once/day, alongside the existing rank refresh: opens every contract the
@@ -103,24 +99,21 @@ export async function runAutoEntry(
         failures.push(`${candidate.occ_symbol}: selected without a complete exit plan — not opened`);
         continue;
       }
+      // Order and exit plan land in one insert — see `OpenOrderInput.exitPlan`
+      // for why this must not be an insert followed by an update.
       const orderId = openOrder({
         occSymbol: candidate.occ_symbol,
         quantity: 1,
         entryPriceE4: Math.round(candidate.market_price * 10_000),
         source: 'model',
         notes: `Auto-opened: EV ${candidate.ev.toFixed(2)}, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%.`,
-      });
-      paperDb
-        .update(paperOrders)
-        .set({
-          entryEv: candidate.ev,
+        exitPlan: {
           targetExitPriceE4: Math.round(candidate.suggested_target_exit_price * 10_000),
           stopLossPriceE4: Math.round(candidate.suggested_stop_loss_price * 10_000),
           targetExitDate: candidate.suggested_target_exit_date,
-          exitUpdatedAt: nowIso(),
-        })
-        .where(eq(paperOrders.id, orderId))
-        .run();
+          entryEv: candidate.ev,
+        },
+      });
       opened.push({ occSymbol: candidate.occ_symbol, orderId });
     } catch (err) {
       // One contract failing to open must not cost the rest of the day's

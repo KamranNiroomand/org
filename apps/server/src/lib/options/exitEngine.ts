@@ -253,24 +253,28 @@ export async function runExitEngine(
             );
             continue;
           }
-          paperDb
-            .insert(paperExitRevisions)
-            .values({
-              orderId: order.id,
-              revisedAt: nowIso(),
-              oldTargetExitPriceE4: order.targetExitPriceE4,
-              newTargetExitPriceE4: advice.newTargetExitPriceE4,
-              oldTargetExitDate: order.targetExitDate,
-              newTargetExitDate: advice.newTargetExitDate,
-              reason: advice.reasoning,
-              triggeredBy: 'llm',
-            })
-            .run();
-          paperDb
-            .update(paperOrders)
-            .set({ targetExitPriceE4: advice.newTargetExitPriceE4, targetExitDate: advice.newTargetExitDate })
-            .where(eq(paperOrders.id, order.id))
-            .run();
+          // One transaction, because a half-applied revision is worse than
+          // no revision: the log alone claims a change that never reached
+          // the order, and the order alone moves a target with no audit
+          // trail behind it. Same idiom as routes/options.ts's promote.
+          paperDb.transaction((tx) => {
+            tx.insert(paperExitRevisions)
+              .values({
+                orderId: order.id,
+                revisedAt: nowIso(),
+                oldTargetExitPriceE4: order.targetExitPriceE4,
+                newTargetExitPriceE4: advice.newTargetExitPriceE4,
+                oldTargetExitDate: order.targetExitDate,
+                newTargetExitDate: advice.newTargetExitDate,
+                reason: advice.reasoning,
+                triggeredBy: 'llm',
+              })
+              .run();
+            tx.update(paperOrders)
+              .set({ targetExitPriceE4: advice.newTargetExitPriceE4, targetExitDate: advice.newTargetExitDate })
+              .where(eq(paperOrders.id, order.id))
+              .run();
+          });
           summary.revised += 1;
         }
         // advice.action === 'hold': nothing further to record — the target stands.

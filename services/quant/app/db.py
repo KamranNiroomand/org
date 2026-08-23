@@ -14,11 +14,18 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing, contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 
 import polars as pl
 
 _E4 = 10_000.0
+
+#: Wait this long for another process's write lock before raising
+#: `SQLITE_BUSY`. SQLite's own default is 0 — fail instantly — which is the
+#: wrong behaviour when Node is legitimately mid-write on the same file.
+BUSY_TIMEOUT_MS = 5_000
 
 
 def _market_db_path() -> Path:
@@ -47,7 +54,26 @@ def connect() -> sqlite3.Connection:
             f"run `npm run db:migrate:market -w @org/server` on the runner machine."
         ) from err
     conn.row_factory = sqlite3.Row
+    # Per-connection in SQLite, not a property of the file: without this a
+    # read landing while Node holds the write lock fails instantly rather
+    # than waiting the moment out.
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     return conn
+
+
+@contextmanager
+def reading() -> Iterator[sqlite3.Connection]:
+    """A connection that is actually closed when the block exits.
+
+    `with sqlite3.connect(...) as conn:` looks like it does this and does
+    not — `Connection.__enter__` is a *transaction* context manager, so the
+    handle survives the block and lives until garbage collection. Harmless
+    enough for a read, genuinely dangerous the moment anything here writes,
+    since a lingering write connection can sit on the WAL write lock and
+    block the other process. Every reader below goes through this instead.
+    """
+    with closing(connect()) as conn:
+        yield conn
 
 
 def read_bars(symbols: list[str] | None = None, start: str | None = None, end: str | None = None) -> pl.DataFrame:
@@ -85,7 +111,7 @@ def read_bars(symbols: list[str] | None = None, start: str | None = None, end: s
         params.append(end)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-    with connect() as conn:
+    with reading() as conn:
         rows = conn.execute(
             f"""
             SELECT symbol, day, open_e4, high_e4, low_e4, close_e4, adj_close_e4, volume
@@ -174,7 +200,7 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
     if liquid_only:
         query += " AND liquid = 1"
 
-    with connect() as conn:
+    with reading() as conn:
         rows = conn.execute(query, params).fetchall()
 
     if not rows:
@@ -228,7 +254,7 @@ def read_risk_free_curve(day: str) -> list[tuple[int, float]]:
     Python has no import path into the TS side and re-deriving the query is
     cheaper and safer than sharing a schema module across languages here.
     """
-    with connect() as conn:
+    with reading() as conn:
         latest = conn.execute(
             "SELECT day FROM risk_free_rates WHERE day <= ? ORDER BY day DESC LIMIT 1",
             [day],
@@ -267,7 +293,7 @@ def read_contract_history(occ_symbols: list[str]) -> pl.DataFrame:
         return pl.DataFrame(schema=schema)
 
     placeholders = ",".join("?" for _ in occ_symbols)
-    with connect() as conn:
+    with reading() as conn:
         rows = conn.execute(
             f"""
             WITH ranked AS (

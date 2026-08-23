@@ -349,3 +349,41 @@ describe('accountCapacity', () => {
     expect(accountCapacity().freeCashE4).toBe(0);
   });
 });
+
+describe('openOrder exit plan', () => {
+  it('writes the order and its exit plan in one insert', () => {
+    // The bug this closes: the plan used to be a second UPDATE right after
+    // the insert, so a crash between them left a `source: 'model'` order
+    // with no target — which `managedOpenOrders()` filters out forever,
+    // stranding an open position outside the exit engine's view.
+    const id = openOrder({
+      occSymbol: OCC,
+      quantity: 1,
+      entryPriceE4: ASK_E4,
+      source: 'model',
+      exitPlan: {
+        targetExitPriceE4: toE4(2.0),
+        stopLossPriceE4: toE4(0.5),
+        targetExitDate: '2026-09-01',
+        entryEv: 12.5,
+      },
+    });
+
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    expect(order.targetExitPriceE4).toBe(toE4(2.0));
+    expect(order.stopLossPriceE4).toBe(toE4(0.5));
+    expect(order.targetExitDate).toBe('2026-09-01');
+    expect(order.entryEv).toBe(12.5);
+    expect(order.exitUpdatedAt).not.toBeNull();
+  });
+
+  it('leaves every exit-plan field null for a manual order', () => {
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    expect(order.targetExitPriceE4).toBeNull();
+    expect(order.stopLossPriceE4).toBeNull();
+    expect(order.targetExitDate).toBeNull();
+    expect(order.entryEv).toBeNull();
+    expect(order.exitUpdatedAt).toBeNull();
+  });
+});

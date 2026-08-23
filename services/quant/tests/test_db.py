@@ -168,3 +168,36 @@ class TestReadContractHistoryDeduplication:
 
     def test_empty_symbol_list_returns_empty_without_querying(self, market_db) -> None:
         assert read_contract_history([]).height == 0
+
+
+class TestConnectionHygiene:
+    """`with sqlite3.connect(...)` is a *transaction* context manager, not a
+    closing one — the handle outlives the block. Harmless for a read;
+    genuinely dangerous once anything writes, since a lingering write
+    connection can hold the WAL write lock against the other process. These
+    pin the two properties that make that safe.
+    """
+
+    def test_reading_closes_its_connection(self, market_db) -> None:
+        from app.db import reading
+
+        with reading() as conn:
+            conn.execute("SELECT 1").fetchone()
+        # A closed sqlite3 connection raises on any further use.
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+    def test_connections_set_a_busy_timeout(self, market_db) -> None:
+        from app.db import BUSY_TIMEOUT_MS, reading
+
+        with reading() as conn:
+            got = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        # SQLite's own default is 0 — fail instantly the moment Node holds
+        # the write lock, rather than waiting the moment out.
+        assert got == BUSY_TIMEOUT_MS
+
+    def test_readers_still_cannot_write(self, market_db) -> None:
+        from app.db import reading
+
+        with reading() as conn, pytest.raises(sqlite3.OperationalError):
+            conn.execute("CREATE TABLE nope (x INTEGER)")
