@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { formatOccSymbol, toE4 } from '@org/shared';
 import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
@@ -6,7 +7,7 @@ import { runMarketMigrations } from '../db/market/migrate.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { paperDb } from '../db/paper/index.js';
 import { runPaperMigrations } from '../db/paper/migrate.js';
-import { paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
+import { paperEquity, paperExitRevisions, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { nowIso } from './util.js';
 import {
   accountCapacity,
@@ -77,6 +78,7 @@ beforeEach(() => {
   runPaperMigrations();
   paperDb.delete(paperMarks).run();
   paperDb.delete(paperEquity).run();
+  paperDb.delete(paperExitRevisions).run();
   paperDb.delete(paperOrders).run();
   marketDb.delete(optionQuotes).run();
   marketDb.delete(optionContracts).run();
@@ -347,5 +349,98 @@ describe('accountCapacity', () => {
   it('never reports negative cash', () => {
     openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: config.market.paperStartingBalanceE4 });
     expect(accountCapacity().freeCashE4).toBe(0);
+  });
+});
+
+describe('openOrder exit plan', () => {
+  it('writes the order and its exit plan in one insert', () => {
+    // The bug this closes: the plan used to be a second UPDATE right after
+    // the insert, so a crash between them left a `source: 'model'` order
+    // with no target — which `managedOpenOrders()` filters out forever,
+    // stranding an open position outside the exit engine's view.
+    const id = openOrder({
+      occSymbol: OCC,
+      quantity: 1,
+      entryPriceE4: ASK_E4,
+      source: 'model',
+      entryEv: 12.5,
+      exitPlan: {
+        targetExitPriceE4: toE4(2.0),
+        stopLossPriceE4: toE4(0.5),
+        targetExitDate: '2026-09-01',
+      },
+    });
+
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    expect(order.targetExitPriceE4).toBe(toE4(2.0));
+    expect(order.stopLossPriceE4).toBe(toE4(0.5));
+    expect(order.targetExitDate).toBe('2026-09-01');
+    expect(order.entryEv).toBe(12.5);
+    expect(order.exitUpdatedAt).not.toBeNull();
+  });
+
+  it('leaves every exit-plan field null for a manual order', () => {
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
+    const order = paperDb.select().from(paperOrders).all().find((o) => o.id === id)!;
+    expect(order.targetExitPriceE4).toBeNull();
+    expect(order.stopLossPriceE4).toBeNull();
+    expect(order.targetExitDate).toBeNull();
+    expect(order.entryEv).toBeNull();
+    expect(order.exitUpdatedAt).toBeNull();
+  });
+});
+
+describe('paperDb.transaction', () => {
+  it('rolls every statement back when the callback throws', () => {
+    // The guarantee exitEngine.ts relies on when it writes a revision row
+    // and the order's moved target together. Pinned here because that call
+    // site cannot force a mid-transaction failure through its own
+    // interface — both of its statements bind the same values, so anything
+    // bad enough to fail the second fails the first.
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4, source: 'model' });
+
+    expect(() =>
+      paperDb.transaction((tx) => {
+        tx.insert(paperExitRevisions)
+          .values({
+            orderId: id,
+            revisedAt: nowIso(),
+            oldTargetExitPriceE4: null,
+            newTargetExitPriceE4: toE4(2.0),
+            oldTargetExitDate: null,
+            newTargetExitDate: '2026-09-01',
+            reason: 'should not survive',
+            triggeredBy: 'llm',
+          })
+          .run();
+        throw new Error('second statement failed');
+      }),
+    ).toThrow('second statement failed');
+
+    // The insert that had already run is gone.
+    expect(paperDb.select().from(paperExitRevisions).all()).toHaveLength(0);
+  });
+
+  it('commits every statement when the callback returns', () => {
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4, source: 'model' });
+
+    paperDb.transaction((tx) => {
+      tx.insert(paperExitRevisions)
+        .values({
+          orderId: id,
+          revisedAt: nowIso(),
+          oldTargetExitPriceE4: null,
+          newTargetExitPriceE4: toE4(2.0),
+          oldTargetExitDate: null,
+          newTargetExitDate: '2026-09-01',
+          reason: 'kept',
+          triggeredBy: 'llm',
+        })
+        .run();
+      tx.update(paperOrders).set({ targetExitPriceE4: toE4(2.0) }).where(eq(paperOrders.id, id)).run();
+    });
+
+    expect(paperDb.select().from(paperExitRevisions).all()).toHaveLength(1);
+    expect(paperDb.select().from(paperOrders).all().find((o) => o.id === id)!.targetExitPriceE4).toBe(toE4(2.0));
   });
 });

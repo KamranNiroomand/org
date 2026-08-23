@@ -229,51 +229,63 @@ export async function runExitEngine(
           newDocuments: docs.slice(0, 5).map((d) => ({ title: d.title, eventType: d.eventType, publishedAt: d.publishedAt })),
         });
 
-        // The advisor has now reviewed every document counted above,
-        // regardless of what it decided — bumping the cutoff here (not only
-        // on `move_target`) is what stops the same already-seen documents
-        // from re-triggering an identical `new_news` escalation, and
-        // therefore another LLM call, on every 15-minute recheck for the
-        // rest of the day.
-        paperDb.update(paperOrders).set({ exitUpdatedAt: nowIso() }).where(eq(paperOrders.id, order.id)).run();
+        if (advice.action === 'move_target' && (advice.newTargetExitPriceE4 === null || advice.newTargetExitDate === null)) {
+          // The schema describes both fields as required for this action,
+          // but nothing enforces that at the API boundary — a response that
+          // violates its own contract must be visible, not silently treated
+          // as an ordinary "hold" after an LLM call was already spent on it.
+          // Bail before the write below so the cutoff does not advance on a
+          // review whose outcome was discarded.
+          summary.errors.push(
+            `${order.occSymbol}: advisor returned move_target with a missing target price/date — left on hold`,
+          );
+          continue;
+        }
+
+        // Everything this recheck decided lands in one transaction, or none
+        // of it does.
+        //
+        // The cutoff bump belongs inside for the same reason the revision
+        // and the target do: it records that the advisor has now reviewed
+        // every document counted above — which is what stops the same
+        // already-seen documents from re-triggering an identical `new_news`
+        // escalation, and another LLM call, every 15 minutes for the rest of
+        // the day. Advancing it while the decision it accompanies rolled
+        // back would suppress the re-review *and* leave no trace of the
+        // attempt. Same idiom as routes/options.ts's promote.
+        const revised = advice.action === 'move_target';
+        paperDb.transaction((tx) => {
+          if (revised) {
+            tx.insert(paperExitRevisions)
+              .values({
+                orderId: order.id,
+                revisedAt: nowIso(),
+                oldTargetExitPriceE4: order.targetExitPriceE4,
+                newTargetExitPriceE4: advice.newTargetExitPriceE4,
+                oldTargetExitDate: order.targetExitDate,
+                newTargetExitDate: advice.newTargetExitDate,
+                reason: advice.reasoning,
+                triggeredBy: 'llm',
+              })
+              .run();
+          }
+          tx.update(paperOrders)
+            .set({
+              exitUpdatedAt: nowIso(),
+              ...(revised
+                ? { targetExitPriceE4: advice.newTargetExitPriceE4, targetExitDate: advice.newTargetExitDate }
+                : {}),
+            })
+            .where(eq(paperOrders.id, order.id))
+            .run();
+        });
+        if (revised) summary.revised += 1;
 
         if (advice.action === 'exit_now') {
           closeAndTally(order.id, quote.bidE4);
           continue;
         }
-        if (advice.action === 'move_target') {
-          if (advice.newTargetExitPriceE4 === null || advice.newTargetExitDate === null) {
-            // The schema describes both fields as required for this action,
-            // but nothing enforces that at the API boundary — a response
-            // that violates its own contract must be visible, not silently
-            // treated as an ordinary "hold" after an LLM call was already
-            // spent on it.
-            summary.errors.push(
-              `${order.occSymbol}: advisor returned move_target with a missing target price/date — left on hold`,
-            );
-            continue;
-          }
-          paperDb
-            .insert(paperExitRevisions)
-            .values({
-              orderId: order.id,
-              revisedAt: nowIso(),
-              oldTargetExitPriceE4: order.targetExitPriceE4,
-              newTargetExitPriceE4: advice.newTargetExitPriceE4,
-              oldTargetExitDate: order.targetExitDate,
-              newTargetExitDate: advice.newTargetExitDate,
-              reason: advice.reasoning,
-              triggeredBy: 'llm',
-            })
-            .run();
-          paperDb
-            .update(paperOrders)
-            .set({ targetExitPriceE4: advice.newTargetExitPriceE4, targetExitDate: advice.newTargetExitDate })
-            .where(eq(paperOrders.id, order.id))
-            .run();
-          summary.revised += 1;
-        }
-        // advice.action === 'hold': nothing further to record — the target stands.
+        // advice.action === 'hold': the cutoff moved, the target stands.
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         summary.errors.push(`${order.occSymbol}: ${message}`);

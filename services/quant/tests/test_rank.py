@@ -19,7 +19,7 @@ import lightgbm as lgb
 import polars as pl
 import pytest
 
-from app.db import connect
+from app.db import reading
 from app.pricing import bsm_price
 from app.rank import (
     MAX_ANNUALIZED_DRIFT,
@@ -388,7 +388,7 @@ class TestRankDayRefusesWeakModels:
 
 
 def _latest_priced_liquid_day() -> str | None:
-    with connect() as conn:
+    with reading() as conn:
         row = conn.execute(
             "SELECT MAX(trading_day) AS day FROM option_quotes WHERE liquid = 1 AND iv_bps IS NOT NULL"
         ).fetchone()

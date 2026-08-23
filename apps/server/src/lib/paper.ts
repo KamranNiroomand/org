@@ -53,6 +53,30 @@ export interface OpenOrderInput {
   notes?: string;
   /** Which UI opened this — a manual typed entry, or one click off the ranked board. */
   source?: 'manual' | 'model';
+  /**
+   * The exit plan for an auto-managed position, written in the same insert
+   * as the order itself.
+   *
+   * Passed here rather than `UPDATE`d in immediately afterwards on
+   * purpose: a crash between the two statements used to leave a
+   * `source: 'model'` order with no target, which `managedOpenOrders()`
+   * then filters out forever — an open position the exit engine can never
+   * see. One insert makes that state unrepresentable rather than merely
+   * unlikely. Omitted for a manual order, which has no automated exit.
+   */
+  exitPlan?: {
+    targetExitPriceE4: number;
+    stopLossPriceE4: number;
+    targetExitDate: string;
+  };
+  /**
+   * The ranked signal's expected value at the moment this order opened —
+   * the reference point the exit engine compares against to detect a sign
+   * flip. Separate from `exitPlan` because it describes the entry, not the
+   * exit: a caller can know the EV it acted on without having a
+   * deterministic exit plan to go with it.
+   */
+  entryEv?: number;
 }
 
 /**
@@ -114,6 +138,11 @@ export function openOrder(input: OpenOrderInput): string {
       status: 'open',
       source: input.source ?? 'manual',
       notes: input.notes ?? null,
+      targetExitPriceE4: input.exitPlan?.targetExitPriceE4 ?? null,
+      stopLossPriceE4: input.exitPlan?.stopLossPriceE4 ?? null,
+      targetExitDate: input.exitPlan?.targetExitDate ?? null,
+      entryEv: input.entryEv ?? null,
+      exitUpdatedAt: input.exitPlan ? nowIso() : null,
       openedAt: nowIso(),
     })
     .run();

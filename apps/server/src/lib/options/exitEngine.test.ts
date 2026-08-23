@@ -375,3 +375,102 @@ describe('runExitEngine', () => {
     expect(order.exitUpdatedAt).not.toBe('2020-01-01T00:00:00.000Z');
   });
 });
+
+describe('runExitEngine revision atomicity', () => {
+  function moveTargetDeps(overrides: Partial<ExitEngineDeps> = {}): ExitEngineDeps {
+    return {
+      ...NEVER_REVIEW_DEPS,
+      anthropicConfigured: true,
+      evaluateExit: async () => ({
+        action: 'needs_review',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reason: 'new documents',
+        triggeredBy: 'new_news',
+      }),
+      adviseOnExit: async () => ({
+        action: 'move_target',
+        newTargetExitPriceE4: toE4(1.9),
+        newTargetExitDate: '2026-09-12',
+        reasoning: 'Filing supports holding longer.',
+        citedInputs: ['newDocuments'],
+      }),
+      ...overrides,
+    };
+  }
+
+  it('applies the revision, the moved target and the cutoff together', async () => {
+    const id = openManagedPosition({ exitUpdatedAt: '2020-01-01T00:00:00.000Z' });
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), moveTargetDeps());
+
+    const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
+    const revisions = paperDb.select().from(paperExitRevisions).where(eq(paperExitRevisions.orderId, id)).all();
+
+    expect(revisions).toHaveLength(1);
+    expect(order.targetExitPriceE4).toBe(toE4(1.9));
+    expect(order.targetExitDate).toBe('2026-09-12');
+    expect(order.exitUpdatedAt).not.toBe('2020-01-01T00:00:00.000Z');
+    expect(revisions[0]!.newTargetExitPriceE4).toBe(order.targetExitPriceE4);
+    expect(revisions[0]!.newTargetExitDate).toBe(order.targetExitDate);
+    // The revision records where the target came *from*, so the audit trail
+    // reconstructs the whole path rather than just the current value.
+    expect(revisions[0]!.oldTargetExitPriceE4).toBe(toE4(1.5));
+  });
+
+  it('leaves nothing behind — including the cutoff — when the write fails', async () => {
+    // Both statements bind the same two advice values, so a value bad
+    // enough to fail the update fails the insert first; there is no way
+    // through this interface to force insert-then-update-failure. What is
+    // testable, and what actually matters here, is that a failed recheck
+    // leaves *no* partial trace — in particular the news cutoff must not
+    // advance, or the documents that triggered this review are silently
+    // skipped next time. `paper.test.ts` pins the rollback semantics of
+    // `paperDb.transaction` itself.
+    const id = openManagedPosition({ exitUpdatedAt: '2020-01-01T00:00:00.000Z' });
+    const deps = moveTargetDeps({
+      adviseOnExit: async () => ({
+        action: 'move_target',
+        newTargetExitPriceE4: toE4(1.9),
+        newTargetExitDate: { bogus: true } as unknown as string,
+        reasoning: 'Filing supports holding longer.',
+        citedInputs: ['newDocuments'],
+      }),
+    });
+
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+
+    const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
+    const revisions = paperDb.select().from(paperExitRevisions).where(eq(paperExitRevisions.orderId, id)).all();
+
+    expect(summary.revised).toBe(0);
+    expect(summary.errors.length).toBeGreaterThan(0);
+    expect(revisions).toHaveLength(0);
+    expect(order.targetExitPriceE4).toBe(toE4(1.5));
+    expect(order.exitUpdatedAt).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('does not advance the cutoff when a malformed move_target is rejected', async () => {
+    // The guard runs before the write, so an advisor response that violates
+    // its own schema costs an LLM call but changes nothing — including the
+    // cutoff, so the same documents get reviewed again rather than being
+    // written off by a decision that was never applied.
+    const id = openManagedPosition({ exitUpdatedAt: '2020-01-01T00:00:00.000Z' });
+    const deps = moveTargetDeps({
+      adviseOnExit: async () => ({
+        action: 'move_target',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        reasoning: 'malformed response',
+        citedInputs: [],
+      }),
+    });
+
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), deps);
+
+    const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
+    expect(summary.revised).toBe(0);
+    expect(summary.errors.some((e) => e.includes('a missing target price/date'))).toBe(true);
+    expect(order.exitUpdatedAt).toBe('2020-01-01T00:00:00.000Z');
+  });
+});
