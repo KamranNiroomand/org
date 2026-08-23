@@ -119,7 +119,7 @@ describe('runAutoEntry', () => {
     expect(captured.input!.availableCapital).toBeCloseTo(79_880, 2);
   });
 
-  it('keeps going when one contract fails to open, and reports it', async () => {
+  it('keeps going when one contract fails to open, and reports it as a failure not a skip', async () => {
     const good = ranked();
     const ghost = ranked({ occ_symbol: 'GHOST 260919C00100000', underlying: 'GHST' });
     contract(good.occ_symbol, 'NVDA'); // ghost deliberately not in the corpus
@@ -127,8 +127,26 @@ describe('runAutoEntry', () => {
     const result = await runAutoEntry('2026-08-18', selectFn([good, ghost]));
 
     expect(result.opened.map((o) => o.occSymbol)).toEqual([good.occ_symbol]);
-    expect(result.skippedReason).toContain('GHOST');
+    expect(result.failures.join('; ')).toContain('GHOST');
+    // A partly-successful run is not a skipped one — see the field's own
+    // doc comment. Conflating them made a partial success read as total.
+    expect(result.skippedReason).toBeNull();
     expect(paperDb.select().from(paperOrders).all()).toHaveLength(1);
+  });
+
+  it('refuses a selected candidate missing any part of its exit plan', async () => {
+    // The sidecar filters these out before allocating, so this is a
+    // belt-and-braces guard — but without it `null * 10_000` is 0 in JS,
+    // which would quietly write a zeroed target and a null date and strand
+    // the position outside the exit engine's view forever.
+    const broken = ranked({ suggested_target_exit_date: null });
+    contract(broken.occ_symbol, 'NVDA');
+
+    const result = await runAutoEntry('2026-08-18', selectFn([broken]));
+
+    expect(result.opened).toEqual([]);
+    expect(result.skippedReason).toContain('without a complete exit plan');
+    expect(paperDb.select().from(paperOrders).all()).toHaveLength(0);
   });
 
   it('records a skip reason rather than throwing when the quant sidecar is unreachable', async () => {

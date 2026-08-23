@@ -66,6 +66,15 @@ export const paperOrders = sqliteTable(
      * orders opened before this column existed.
      */
     underlying: text('underlying'),
+    /**
+     * Shares per contract, denormalized at open time for the same reason
+     * as `underlying` above: every dollar figure for this position is
+     * `price * quantity * multiplier`, so a caller that has to re-look it
+     * up in `optionContracts` breaks the moment that row is pruned —
+     * which is exactly when an open position still needs to be valued.
+     * Null only for orders opened before this column existed.
+     */
+    multiplier: integer('multiplier'),
     side: text('side', { enum: ['long', 'short'] }).notNull().default('long'),
     quantity: integer('quantity').notNull(),
     /** Per-contract entry price, E4. The ask for a long — what it actually cost. */

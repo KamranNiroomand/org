@@ -27,7 +27,12 @@ import { nowIso } from '../util.js';
 export interface AutoEntryResult {
   day: string;
   opened: Array<{ occSymbol: string; orderId: string }>;
+  /** Why nothing was opened. Null whenever at least one position opened —
+   * a per-contract problem during a partly-successful run goes in
+   * `failures`, so a non-null value here always means "no positions". */
   skippedReason: string | null;
+  /** Per-contract problems during an otherwise successful run. */
+  failures: string[];
 }
 
 /**
@@ -66,7 +71,7 @@ export async function runAutoEntry(
         : err instanceof Error
           ? err.message
           : 'Entry selection failed for an unknown reason';
-    return { day, opened: [], skippedReason: reason };
+    return { day, opened: [], skippedReason: reason, failures: [] };
   }
 
   if (selected.length === 0) {
@@ -75,6 +80,7 @@ export async function runAutoEntry(
       opened: [],
       skippedReason:
         'No contract cleared the auto-entry bar today, or none fit the account’s remaining capital and position limits.',
+      failures: [],
     };
   }
 
@@ -82,6 +88,21 @@ export async function runAutoEntry(
   const failures: string[] = [];
   for (const candidate of selected) {
     try {
+      // The sidecar excludes candidates with no computable exit plan before
+      // it allocates, so this should never fire — but a null slipping
+      // through would not throw here: `null * 10_000` is 0 in JavaScript,
+      // silently writing a zeroed target and a null date, which
+      // `managedOpenOrders()` then filters out forever. That is the
+      // orphaned-unmanaged-position bug again, so it's checked rather than
+      // asserted away.
+      if (
+        candidate.suggested_target_exit_price === null ||
+        candidate.suggested_stop_loss_price === null ||
+        candidate.suggested_target_exit_date === null
+      ) {
+        failures.push(`${candidate.occ_symbol}: selected without a complete exit plan — not opened`);
+        continue;
+      }
       const orderId = openOrder({
         occSymbol: candidate.occ_symbol,
         quantity: 1,
@@ -89,16 +110,13 @@ export async function runAutoEntry(
         source: 'model',
         notes: `Auto-opened: EV ${candidate.ev.toFixed(2)}, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%.`,
       });
-      // select_entries only ever returns candidates whose exit plan was
-      // computable — it filters the rest out before allocating, so an
-      // opened position always has a target for the exit engine to manage.
       paperDb
         .update(paperOrders)
         .set({
           entryEv: candidate.ev,
-          targetExitPriceE4: Math.round(candidate.suggested_target_exit_price! * 10_000),
-          stopLossPriceE4: Math.round(candidate.suggested_stop_loss_price! * 10_000),
-          targetExitDate: candidate.suggested_target_exit_date!,
+          targetExitPriceE4: Math.round(candidate.suggested_target_exit_price * 10_000),
+          stopLossPriceE4: Math.round(candidate.suggested_stop_loss_price * 10_000),
+          targetExitDate: candidate.suggested_target_exit_date,
           exitUpdatedAt: nowIso(),
         })
         .where(eq(paperOrders.id, orderId))
@@ -112,5 +130,12 @@ export async function runAutoEntry(
     }
   }
 
-  return { day, opened, skippedReason: failures.length > 0 ? failures.join('; ') : null };
+  return {
+    day,
+    opened,
+    // Only a run that opened nothing gets a skip reason — see the field's
+    // own doc comment.
+    skippedReason: opened.length === 0 && failures.length > 0 ? failures.join('; ') : null,
+    failures,
+  };
 }

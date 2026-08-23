@@ -76,7 +76,9 @@ export function openOrder(input: OpenOrderInput): string {
     throw new PaperError(`quantity must be a positive integer, got ${input.quantity}`);
   }
 
-  const { underlying } = contractMultiplier(input.occSymbol); // validates the contract exists
+  // Validates the contract exists, and captures both facts we denormalize
+  // onto the order so no later caller has to re-resolve them.
+  const { underlying, multiplier } = contractMultiplier(input.occSymbol);
 
   let entryPriceE4: number;
   let entryBasis: 'measured' | 'modelled';
@@ -104,6 +106,7 @@ export function openOrder(input: OpenOrderInput): string {
       id,
       occSymbol: input.occSymbol,
       underlying,
+      multiplier,
       side: 'long',
       quantity: input.quantity,
       entryPriceE4,
@@ -160,35 +163,67 @@ export function tradeReturnPct(entryPriceE4: number, currentPriceE4: number): nu
 }
 
 export interface AccountCapacity {
-  /** Uncommitted cash, E4: starting balance minus what open positions cost to enter. */
+  /** Uncommitted cash, E4 — the same figure `computeDailyEquity` calls cash. */
   freeCashE4: number;
   openPositionCount: number;
   heldUnderlyings: string[];
 }
 
 /**
+ * Shares per contract for an order, without depending on the contract row
+ * still existing.
+ *
+ * Prefers the value denormalized onto the order at open time; falls back
+ * to a live lookup only for rows written before that column existed, and
+ * to the standard 100 if even that is gone. A pruned or expired contract
+ * must never make an *open* position unvaluable — that is precisely when
+ * its cost still matters. Same reasoning as `paperOrders.underlying`.
+ */
+function orderMultiplier(order: typeof paperOrders.$inferSelect): number {
+  if (order.multiplier !== null) return order.multiplier;
+  try {
+    return contractMultiplier(order.occSymbol).multiplier;
+  } catch {
+    return 100;
+  }
+}
+
+/**
  * What the account can actually still deploy right now — the input
  * auto-entry's capital constraint is computed from.
  *
- * Cash is measured at **entry cost**, not current mark: the question this
- * answers is "how many more dollars can be committed", and an open
- * position's unrealized gain isn't spendable until it closes. Deliberately
- * conservative in the same direction as the rest of this module (marks use
- * the bid, fills use the ask) — overstating buying power is the failure
- * that actually costs something.
+ * Cash follows `computeDailyEquity`'s definition exactly: every order's
+ * entry cost leaves the account, and a closed order's exit proceeds come
+ * back. Both halves matter — counting only open positions would ignore
+ * realized losses entirely and report a full balance for an account that
+ * has actually spent half of it, which is the one direction this number
+ * must never be wrong in.
+ *
+ * Positions are valued at **entry cost**, not current mark: an open
+ * position's unrealized gain isn't spendable until it closes. Conservative
+ * in the same direction as the rest of this module (marks use the bid,
+ * fills use the ask).
  */
 export function accountCapacity(): AccountCapacity {
-  const open = paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all();
-  let committedE4 = 0;
+  const all = paperDb.select().from(paperOrders).all();
+  let cashE4 = config.market.paperStartingBalanceE4;
+  let openPositionCount = 0;
   const heldUnderlyings = new Set<string>();
-  for (const o of open) {
-    const { multiplier } = contractMultiplier(o.occSymbol);
-    committedE4 += o.entryPriceE4 * o.quantity * multiplier;
-    if (o.underlying) heldUnderlyings.add(o.underlying);
+
+  for (const o of all) {
+    const multiplier = orderMultiplier(o);
+    cashE4 -= o.entryPriceE4 * o.quantity * multiplier;
+    if (o.status === 'closed' && o.exitPriceE4 !== null) {
+      cashE4 += o.exitPriceE4 * o.quantity * multiplier;
+    } else {
+      openPositionCount += 1;
+      if (o.underlying) heldUnderlyings.add(o.underlying);
+    }
   }
+
   return {
-    freeCashE4: Math.max(0, config.market.paperStartingBalanceE4 - committedE4),
-    openPositionCount: open.length,
+    freeCashE4: Math.max(0, cashE4),
+    openPositionCount,
     heldUnderlyings: [...heldUnderlyings],
   };
 }

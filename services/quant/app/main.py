@@ -472,7 +472,15 @@ class SelectEntriesRequest(BaseModel):
     max_new_positions: int = Field(gt=0)
     min_ev_per_risk: float
     min_prob_profit: float = Field(ge=0, le=1)
-    top: int = 25
+    #: Far wider than `/rank`'s 25, deliberately. `rank_day` cuts to the
+    #: top N by EV *before* `select_entries` dedups to one contract per
+    #: underlying, so a narrow cut on a concentrated board leaves nothing
+    #: to diversify into: on the real 2026-08-21 board, all 25 top-EV
+    #: contracts were the same underlying (SNDK), which would cap this at
+    #: one position no matter how much capital or how many slots were
+    #: free. A wide cut is what lets the per-underlying dedup actually
+    #: find distinct names.
+    top: int = 400
 
 
 class SelectEntriesResponse(BaseModel):
@@ -494,14 +502,26 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
         raise HTTPException(status_code=409, detail=str(e)) from e
 
     horizon = manifest.get("horizon")
+    if horizon is None:
+        # Every candidate would be filtered out below, and the caller would
+        # report it as "nothing cleared the bar today" — blaming the market
+        # for what is actually a broken model artifact. Refuse loudly
+        # instead, the same 409 shape rank_day's own refusals use.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Model {manifest['run_id']} has no `horizon` in its manifest, so no exit plan "
+                f"can be computed for any candidate. Auto-entry cannot run against it."
+            ),
+        )
+
     # A candidate with no computable exit plan can't be auto-managed —
     # opening it would leave a position the exit engine never sees again.
     # Excluded before allocation so it can't consume a selection slot.
     plannable = [
         c
         for c in ranked
-        if horizon is not None
-        and _try_compute_exit_target(c.market_price, c.expiry, request.day, horizon) is not None
+        if _try_compute_exit_target(c.market_price, c.expiry, request.day, horizon) is not None
     ]
 
     selected = select_entries(
