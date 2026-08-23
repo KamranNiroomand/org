@@ -98,14 +98,23 @@ const schema = z.object({
   RETRAIN_CRON: z.string().default('0 8 * * 0'),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
-  // Auto-entry: once/day, the top-ranked contract clearing both bars below
-  // (and with no existing open position on its underlying) is opened
-  // automatically as a `source: 'model'` paper order — see autoEntry.ts.
-  // Explicitly a first-pass gate, same honesty framing as the radar's own
-  // eligibility floor: not backtested, just a sanity bar against opening
-  // something the ranking itself considers marginal.
+  // Auto-entry: once/day, every candidate clearing both bars below (and
+  // fitting the capital/count constraints further down) is opened
+  // automatically as a `source: 'model'` paper order — see autoEntry.ts and
+  // rank.py's select_entries. Explicitly a first-pass gate, same honesty
+  // framing as the radar's own eligibility floor: not backtested, just a
+  // sanity bar against opening something the ranking itself considers
+  // marginal.
   AUTO_ENTRY_MIN_EV_PER_RISK: z.coerce.number().default(0.05),
   AUTO_ENTRY_MIN_PROB_PROFIT: z.coerce.number().min(0).max(1).default(0.5),
+  // Capital/count constraints on auto-entry — how many positions to open
+  // is decided by what the market offers within these bounds, not a fixed
+  // daily number. The reserve is the fraction of current cash never
+  // deployed; see select_entries' docstring for the real $122k-contract
+  // incident that made an explicit capital constraint non-optional.
+  AUTO_ENTRY_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().positive().default(10),
+  AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY: z.coerce.number().int().positive().default(5),
+  AUTO_ENTRY_CAPITAL_RESERVE_PCT: z.coerce.number().min(0).max(1).default(0.2),
   // The adaptive exit engine — see exitEngine.ts and exit.py's own module
   // docstring. Market hours only, matching TEXT_SYNC_CRON's cadence
   // reasoning: nothing changes about a position's exit outside trading
@@ -288,10 +297,13 @@ export const config = {
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
     edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,
-    /** See AUTO_ENTRY_MIN_EV_PER_RISK/AUTO_ENTRY_MIN_PROB_PROFIT above and autoEntry.ts. */
+    /** See the AUTO_ENTRY_* block above and autoEntry.ts. */
     autoEntry: {
       minEvPerRisk: env.AUTO_ENTRY_MIN_EV_PER_RISK,
       minProbProfit: env.AUTO_ENTRY_MIN_PROB_PROFIT,
+      maxConcurrentPositions: env.AUTO_ENTRY_MAX_CONCURRENT_POSITIONS,
+      maxNewPositionsPerDay: env.AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY,
+      capitalReservePct: env.AUTO_ENTRY_CAPITAL_RESERVE_PCT,
     },
     /** See EXIT_RECHECK_CRON/EXIT_RECHECK_MAX_CALLS_PER_RUN above and exitEngine.ts. */
     exitRecheck: {

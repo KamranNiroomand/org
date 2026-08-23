@@ -206,7 +206,9 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
         // today's data to rank against.
         try {
           const entry = await runAutoEntry(tradingDay);
-          if (entry.openedOccSymbol) log.info(`Auto-entry opened ${entry.openedOccSymbol}`);
+          if (entry.opened.length > 0) {
+            log.info(`Auto-entry opened ${entry.opened.map((o) => o.occSymbol).join(', ')}`);
+          }
         } catch (err) {
           result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -525,8 +527,8 @@ export interface CaptureJobResult {
   priced: number;
   rateRows: number;
   quantAvailable: boolean;
-  /** The day's auto-entry attempt — see autoEntry.ts. Null until capture reaches that step. */
-  autoEntryOccSymbol: string | null;
+  /** The day's auto-entry attempt — see autoEntry.ts. Empty until capture reaches that step. */
+  autoEntryOpened: string[];
   autoEntrySkippedReason: string | null;
   errors: string[];
 }
@@ -547,7 +549,7 @@ export async function runOptionsCapture(
     priced: 0,
     rateRows: 0,
     quantAvailable: false,
-    autoEntryOccSymbol: null,
+    autoEntryOpened: [],
     autoEntrySkippedReason: null,
     errors: [],
   };
@@ -611,10 +613,10 @@ export async function runOptionsCapture(
       // today's quotes actually exist to rank against.
       try {
         const entry = await runAutoEntry(tradingDay);
-        result.autoEntryOccSymbol = entry.openedOccSymbol;
+        result.autoEntryOpened = entry.opened.map((o) => o.occSymbol);
         result.autoEntrySkippedReason = entry.skippedReason;
-        if (entry.openedOccSymbol) {
-          log.info(`Auto-entry opened ${entry.openedOccSymbol}`);
+        if (entry.opened.length > 0) {
+          log.info(`Auto-entry opened ${result.autoEntryOpened.join(', ')}`);
         }
       } catch (err) {
         result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);

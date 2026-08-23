@@ -8,6 +8,7 @@ guarantee in `pricing.py` is worthless if serialization quietly launders it.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import lightgbm as lgb
@@ -385,3 +386,101 @@ class TestPositionHealth:
         )
         assert r.status_code == 200
         assert seen["force"] is True
+
+
+def _write_model_with_horizon(run_dir: Path, horizon: int = 5) -> None:
+    """`_write_fake_model`'s manifest has no `horizon`; /select-entries
+    needs one to compute exit plans, so add it."""
+    _write_fake_model(run_dir, beats_baseline=False)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["horizon"] = horizon
+    manifest_path.write_text(json.dumps(manifest))
+
+
+_SELECT_BODY = {
+    "day": "2026-01-01",
+    "available_capital": 100_000.0,
+    "max_concurrent_positions": 10,
+    "max_new_positions": 5,
+    "min_ev_per_risk": 0.05,
+    "min_prob_profit": 0.5,
+}
+
+
+class TestSelectEntries:
+    """The endpoint wrapper around `select_entries` — in particular the
+    exit-plan filter, which moved here out of autoEntry.ts and must not be
+    allowed to regress into opening positions the exit engine can never
+    see again.
+    """
+
+    def test_selects_a_plannable_candidate(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "ok"
+        _write_model_with_horizon(run_dir)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [_FAKE_CONTRACT])
+
+        r = client.post("/select-entries", json=_SELECT_BODY)
+        assert r.status_code == 200
+        body = r.json()
+        assert [c["occ_symbol"] for c in body["selected"]] == [_FAKE_CONTRACT.occ_symbol]
+        # A selected contract always carries a full exit plan — that is the
+        # invariant autoEntry.ts relies on when it persists targets.
+        picked = body["selected"][0]
+        assert picked["suggested_target_exit_price"] is not None
+        assert picked["suggested_stop_loss_price"] is not None
+        assert picked["suggested_target_exit_date"] is not None
+
+    def test_excludes_a_candidate_whose_exit_plan_cannot_be_computed(self, tmp_path, monkeypatch) -> None:
+        # Expiry two days out against exit.py's 3-day floor: no target date
+        # exists that both exists and clears the floor, so this contract
+        # must never be selected — opening it would strand an unmanaged
+        # position.
+        too_short = replace(_FAKE_CONTRACT, expiry="2026-01-03", dte=2)
+        run_dir = tmp_path / "short"
+        _write_model_with_horizon(run_dir)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [too_short])
+
+        r = client.post("/select-entries", json=_SELECT_BODY)
+        assert r.status_code == 200
+        assert r.json()["selected"] == []
+
+    def test_an_unplannable_candidate_does_not_consume_a_selection_slot(self, tmp_path, monkeypatch) -> None:
+        too_short = replace(_FAKE_CONTRACT, expiry="2026-01-03", dte=2, ev=999.0)
+        good = replace(_FAKE_CONTRACT, occ_symbol="MSFT260116C00150000", underlying="MSFT")
+        run_dir = tmp_path / "mixed"
+        _write_model_with_horizon(run_dir)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [too_short, good])
+
+        # One slot, and the highest-EV candidate is the unplannable one:
+        # it must be dropped before allocation, not silently eat the slot.
+        r = client.post("/select-entries", json={**_SELECT_BODY, "max_new_positions": 1})
+        assert r.status_code == 200
+        assert [c["occ_symbol"] for c in r.json()["selected"]] == ["MSFT260116C00150000"]
+
+    def test_a_manifest_without_a_horizon_refuses_loudly(self, tmp_path, monkeypatch) -> None:
+        # Without a horizon no exit plan is computable for anything, so
+        # every candidate would be filtered out and the caller would report
+        # "nothing cleared the bar today" — blaming the market for a broken
+        # model artifact. Must be a 409 instead.
+        run_dir = tmp_path / "nohorizon"
+        _write_fake_model(run_dir, beats_baseline=False)  # no horizon key
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [_FAKE_CONTRACT])
+
+        r = client.post("/select-entries", json=_SELECT_BODY)
+        assert r.status_code == 409
+        assert "horizon" in r.json()["detail"]
+
+    def test_held_underlyings_are_never_selected(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "held"
+        _write_model_with_horizon(run_dir)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [_FAKE_CONTRACT])
+
+        r = client.post("/select-entries", json={**_SELECT_BODY, "held_underlyings": ["AAPL"]})
+        assert r.status_code == 200
+        assert r.json()["selected"] == []

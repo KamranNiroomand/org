@@ -35,6 +35,7 @@ from app.rank import (
     rank_day,
     rank_underlying,
     score_held_contracts,
+    select_entries,
 )
 from app.train import FEATURE_COLS, train
 
@@ -517,3 +518,104 @@ class TestScoreHeldContracts:
         # they ask the DB for, not in how a row is priced once fetched.
         ranked = rank_underlying(quotes, "2025-12-01", 0.05, 1.0, [(365, 0.04)])
         assert len(ranked) == 1
+
+
+def _candidate(**overrides) -> RankedContract:
+    base = dict(
+        occ_symbol="AAA   260918C00100000",
+        underlying="AAA",
+        expiry="2026-09-18",
+        type="call",
+        strike=100.0,
+        dte=30,
+        market_price=2.0,  # $200/contract at the standard 100x multiplier
+        market_iv=0.3,
+        forecast_vol=0.32,
+        forecast_drift=0.05,
+        forecast_value=2.5,
+        ev=50.0,
+        ev_per_risk=0.25,
+        prob_profit=0.6,
+    )
+    base.update(overrides)
+    return RankedContract(**base)
+
+
+class TestSelectEntries:
+    """Capital-constrained entry selection — the rule that replaced "pick
+    exactly one winner" after a real $122,440-per-contract candidate showed
+    the old path had no price cap at all.
+    """
+
+    def _select(self, candidates, **overrides):
+        defaults = dict(
+            held_underlyings=set(),
+            available_capital=10_000.0,
+            open_position_count=0,
+            max_concurrent_positions=10,
+            max_new_positions=5,
+            min_ev_per_risk=0.05,
+            min_prob_profit=0.5,
+        )
+        defaults.update(overrides)
+        return select_entries(candidates, **defaults)
+
+    def test_opens_every_independent_affordable_candidate_up_to_the_daily_cap(self) -> None:
+        candidates = [
+            _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u, ev=ev)
+            for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
+        ]
+        selected = self._select(candidates)
+        assert [c.underlying for c in selected] == ["AAA", "BBB", "CCC"]
+
+    def test_stops_at_max_new_positions(self) -> None:
+        candidates = [
+            _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u, ev=ev)
+            for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
+        ]
+        selected = self._select(candidates, max_new_positions=2)
+        assert [c.underlying for c in selected] == ["AAA", "BBB"]
+
+    def test_concurrent_position_room_binds_before_the_daily_cap(self) -> None:
+        candidates = [
+            _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u)
+            for u in ["AAA", "BBB", "CCC"]
+        ]
+        # 9 already open against a ceiling of 10: one slot left, even
+        # though the daily cap alone would allow more.
+        selected = self._select(candidates, open_position_count=9, max_concurrent_positions=10)
+        assert len(selected) == 1
+
+    def test_an_unaffordable_top_candidate_is_skipped_not_fatal(self) -> None:
+        # The real incident: a $122,440 contract atop the board. It must be
+        # passed over, and the next affordable candidate still selected.
+        whale = _candidate(underlying="WHL", occ_symbol="WHL   260918P02270000", market_price=1224.4, ev=999.0)
+        modest = _candidate(underlying="MOD", occ_symbol="MOD   260918C00100000", ev=10.0)
+        selected = self._select([whale, modest], available_capital=10_000.0)
+        assert [c.underlying for c in selected] == ["MOD"]
+
+    def test_capital_depletes_across_acceptances(self) -> None:
+        # $500 available; each contract costs $200 — only two fit.
+        candidates = [
+            _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u, ev=ev)
+            for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
+        ]
+        selected = self._select(candidates, available_capital=500.0)
+        assert [c.underlying for c in selected] == ["AAA", "BBB"]
+
+    def test_never_selects_a_held_underlying_or_two_contracts_on_one_name(self) -> None:
+        candidates = [
+            _candidate(underlying="HELD", occ_symbol="HELD  260918C00100000", ev=99.0),
+            _candidate(underlying="DUP", occ_symbol="DUP   260918C00100000", ev=50.0),
+            _candidate(underlying="DUP", occ_symbol="DUP   260918C00110000", ev=45.0),
+        ]
+        selected = self._select(candidates, held_underlyings={"HELD"})
+        assert [c.occ_symbol for c in selected] == ["DUP   260918C00100000"]
+
+    def test_bars_filter_out_weak_candidates(self) -> None:
+        weak_ev = _candidate(underlying="AAA", ev_per_risk=0.01)
+        weak_prob = _candidate(underlying="BBB", occ_symbol="BBB   260918C00100000", prob_profit=0.1)
+        assert self._select([weak_ev, weak_prob]) == []
+
+    def test_zero_available_capital_selects_nothing(self) -> None:
+        assert self._select([_candidate()], available_capital=0.0) == []

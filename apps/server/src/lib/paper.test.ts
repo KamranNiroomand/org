@@ -9,6 +9,7 @@ import { runPaperMigrations } from '../db/paper/migrate.js';
 import { paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { nowIso } from './util.js';
 import {
+  accountCapacity,
   closeOrder,
   computeDailyEquity,
   markOpenPositions,
@@ -279,5 +280,72 @@ describe('computeDailyEquity', () => {
     computeDailyEquity(today);
     const rows = paperDb.select().from(paperEquity).all().filter((e) => e.day === today);
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('accountCapacity', () => {
+  it('reports the full starting balance when nothing has ever been traded', () => {
+    const cap = accountCapacity();
+    expect(cap.freeCashE4).toBe(config.market.paperStartingBalanceE4);
+    expect(cap.openPositionCount).toBe(0);
+    expect(cap.heldUnderlyings).toEqual([]);
+  });
+
+  it('subtracts an open position’s entry cost and reports its underlying as held', () => {
+    openOrder({ occSymbol: OCC, quantity: 2, entryPriceE4: ASK_E4 });
+    const cap = accountCapacity();
+    expect(cap.freeCashE4).toBe(config.market.paperStartingBalanceE4 - ASK_E4 * 2 * MULTIPLIER);
+    expect(cap.openPositionCount).toBe(1);
+    expect(cap.heldUnderlyings).toEqual(['NVDA']);
+  });
+
+  it('reflects a realized loss instead of pretending the capital came back', () => {
+    // The bug this pins: counting only *open* positions reported the full
+    // starting balance the moment a losing trade closed, so auto-entry
+    // would keep sizing against money the account had already lost.
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
+    closeOrder({ orderId: id, exitPriceE4: 0 }); // total loss on the premium
+
+    const cap = accountCapacity();
+    expect(cap.openPositionCount).toBe(0);
+    expect(cap.heldUnderlyings).toEqual([]);
+    expect(cap.freeCashE4).toBe(config.market.paperStartingBalanceE4 - ASK_E4 * MULTIPLIER);
+  });
+
+  it('agrees with computeDailyEquity’s own cash figure', () => {
+    // Two definitions of "cash" that disagree would mean the capital
+    // constraint and the equity curve describe different accounts.
+    const closed = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
+    closeOrder({ orderId: closed, exitPriceE4: BID_E4 });
+    openOrder({ occSymbol: OCC, quantity: 3, entryPriceE4: ASK_E4 });
+
+    // Today: `openOrder` stamps `openedAt` with the current instant, and
+    // computeDailyEquity only counts orders opened on or before its day.
+    const day = new Date().toISOString().slice(0, 10);
+    seedQuote(day, BID_E4, ASK_E4);
+    markOpenPositions(day);
+    computeDailyEquity(day);
+
+    const equity = paperDb.select().from(paperEquity).all().find((e) => e.day === day)!;
+    expect(accountCapacity().freeCashE4).toBe(equity.cashE4);
+  });
+
+  it('still values an open position whose contract has been pruned from the corpus', () => {
+    // Regression: this used to re-look-up the multiplier in
+    // `optionContracts` and throw `PaperError` when the row was gone,
+    // taking the whole auto-entry run down with it. The multiplier is
+    // denormalized onto the order at open time for exactly this case.
+    openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
+    marketDb.delete(optionContracts).run();
+
+    const cap = accountCapacity();
+    expect(cap.freeCashE4).toBe(config.market.paperStartingBalanceE4 - ASK_E4 * MULTIPLIER);
+    expect(cap.openPositionCount).toBe(1);
+    expect(cap.heldUnderlyings).toEqual(['NVDA']);
+  });
+
+  it('never reports negative cash', () => {
+    openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: config.market.paperStartingBalanceE4 });
+    expect(accountCapacity().freeCashE4).toBe(0);
   });
 });
