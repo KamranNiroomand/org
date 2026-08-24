@@ -314,6 +314,33 @@ describe('accountCapacity', () => {
     expect(cap.freeCashE4).toBe(config.market.paperStartingBalanceE4 - ASK_E4 * MULTIPLIER);
   });
 
+  it('still reports an underlying held when the order’s own column is null', () => {
+    // The 2026-08-24 duplicate, pinned. `heldUnderlyings` was built with
+    // `if (o.underlying)`, so a pre-migration row with a null column
+    // vanished from the held set and auto-entry read that as "not held" —
+    // then opened a second position on a name it was already in.
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
+    paperDb.update(paperOrders).set({ underlying: null }).where(eq(paperOrders.id, id)).run();
+
+    const cap = accountCapacity();
+
+    expect(cap.openPositionCount).toBe(1);
+    expect(cap.heldUnderlyings).toEqual(['NVDA']);
+  });
+
+  it('falls back to the OCC root when both the column and the contract are gone', () => {
+    // A pruned or expired contract must not resurrect the same hole: an
+    // imperfect answer (the root cannot spell a dotted name like BRK.B)
+    // still beats claiming no exposure exists.
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ASK_E4 });
+    paperDb.update(paperOrders).set({ underlying: null }).where(eq(paperOrders.id, id)).run();
+    marketDb.delete(optionContracts).where(eq(optionContracts.occSymbol, OCC)).run();
+
+    const cap = accountCapacity();
+
+    expect(cap.heldUnderlyings).toEqual(['NVDA']);
+  });
+
   it('agrees with computeDailyEquity’s own cash figure', () => {
     // Two definitions of "cash" that disagree would mean the capital
     // constraint and the equity curve describe different accounts.

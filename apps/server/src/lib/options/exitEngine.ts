@@ -8,7 +8,13 @@ import { paperDb } from '../../db/paper/index.js';
 import { paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
 import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
 import { closeOrder } from '../paper.js';
-import { evaluateExit, positionHealth as scoreHeldContracts, QuantRefusal, QuantUnavailable } from '../quant.js';
+import {
+  computeExitTarget,
+  evaluateExit,
+  positionHealth as scoreHeldContracts,
+  QuantRefusal,
+  QuantUnavailable,
+} from '../quant.js';
 import { readDocumentsSince } from '../text/news.js';
 import { nowIso, todayKey } from '../util.js';
 import { PolygonProvider } from './polygon.js';
@@ -30,6 +36,7 @@ export interface ExitEngineDeps {
    * without fighting `config`'s deliberate read-only typing. */
   anthropicConfigured: boolean;
   maxCallsPerRun: number;
+  computeExitTarget: typeof computeExitTarget;
 }
 
 const defaultDeps: ExitEngineDeps = {
@@ -38,6 +45,7 @@ const defaultDeps: ExitEngineDeps = {
   adviseOnExit,
   anthropicConfigured: config.anthropic.configured,
   maxCallsPerRun: config.market.exitRecheck.maxCallsPerRun,
+  computeExitTarget,
 };
 
 /**
@@ -60,12 +68,96 @@ export interface ExitEngineSummary {
   startedAt: string;
   finishedAt: string;
   checked: number;
+  /** Open model positions that had no exit plan and were given one this
+   * run — see `adoptUnmanagedOrders`. Normally 0. */
+  adopted: number;
   closed: number;
   revised: number;
   escalated: number;
   llmCallsMade: number;
   status: 'done' | 'partial';
   errors: string[];
+}
+
+/**
+ * Give an exit plan to any open `source: 'model'` position that has none.
+ *
+ * `managedOpenOrders` filters on all three plan fields being non-null, so
+ * a position without them is not merely unmanaged — it is *invisible*
+ * here, and stays invisible forever. That is not hypothetical: on
+ * 2026-08-24 all three open positions on the paper book had null targets,
+ * so every recheck since the engine shipped had nothing to check. One was
+ * a $122,440 position.
+ *
+ * Running this on every pass rather than as a one-off backfill script is
+ * deliberate. The failure that produces an unmanaged position is a write
+ * that did not land — a crash between insert and update, a sidecar that
+ * was down at entry — and those recur. A self-healing step turns a
+ * permanent hole into at most a 15-minute one.
+ *
+ * The plan is anchored to **today**, not the original entry day: a
+ * horizon measured from an entry several days past can land a target date
+ * already behind us, which is a stale number rather than a plan. A
+ * position too close to expiry for any honest target is left alone and
+ * reported, not given a fabricated one.
+ */
+async function adoptUnmanagedOrders(
+  log: FastifyBaseLogger,
+  deps: ExitEngineDeps,
+  summary: ExitEngineSummary,
+): Promise<void> {
+  const orphans = paperDb
+    .select()
+    .from(paperOrders)
+    .where(and(eq(paperOrders.status, 'open'), eq(paperOrders.source, 'model')))
+    .all()
+    .filter((o) => o.targetExitPriceE4 === null || o.stopLossPriceE4 === null || o.targetExitDate === null);
+  if (orphans.length === 0) return;
+
+  const today = todayKey();
+  for (const order of orphans) {
+    try {
+      const contract = marketDb
+        .select({ expiry: optionContracts.expiry })
+        .from(optionContracts)
+        .where(eq(optionContracts.occSymbol, order.occSymbol))
+        .get();
+      if (!contract) {
+        summary.errors.push(`${order.occSymbol}: no contract row, cannot compute an exit plan.`);
+        continue;
+      }
+      const plan = await deps.computeExitTarget({
+        entryPriceE4: order.entryPriceE4,
+        expiry: contract.expiry,
+        anchorDay: today,
+      });
+      if (plan.targetE4 === null) {
+        summary.errors.push(`${order.occSymbol}: no exit plan is computable — ${plan.refusal}`);
+        continue;
+      }
+      paperDb
+        .update(paperOrders)
+        .set({
+          targetExitPriceE4: plan.targetE4.targetExitPriceE4,
+          stopLossPriceE4: plan.targetE4.stopLossPriceE4,
+          targetExitDate: plan.targetE4.targetExitDate,
+          exitUpdatedAt: nowIso(),
+        })
+        .where(eq(paperOrders.id, order.id))
+        .run();
+      summary.adopted += 1;
+      log.info(
+        `Exit engine adopted ${order.occSymbol}: target ${plan.targetE4.targetExitPriceE4 / 10_000}, ` +
+          `stop ${plan.targetE4.stopLossPriceE4 / 10_000}, by ${plan.targetE4.targetExitDate}`,
+      );
+    } catch (err) {
+      // One position failing to adopt must not stop the rest, nor the
+      // recheck of positions that already have plans.
+      summary.errors.push(
+        `${order.occSymbol}: could not compute an exit plan — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }
 
 function managedOpenOrders() {
@@ -95,6 +187,7 @@ export async function runExitEngine(
     startedAt,
     finishedAt: startedAt,
     checked: 0,
+    adopted: 0,
     closed: 0,
     revised: 0,
     escalated: 0,
@@ -110,6 +203,10 @@ export async function runExitEngine(
   exitRechecking = true;
 
   try {
+    // Before anything else: a position with no plan is invisible to the
+    // query below, so adopting first is what lets it be managed at all.
+    await adoptUnmanagedOrders(log, deps, summary);
+
     const orders = managedOpenOrders();
 
     // Batched, the same reason positionHealth.ts's computePositionHealth

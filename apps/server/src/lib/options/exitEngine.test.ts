@@ -111,6 +111,12 @@ const NEVER_REVIEW_DEPS: ExitEngineDeps = {
   },
   anthropicConfigured: false,
   maxCallsPerRun: 30,
+  // Every order these tests seed already carries a full exit plan, so
+  // adoption has nothing to do; throwing makes an accidental call loud
+  // rather than silently reaching the real sidecar.
+  computeExitTarget: async () => {
+    throw new Error('computeExitTarget should not be called for an order that already has a plan');
+  },
 };
 
 beforeEach(() => {
@@ -135,10 +141,72 @@ describe('runExitEngine', () => {
     expect(summary.checked).toBe(0);
   });
 
-  it('ignores a model-opened position with no exit target recorded yet', async () => {
+  it('adopts a model-opened position that has no exit plan, then manages it', async () => {
+    // This used to assert `checked: 0` — "ignores a model-opened position
+    // with no exit target recorded yet". That was the bug, not the spec:
+    // such a position is invisible to `managedOpenOrders` forever, so it
+    // is never managed at all. On 2026-08-24 every position on the real
+    // paper book was in exactly this state, one of them worth $122,440.
     openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ENTRY_E4, source: 'model' });
-    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), NEVER_REVIEW_DEPS);
+
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), {
+      ...NEVER_REVIEW_DEPS,
+      computeExitTarget: async () => ({
+        targetE4: { targetExitPriceE4: toE4(1.5), stopLossPriceE4: toE4(0.5), targetExitDate: '2026-09-01' },
+        refusal: null,
+        horizon: 5,
+        modelRunId: 'test',
+      }),
+    });
+
+    expect(summary.adopted).toBe(1);
+    expect(summary.checked).toBe(1); // adopted first, so it is visible in the same run
+    const order = paperDb.select().from(paperOrders).all()[0];
+    expect(order.targetExitPriceE4).toBe(toE4(1.5));
+    expect(order.stopLossPriceE4).toBe(toE4(0.5));
+    expect(order.targetExitDate).toBe('2026-09-01');
+  });
+
+  it('leaves a position unmanaged, with a reason, when no honest target exists', async () => {
+    // A contract inside the DTE floor has no target date that both exists
+    // and clears the floor. Inventing one would be worse than leaving it
+    // alone — see exit.py's refusal case.
+    openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ENTRY_E4, source: 'model' });
+
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), {
+      ...NEVER_REVIEW_DEPS,
+      computeExitTarget: async () => ({
+        targetE4: null,
+        refusal: '2026-08-19 is only 2 day(s) out — no target date clears the 3-day floor.',
+        horizon: 5,
+        modelRunId: 'test',
+      }),
+    });
+
+    expect(summary.adopted).toBe(0);
     expect(summary.checked).toBe(0);
+    expect(summary.errors.join(' ')).toContain('no exit plan is computable');
+    const order = paperDb.select().from(paperOrders).all()[0];
+    expect(order.targetExitPriceE4).toBeNull();
+  });
+
+  it('does not let one un-adoptable position stop the rest of the run', async () => {
+    // Per-item isolation, same as the close/revise loop below it: a
+    // sidecar failure on one orphan must not cost every other position
+    // its recheck.
+    openManagedPosition(); // already has a plan
+    openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ENTRY_E4, source: 'model' });
+
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), {
+      ...NEVER_REVIEW_DEPS,
+      computeExitTarget: async () => {
+        throw new Error('sidecar down');
+      },
+    });
+
+    expect(summary.adopted).toBe(0);
+    expect(summary.checked).toBe(1); // the already-planned position still ran
+    expect(summary.errors.join(' ')).toContain('sidecar down');
   });
 
   it('records an error and leaves the position open when the contract is gone from the corpus', async () => {

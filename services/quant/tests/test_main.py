@@ -13,6 +13,7 @@ from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -519,4 +520,68 @@ class TestSelectEntries:
         # day, which the caller reports as "the market offered nothing" —
         # the same misattribution the missing-horizon 409 above prevents.
         r = client.post("/select-entries", json={**_SELECT_BODY, "min_dte": 60, "max_dte": 14})
+        assert r.status_code == 422
+
+
+class TestComputeExitTarget:
+    """`/exit-target` — the plan a position gets when it somehow has none.
+
+    Exists because on 2026-08-24 every open position on the real paper
+    book had null targets, which made all three invisible to the exit
+    engine's `managedOpenOrders()` and so managed by nothing at all.
+    """
+
+    BODY = {"entry_price": 1224.40, "expiry": "2026-09-18", "anchor_day": "2026-08-24"}
+
+    def test_computes_a_plan_anchored_to_the_day_it_is_given(self, tmp_path, monkeypatch) -> None:
+        run_dir = tmp_path / "ok"
+        _write_model_with_horizon(run_dir, horizon=5)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        r = client.post("/exit-target", json=self.BODY)
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["refusal"] is None
+        assert body["horizon"] == 5
+        # Anchored to anchor_day, not to whenever the position was opened —
+        # a horizon measured from a stale entry can land in the past.
+        assert body["target"]["target_exit_date"] == "2026-08-29"
+        assert body["target"]["target_exit_price"] == pytest.approx(1224.40 * 1.5)
+        assert body["target"]["stop_loss_price"] == pytest.approx(1224.40 * 0.5)
+
+    def test_refuses_rather_than_inventing_a_target_inside_the_dte_floor(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # A contract 2 days out has no date that both exists and stays
+        # clear of the 3-day floor. Null with a reason is the honest
+        # answer; a fabricated target would be managed as if real.
+        run_dir = tmp_path / "ok"
+        _write_model_with_horizon(run_dir)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        r = client.post("/exit-target", json={**self.BODY, "expiry": "2026-08-26"})
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["target"] is None
+        assert "no target date exists" in body["refusal"]
+
+    def test_a_model_without_a_horizon_is_a_409_not_a_silent_null(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # Same reasoning as /select-entries' own 409: a missing horizon is
+        # a broken artifact, and reporting it as "no plan computable"
+        # would blame the position for the model's defect.
+        run_dir = tmp_path / "nohorizon"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+
+        r = client.post("/exit-target", json=self.BODY)
+
+        assert r.status_code == 409
+        assert "horizon" in r.json()["detail"]
+
+    def test_a_non_positive_entry_price_is_rejected_by_validation(self) -> None:
+        r = client.post("/exit-target", json={**self.BODY, "entry_price": 0})
         assert r.status_code == 422
