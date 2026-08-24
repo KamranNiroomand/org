@@ -83,6 +83,42 @@ def rank_information_coefficient(actual: np.ndarray, predicted: np.ndarray) -> f
     return information_coefficient(_rankdata(a), _rankdata(p))
 
 
+def _group_by_day(
+    days: np.ndarray, actual: np.ndarray, predicted: np.ndarray, min_names_per_day: int
+) -> list[tuple[str, np.ndarray, np.ndarray]]:
+    """Bucket rows by trading day, once, dropping unusable rows and thin days.
+
+    Two things worth being explicit about:
+
+    * Days are normalized to `str` **before** grouping, and the grouping key
+      comes from the same normalized array the buckets are built from. An
+      earlier version stringified the key but matched against the raw values,
+      so a non-string day dtype would have matched nothing, dropped every
+      day, and reported a skill-less model rather than an error.
+    * Non-finite pairs are dropped here. A single NaN otherwise reaches
+      `np.corrcoef`, returns NaN, and propagates through every summary
+      statistic into `manifest.json` — where `json.dumps` writes a bare
+      `NaN` literal that the Node side's `JSON.parse` rejects outright,
+      breaking model registration and `/rank` rather than degrading.
+    """
+    day_keys = np.asarray([str(d) for d in np.asarray(days, dtype=object)], dtype=object)
+    a = np.asarray(actual, dtype=float)
+    p = np.asarray(predicted, dtype=float)
+    usable = np.isfinite(a) & np.isfinite(p)
+
+    buckets: dict[str, list[int]] = {}
+    for idx in np.flatnonzero(usable):
+        buckets.setdefault(day_keys[idx], []).append(int(idx))
+
+    grouped: list[tuple[str, np.ndarray, np.ndarray]] = []
+    for day in sorted(buckets):
+        rows = np.asarray(buckets[day], dtype=int)
+        if rows.size < min_names_per_day:
+            continue
+        grouped.append((day, a[rows], p[rows]))
+    return grouped
+
+
 def daily_ic_series(
     days: np.ndarray,
     actual: np.ndarray,
@@ -99,20 +135,28 @@ def daily_ic_series(
     three points, which is mostly noise and would inflate the series' own
     variance.
     """
-    days_arr = np.asarray(days, dtype=object)
-    a = np.asarray(actual, dtype=float)
-    p = np.asarray(predicted, dtype=float)
     measure = rank_information_coefficient if rank else information_coefficient
-
-    out_days: list[str] = []
-    out_ics: list[float] = []
-    for day in sorted({str(d) for d in days_arr}):
-        mask = days_arr == day
-        if int(mask.sum()) < min_names_per_day:
-            continue
-        out_days.append(day)
-        out_ics.append(measure(a[mask], p[mask]))
+    grouped = _group_by_day(days, actual, predicted, min_names_per_day)
+    out_days = [day for day, _, _ in grouped]
+    out_ics = [measure(a, p) for _, a, p in grouped]
     return out_days, np.asarray(out_ics, dtype=float)
+
+
+def multiple_testing_hurdle(n_trials: int, alpha: float = 0.05) -> float:
+    """Two-sided critical t after Bonferroni-correcting for `n_trials`.
+
+    `Z^-1(1 - alpha / (2 * n_trials))`. Degrades to the familiar 1.96 at a
+    single trial and rises slowly: 2.24 at 2 trials, 2.87 at 12, 3.48 at 100.
+
+    An earlier version multiplied the expected maximum of `n_trials` draws
+    (`sqrt(2 ln N)`) by 2.0. That conflated two different things — the
+    standard corrections *replace* the significance threshold with the
+    multiple-testing one, they do not scale the 2.0 by it — and it came out
+    roughly twice as strict as it should be (4.46 rather than 2.87 at twelve
+    trials), which would reject a genuinely skilled model.
+    """
+    n = max(1, n_trials)
+    return float(stats.norm.ppf(1.0 - alpha / (2.0 * n)))
 
 
 def ic_summary(
@@ -122,7 +166,8 @@ def ic_summary(
     horizon: int = 1,
     n_trials: int = 1,
     min_names_per_day: int = 5,
-) -> dict[str, float | int]:
+    alpha: float = 0.05,
+) -> dict[str, float | int | bool]:
     """Everything needed to judge whether an IC is real, in one place.
 
     Three corrections the pooled number cannot express:
@@ -137,24 +182,26 @@ def ic_summary(
       times their mean, so a respectable-looking mean IC can still be
       indistinguishable from zero.
     * **Multiple testing.** Every configuration tried is a chance to find
-      noise that looks like signal. `t_hurdle` scales the usual ~2.0 by
-      `sqrt(2 * ln(n_trials))` (the standard order of the expected maximum of
-      `n_trials` draws), so a model chosen after twenty attempts is held to a
-      higher bar than one chosen first try. `n_trials` must count every
-      configuration *considered*, not every run saved.
+      noise that looks like signal, so `ic_t_hurdle` Bonferroni-corrects the
+      critical value for `n_trials` — see `multiple_testing_hurdle`.
+      `n_trials` must count every configuration *considered*, not every run
+      saved.
     """
-    day_list, ics = daily_ic_series(
-        days, actual, predicted, rank=True, min_names_per_day=min_names_per_day
-    )
-    _, ics_pearson = daily_ic_series(
-        days, actual, predicted, rank=False, min_names_per_day=min_names_per_day
-    )
+    # Grouped once and measured twice, rather than walking the panel twice:
+    # the bucketing is the expensive half on a six-figure row count.
+    grouped = _group_by_day(days, actual, predicted, min_names_per_day)
+    day_list = [day for day, _, _ in grouped]
+    ics = np.asarray([rank_information_coefficient(a, p) for _, a, p in grouped], dtype=float)
+    ics_pearson = np.asarray([information_coefficient(a, p) for _, a, p in grouped], dtype=float)
+
     n_days = len(day_list)
     if n_days == 0:
         return {
             "ic_mean": 0.0, "ic_std": 0.0, "icir": 0.0, "ic_t_stat": 0.0,
             "ic_hit_rate": 0.0, "ic_n_days": 0, "ic_n_effective": 0,
-            "ic_mean_pearson": 0.0, "ic_t_hurdle": 0.0, "ic_clears_hurdle": False,
+            "ic_mean_pearson": 0.0,
+            "ic_t_hurdle": multiple_testing_hurdle(n_trials, alpha),
+            "ic_clears_hurdle": False,
         }
 
     mean = float(np.mean(ics))
@@ -162,7 +209,7 @@ def ic_summary(
     icir = mean / std if std > 0 else 0.0
     n_eff = max(1, n_days // max(1, horizon))
     t_stat = icir * math.sqrt(n_eff)
-    hurdle = 2.0 * math.sqrt(2.0 * math.log(n_trials)) if n_trials > 1 else 2.0
+    hurdle = multiple_testing_hurdle(n_trials, alpha)
 
     return {
         "ic_mean": mean,

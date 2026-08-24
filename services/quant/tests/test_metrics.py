@@ -6,6 +6,9 @@ uses is worse than one that is merely wrong in an obvious way.
 
 from __future__ import annotations
 
+import json
+import math
+
 import numpy as np
 import pytest
 from sklearn.metrics import brier_score_loss
@@ -19,6 +22,7 @@ from app.metrics import (
     information_coefficient,
     log_loss,
     mae,
+    multiple_testing_hurdle,
     max_drawdown,
     rank_information_coefficient,
     rmse,
@@ -235,9 +239,51 @@ class TestIcSummary:
         days, actual, predicted = self._perfect_days(50)
         one = ic_summary(days, actual, predicted, horizon=5, n_trials=1)
         many = ic_summary(days, actual, predicted, horizon=5, n_trials=100)
-        assert many["ic_t_hurdle"] > one["ic_t_hurdle"] * 1.5
-        # A model picked as the best of 100 attempts is held to a real bar.
-        assert many["ic_t_hurdle"] > 5.0
+        assert many["ic_t_hurdle"] > one["ic_t_hurdle"]
+        # Bonferroni, not a scaled expected-max: a single trial is the
+        # ordinary two-sided 1.96, and 100 trials is ~3.48 — not the ~6.07 an
+        # earlier version produced by multiplying the expected max by 2.
+        assert one["ic_t_hurdle"] == pytest.approx(1.96, abs=0.01)
+        assert many["ic_t_hurdle"] == pytest.approx(3.48, abs=0.02)
+
+    def test_hurdle_matches_the_bonferroni_critical_value(self) -> None:
+        from scipy import stats as _stats
+
+        for n in (1, 2, 12, 100):
+            assert multiple_testing_hurdle(n) == pytest.approx(
+                float(_stats.norm.ppf(1 - 0.025 / n))
+            )
+
+    def test_non_finite_rows_are_dropped_rather_than_poisoning_every_statistic(self) -> None:
+        # One NaN used to reach np.corrcoef, return NaN, and propagate into
+        # every summary field — which json.dumps then writes as a bare `NaN`
+        # literal that the Node side's JSON.parse rejects outright.
+        days, actual, predicted = self._perfect_days(20)
+        actual = actual.copy()
+        actual[3] = np.nan
+        predicted = predicted.copy()
+        predicted[7] = np.inf
+
+        s = ic_summary(days, actual, predicted, horizon=1)
+        assert all(math.isfinite(float(s[k])) for k in ("ic_mean", "ic_std", "icir", "ic_t_stat"))
+        assert s["ic_n_days"] == 20  # the two bad rows cost rows, not whole days
+        assert json.dumps(s, allow_nan=False)  # would raise if any value were NaN
+
+    def test_non_string_day_values_still_group(self) -> None:
+        # Grouping used to stringify the key but match against raw values, so
+        # a date-typed day column matched nothing, dropped every day, and
+        # reported a skill-less model instead of failing.
+        import datetime as _dt
+
+        base = _dt.date(2026, 1, 1)
+        days, actual, predicted = [], [], []
+        for d in range(10):
+            days.extend([base + _dt.timedelta(days=d)] * 8)
+            actual.extend(np.arange(8, dtype=float))
+            predicted.extend(np.arange(8, dtype=float))
+        s = ic_summary(np.array(days, dtype=object), np.array(actual), np.array(predicted), horizon=1)
+        assert s["ic_n_days"] == 10
+        assert s["ic_mean"] == pytest.approx(1.0)
 
     def test_a_pure_noise_forecast_does_not_clear_the_hurdle(self) -> None:
         rng = np.random.default_rng(0)
