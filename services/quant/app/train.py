@@ -60,7 +60,6 @@ FEATURE_COLS = [
     # columns above are a price change over some window; these describe how
     # a move was funded and how hard it is to trade against. See
     # features.py::reversal_and_liquidity.
-    "reversal_x_turnover_21d",
     "amihud_illiquidity_21d",
 ]
 

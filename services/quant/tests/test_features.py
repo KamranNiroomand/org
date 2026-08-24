@@ -553,39 +553,81 @@ class TestReversalAndLiquidity:
         # Stated explicitly because it is the point: as a lone feature this
         # is exactly collinear with momentum_21d and adds nothing. It earns
         # its place only through the turnover interaction.
-        closes = [100.0] * 22 + [80.0]
-        out = reversal_and_liquidity(self._bars(closes, [1_000] * 23))
+        closes = [100.0] * 90 + [80.0]
+        out = reversal_and_liquidity(self._bars(closes, [1_000] * 91))
         last = out.sort("day").tail(1).to_dicts()[0]
         assert last["reversal_21d"] == pytest.approx(0.20, rel=1e-9)
 
-    def test_the_interaction_separates_two_identical_price_moves(self) -> None:
-        """The whole reason the interaction exists. Two stocks fall 20% over
-        the same window; one on quiet volume, one on frantic volume. Their
+    def test_the_interaction_keys_on_sustained_funding_not_a_one_day_spike(self) -> None:
+        """The whole reason the interaction exists, and the bug it shipped
+        with. Two stocks decline identically over the window; one on normal
+        volume throughout, one funded by sustained elevated volume. Their
         momentum is identical and no window of `momentum_Xd` can tell them
         apart, but their expected reversal is not the same (Avramov,
-        Chordia & Goyal 2006)."""
-        closes = [100.0] * 22 + [80.0]
-        quiet = reversal_and_liquidity(self._bars(closes, [1_000] * 22 + [200]))
-        frantic = reversal_and_liquidity(self._bars(closes, [1_000] * 22 + [9_000]))
+        Chordia & Goyal 2006).
 
-        q = quiet.sort("day").tail(1).to_dicts()[0]
-        f = frantic.sort("day").tail(1).to_dicts()[0]
+        The first version divided *today's* volume by its own 21-day mean.
+        That conditions a 21-day reversal on a single bar, and normalizes a
+        sustained elevation away entirely: measured, the funded decline
+        scored identically to the normal one (0.200 vs 0.200) while a spike
+        on the final bar alone scored 0.969. The test then in place varied
+        only that last bar, so it passed on the confound and would have
+        kept passing after a fix. It now varies the whole window.
+        """
+        flat = [100.0] * 69
+        declining = [100.0 - i for i in range(21)]
+        closes = flat + declining
 
-        assert q["reversal_21d"] == pytest.approx(f["reversal_21d"], rel=1e-9)  # identical momentum
-        assert f["reversal_x_turnover_21d"] > q["reversal_x_turnover_21d"] * 4  # very different signal
+        normal = reversal_and_liquidity(self._bars(closes, [1_000_000] * 90))
+        funded = reversal_and_liquidity(
+            self._bars(closes, [1_000_000] * 69 + [6_000_000] * 21)
+        )
+        spike_only = reversal_and_liquidity(
+            self._bars(closes, [1_000_000] * 89 + [6_000_000])
+        )
+
+        n = normal.sort("day").tail(1).to_dicts()[0]
+        f = funded.sort("day").tail(1).to_dicts()[0]
+        s = spike_only.sort("day").tail(1).to_dicts()[0]
+
+        # Identical price path, so momentum cannot distinguish them at all.
+        assert n["reversal_21d"] == pytest.approx(f["reversal_21d"], rel=1e-9)
+        assert n["reversal_21d"] == pytest.approx(s["reversal_21d"], rel=1e-9)
+
+        # Sustained funding is what must register.
+        assert f["reversal_x_turnover_21d"] > n["reversal_x_turnover_21d"] * 2
+
+        # A single unrelated bar — an index rebalance, an earnings print
+        # landing last — must not dominate a 21-day measurement.
+        assert s["reversal_x_turnover_21d"] < f["reversal_x_turnover_21d"] / 1.5
+
+    def test_a_halted_bar_does_not_put_infinity_into_the_panel(self) -> None:
+        # Dollar volume is zero on a halted bar, and float division by zero
+        # is `inf`, not null — while `drop_nulls` removes nulls only. One
+        # such bar among thirty previously put `inf` into every surviving
+        # row, straight through build_feature_panel and into LightGBM. It
+        # failed on exactly the illiquid names this feature describes.
+        import math
+
+        volumes = [1_000_000] * 30
+        volumes[10] = 0
+        out = reversal_and_liquidity(self._bars([100.0 + i * 0.1 for i in range(30)], volumes))
+
+        for value in out["amihud_illiquidity_21d"].to_list():
+            assert math.isfinite(value)
 
     def test_a_name_that_did_not_trade_yields_no_row_rather_than_normal_turnover(self) -> None:
         # Defaulting the ratio to 1.0 would fabricate "normal turnover" for
         # exactly the illiquid names these features exist to flag.
-        out = reversal_and_liquidity(self._bars([100.0] * 25, [0] * 25))
+        out = reversal_and_liquidity(self._bars([100.0] * 90, [0] * 90))
         assert out.height == 0
 
     def test_illiquidity_ranks_a_thin_name_above_a_liquid_one(self) -> None:
         # Amihud is price impact per dollar traded: the same price path on
         # a thousandth of the volume is a far less liquid name.
-        closes = [100.0 * (1.0 + 0.01 * (-1) ** i) for i in range(25)]
-        liquid = reversal_and_liquidity(self._bars(closes, [10_000_000] * 25))
-        thin = reversal_and_liquidity(self._bars(closes, [10_000] * 25))
+        closes = [100.0 * (1.0 + 0.01 * (-1) ** i) for i in range(90)]
+        liquid = reversal_and_liquidity(self._bars(closes, [10_000_000] * 90))
+        thin = reversal_and_liquidity(self._bars(closes, [10_000] * 90))
 
         lo = liquid.sort("day").tail(1).to_dicts()[0]["amihud_illiquidity_21d"]
         hi = thin.sort("day").tail(1).to_dicts()[0]["amihud_illiquidity_21d"]
