@@ -16,7 +16,7 @@ import polars as pl
 import pytest
 
 from app.cv import apply_split, purged_walk_forward_splits
-from app.models import beats_baseline, mean_baseline, train_lgbm_regressor
+from app.models import inner_validation_split, beats_baseline, mean_baseline, train_lgbm_regressor
 
 
 def _days(n: int) -> list[str]:
@@ -228,3 +228,87 @@ class TestLossHistory:
         train, validation = curves["train"], curves["validation"]
         assert train[-1] < train[0]  # training error always falls on noise
         assert validation.index(min(validation)) < len(validation) - 1  # best round is not the last
+
+
+class TestInnerValidationSplit:
+    """The purge is the whole reason this function exists rather than a
+    one-line slice — see its docstring."""
+
+    def test_leaves_a_gap_covering_the_label_horizon_and_embargo(self) -> None:
+        # Labels run `horizon` days forward, so without the gap the tail of
+        # inner-train carries labels realized inside inner-validation and
+        # early stopping would select against data it had already seen.
+        days = tuple(f"2026-01-{d:02d}" for d in range(1, 31))
+
+        train, val = inner_validation_split(days, horizon=5, embargo=2, inner_frac=0.2)
+
+        assert len(train) + len(val) < len(days)  # something was purged
+        gap = len(days) - len(train) - len(val)
+        assert gap == 5 + 2
+        # And the two blocks are disjoint and ordered.
+        assert train[-1] < val[0]
+
+    def test_the_validation_tail_is_the_most_recent_days(self) -> None:
+        # Not a random sample: a walk-forward model is judged on what comes
+        # after, so the inner split has to imitate that shape.
+        days = tuple(f"2026-01-{d:02d}" for d in range(1, 31))
+
+        _, val = inner_validation_split(days, horizon=0, embargo=0, inner_frac=0.2)
+
+        assert val == days[-len(val) :]
+
+    def test_refuses_rather_than_returning_a_degenerate_split(self) -> None:
+        # Too short to give up a validation tail *and* a purge gap and
+        # still leave anything to learn from. The caller then trains
+        # without early stopping rather than on nonsense.
+        assert inner_validation_split(tuple(f"d{i}" for i in range(8)), 5, 2, 0.2) is None
+        assert inner_validation_split((), 5, 2, 0.2) is None
+
+    def test_an_impossible_fraction_is_refused(self) -> None:
+        days = tuple(f"d{i}" for i in range(40))
+        for bad in (0.0, 1.0, -0.1, 1.5):
+            with pytest.raises(ValueError, match="inner_frac"):
+                inner_validation_split(days, 5, 2, bad)
+
+
+class TestEarlyStopping:
+    def test_is_off_unless_asked_for(self) -> None:
+        # Measured and it does not help — see train_lgbm_regressor's
+        # docstring. The machinery stays, defaulted off.
+        panel = TestLossHistory()._panel()
+        splits = TestLossHistory()._splits(panel)
+
+        result = train_lgbm_regressor(panel, ["f1", "f2"], "label", splits)
+
+        assert result.best_rounds == {}
+
+    def test_records_the_round_count_it_chose_per_fold(self) -> None:
+        panel = TestLossHistory()._panel()
+        splits = TestLossHistory()._splits(panel)
+
+        result = train_lgbm_regressor(
+            panel, ["f1", "f2"], "label", splits,
+            early_stopping_rounds=5, horizon=2, embargo=1,
+        )
+
+        # A fold whose training block was too short to purge an inner tail
+        # out of simply has no entry — a real state, not an error.
+        for fold, rounds in result.best_rounds.items():
+            assert rounds > 0
+            assert fold in {f.fold for f in result.folds}
+
+    def test_still_produces_predictions_for_every_fold(self) -> None:
+        # Whatever round count it lands on, the fold must still score its
+        # test block — an early-stopping bug that silently dropped folds
+        # would shrink the out-of-fold sample without saying so.
+        panel = TestLossHistory()._panel()
+        splits = TestLossHistory()._splits(panel)
+
+        without = train_lgbm_regressor(panel, ["f1", "f2"], "label", splits)
+        with_es = train_lgbm_regressor(
+            panel, ["f1", "f2"], "label", splits,
+            early_stopping_rounds=5, horizon=2, embargo=1,
+        )
+
+        assert len(with_es.folds) == len(without.folds)
+        assert len(with_es.predicted) == len(without.predicted)

@@ -110,6 +110,7 @@ def train(
     min_train_days: int | None = None,
     output_dir: Path | None = None,
     n_trials: int = 1,
+    early_stopping_rounds: int | None = None,
 ) -> Path:
     panel = build_panel(target, horizon)
     if panel.height < 200:
@@ -122,7 +123,16 @@ def train(
     min_train = min_train_days or max(60, len(days) // (n_splits + 2))
     splits = purged_walk_forward_splits(days, n_splits, horizon, embargo, min_train)
 
-    model_result = train_lgbm_regressor(panel, FEATURE_COLS, "label", splits, record_history=True)
+    model_result = train_lgbm_regressor(
+        panel,
+        FEATURE_COLS,
+        "label",
+        splits,
+        record_history=True,
+        early_stopping_rounds=early_stopping_rounds,
+        horizon=horizon,
+        embargo=embargo,
+    )
     baseline_result = mean_baseline(panel, "label", splits)
 
     metrics = {
@@ -151,6 +161,11 @@ def train(
             n_trials=n_trials,
         ),
         "n_trials": n_trials,
+        # What early stopping chose per fold, when it ran — so a run's
+        # round counts are recoverable from the registry rather than only
+        # from a terminal that has since scrolled away.
+        "early_stopping_rounds": early_stopping_rounds,
+        "best_rounds": model_result.best_rounds,
         "n_folds": len(model_result.folds),
         "n_test_rows": int(len(model_result.actual)),
         "n_train_days": len(days),
@@ -164,7 +179,18 @@ def train(
     import lightgbm as lgb
     from .models import DEFAULT_LGBM_PARAMS
 
-    final_model = lgb.LGBMRegressor(**DEFAULT_LGBM_PARAMS)
+    final_params = dict(DEFAULT_LGBM_PARAMS)
+    if model_result.best_rounds:
+        # The deployed model gets the *median* fold's round count, not the
+        # default 100. Median rather than mean because a single fold whose
+        # inner split barely fit can pick an extreme count, and rather than
+        # max because the whole point is to stop before the noise-fitting
+        # the curve exposed. A refit on all data with a count learned from
+        # folds is the standard construction; it never touches the test
+        # blocks, which is what keeps the reported metrics out-of-fold.
+        chosen = sorted(model_result.best_rounds.values())
+        final_params["n_estimators"] = chosen[len(chosen) // 2]
+    final_model = lgb.LGBMRegressor(**final_params)
     final_model.fit(panel[FEATURE_COLS].to_numpy(), panel["label"].to_numpy())
 
     run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{_config_hash(target, horizon, FEATURE_COLS)}"
@@ -232,6 +258,18 @@ def main() -> None:
     parser.add_argument("--embargo", type=int, default=2)
     parser.add_argument("--min-train-days", type=int, default=None)
     parser.add_argument(
+        "--early-stopping-rounds",
+        type=int,
+        default=None,
+        help=(
+            "Stop each fold's fit once a purged inner validation split has not "
+            "improved for this many rounds. The inner split is carved from the "
+            "*training* days with the same purge gap as the outer one, so round "
+            "selection never touches the test block the reported metrics are "
+            "computed on. Off by default until measured."
+        ),
+    )
+    parser.add_argument(
         "--n-trials",
         type=int,
         default=1,
@@ -253,6 +291,7 @@ def main() -> None:
         embargo=args.embargo,
         min_train_days=args.min_train_days,
         n_trials=args.n_trials,
+        early_stopping_rounds=args.early_stopping_rounds,
     )
 
 
