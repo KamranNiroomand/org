@@ -151,6 +151,13 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
     to `liquid_only=True` only at the point where a contract might actually be
     ranked or filled.
 
+    **Liquidity is not reliability.** 40.4% of multi-day contracts in this
+    corpus carry a completely frozen close that the gate does not catch —
+    see `screens.py`, and pass any chain that will be *priced* through
+    `screen_quotes` first. A caller that stops at `liquid_only=True` and
+    believes it has done the documented due diligence is how the $122,440
+    stale-print incident repeats one call site over.
+
     **Deduped to the latest `as_of` per contract.** `option_quotes` is
     append-only and keyed on `(occ_symbol, as_of)`, not `(occ_symbol,
     trading_day)` — a day recaptured after an interrupted run (a stale
@@ -392,3 +399,49 @@ def prior_trading_day(trading_day: str) -> str | None:
             (trading_day,),
         ).fetchone()
     return row[0] if row and row[0] else None
+
+
+def read_day_stats(trading_day: str) -> pl.DataFrame:
+    """Every contract's close, volume and open interest for one day, in one
+    query — the staleness screen's comparison basis.
+
+    One scan for the whole day rather than one `read_quotes` per symbol:
+    the per-symbol version doubled rank_day's SQL (a windowed join per
+    underlying, ~566 extra queries per rank, multiplied again by every
+    backtest day), to feed a screen that only needs three columns. Same
+    anti-pattern `read_contract_history`'s docstring already names.
+
+    Deliberately unfiltered by liquidity. The prior frame is only a
+    history lookup for "did this print move", and gating it on
+    *yesterday's* liquidity verdict punched a hole in the staleness
+    screen: a contract that failed yesterday's gate had no prior row,
+    joined to null, and passed as fresh — precisely the profile of a
+    contract nobody is making a market in.
+    """
+    schema = {
+        "occ_symbol": pl.Utf8,
+        "close": pl.Float64,
+        "volume": pl.Int64,
+        "open_interest": pl.Int64,
+    }
+    with reading() as conn:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+                SELECT occ_symbol, close_e4, volume, open_interest,
+                       ROW_NUMBER() OVER (PARTITION BY occ_symbol ORDER BY as_of DESC) AS rn
+                FROM option_quotes WHERE trading_day = ?
+            )
+            SELECT occ_symbol, close_e4, volume, open_interest FROM ranked WHERE rn = 1
+            """,
+            (trading_day,),
+        ).fetchall()
+    return pl.DataFrame(
+        {
+            "occ_symbol": [r[0] for r in rows],
+            "close": [r[1] / 10_000.0 if r[1] is not None else None for r in rows],
+            "volume": [r[2] for r in rows],
+            "open_interest": [r[3] for r in rows],
+        },
+        schema=schema,
+    )

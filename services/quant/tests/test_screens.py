@@ -64,7 +64,7 @@ class TestTheIncident:
         assert intrinsic < self.SNDK["price"] < self.SNDK["strike"]
 
     def test_the_full_screen_set_rejects_it_without_needing_a_prior_day(self) -> None:
-        result = screen_quotes(_chain([self.SNDK]), prior_quotes=None)
+        result = screen_quotes(_chain([self.SNDK]), prior_stats=None)
 
         assert result.passed.height == 0
         # Attributed to the first screen that fires — moneyness (1.27) —
@@ -73,8 +73,8 @@ class TestTheIncident:
 
     def test_the_staleness_screen_catches_it_even_at_sane_moneyness(self) -> None:
         # Suppose the same frozen print sat at an unremarkable strike: the
-        # unchanged close + unchanged volume against the prior capture is
-        # what identifies it as fiction rather than price.
+        # unchanged close plus unchanged volume and open interest against
+        # the prior capture is what identifies it as fiction, not price.
         frozen = {**self.SNDK, "strike": 1800.0, "iv": 0.45}
         today = _chain([frozen])
         prior = _chain([frozen])
@@ -123,23 +123,74 @@ class TestIndividualScreens:
         result = screen_quotes(_chain([{"price": 101.0, "close": 101.0}]))
         assert result.dropped == {"arbitrage_bounds": 1}
 
-    def test_a_changed_price_or_changed_volume_is_not_stale(self) -> None:
+    def test_stale_means_close_frozen_and_volume_or_oi_frozen(self) -> None:
+        # The rule after review: close unchanged AND at least one of
+        # volume / open interest unchanged. The incident had all three
+        # frozen; requiring close+volume alone let its nearest neighbour
+        # through — a vendor that jitters reconstructed volume while
+        # carrying the close forward. A genuinely trading contract moves
+        # both volume and OI and survives.
         today = _chain([
-            {"occ_symbol": "MOVED", "price": 5.1},
-            {"occ_symbol": "TRADED", "price": 5.0, "volume": 51},
-            {"occ_symbol": "FROZEN", "price": 5.0, "volume": 50},
+            {"occ_symbol": "MOVED", "close": 5.1},
+            {"occ_symbol": "ACTIVE", "close": 5.0, "volume": 51, "open_interest": 510},
+            {"occ_symbol": "VOLJITTER", "close": 5.0, "volume": 51, "open_interest": 500},
+            {"occ_symbol": "FROZEN", "close": 5.0, "volume": 50, "open_interest": 500},
         ])
         prior = _chain([
-            {"occ_symbol": "MOVED", "price": 5.0},
-            {"occ_symbol": "TRADED", "price": 5.0, "volume": 50},
-            {"occ_symbol": "FROZEN", "price": 5.0, "volume": 50},
+            {"occ_symbol": "MOVED", "close": 5.0},
+            {"occ_symbol": "ACTIVE", "close": 5.0, "volume": 50, "open_interest": 500},
+            {"occ_symbol": "VOLJITTER", "close": 5.0, "volume": 50, "open_interest": 500},
+            {"occ_symbol": "FROZEN", "close": 5.0, "volume": 50, "open_interest": 500},
         ])
 
         result = screen_quotes(today, prior)
 
         kept = set(result.passed["occ_symbol"].to_list())
-        assert kept == {"MOVED", "TRADED"}
+        # MOVED: close changed. ACTIVE: volume AND OI both moved. Kept.
+        # VOLJITTER: close and OI frozen, only volume ticked — the near
+        # neighbour of the incident. FROZEN: everything frozen. Dropped.
+        assert kept == {"MOVED", "ACTIVE"}
+        assert result.dropped == {"stale_price": 2}
+        assert set(result.dropped_rows["stale_price"]) == {"VOLJITTER", "FROZEN"}
+        assert result.staleness_ran is True
+
+    def test_duplicate_prior_rows_do_not_fan_out_the_join(self) -> None:
+        # option_quotes is append-only on (occ_symbol, as_of); a recaptured
+        # day holds duplicates. Un-deduped, the left join fans out: a
+        # frozen contract survives because one duplicate differs, the audit
+        # counts a drop corresponding to no contract, and in the mirror
+        # case one contract reaches the board twice.
+        today = _chain([{"occ_symbol": "FROZEN", "close": 5.0, "volume": 50}])
+        prior = _chain([
+            {"occ_symbol": "FROZEN", "close": 5.0, "volume": 50},
+            {"occ_symbol": "FROZEN", "close": 9.9, "volume": 3},
+        ])
+
+        result = screen_quotes(today, prior)
+
+        assert result.passed.height == 0
         assert result.dropped == {"stale_price": 1}
+
+    def test_a_missing_spot_is_named_not_blamed_on_moneyness(self) -> None:
+        # strike/0 is inf, inf is outside any band — the audit would read
+        # "the whole chain was far OTM" when the truth is "the underlying
+        # had no price".
+        result = screen_quotes(_chain([{"underlying_price": 0.0}]))
+        assert result.dropped == {"no_spot": 1}
+
+    def test_deep_itm_close_slightly_under_eod_intrinsic_survives_the_bounds(self) -> None:
+        # `price` for no-quote contracts is the last *trade*; the spot is
+        # the *closing* print. A stock that rallies into the close leaves a
+        # legitimate deep-ITM trade below end-of-day intrinsic — the known
+        # non-synchronous-close artifact, not bad data. The lower bound
+        # carries 5% tolerance for exactly this.
+        row = {"strike": 84.0, "price": 15.5, "close": 15.5}  # intrinsic 16.0, within 5%
+        result = screen_quotes(_chain([row]))
+        assert result.passed.height == 1
+
+        far_below = {"strike": 84.0, "price": 10.0, "close": 10.0}  # 37% below intrinsic
+        result2 = screen_quotes(_chain([far_below]))
+        assert result2.dropped == {"arbitrage_bounds": 1}
 
     def test_a_contract_absent_from_the_prior_day_is_not_stale(self) -> None:
         # Newly listed, or newly liquid: no prior print means no evidence
@@ -148,7 +199,7 @@ class TestIndividualScreens:
         assert result.passed.height == 1
 
     def test_no_prior_day_skips_the_staleness_screen_rather_than_faking_it(self) -> None:
-        result = screen_quotes(_chain([{}]), prior_quotes=None)
+        result = screen_quotes(_chain([{}]), prior_stats=None)
         assert result.passed.height == 1
         assert "stale_price" not in result.dropped
 

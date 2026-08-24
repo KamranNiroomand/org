@@ -45,7 +45,14 @@ from pathlib import Path
 import lightgbm as lgb
 import polars as pl
 
-from .db import prior_trading_day, read_bars, read_champion_run, read_quotes, read_risk_free_curve
+from .db import (
+    prior_trading_day,
+    read_bars,
+    read_champion_run,
+    read_day_stats,
+    read_quotes,
+    read_risk_free_curve,
+)
 from .features import build_feature_panel
 from .pricing import norm_cdf
 from .screens import screen_quotes
@@ -555,6 +562,7 @@ def rank_day(
     max_capital: float | None = None,
     min_dte: int | None = None,
     max_dte: int | None = None,
+    screen_audit: list[dict] | None = None,
 ) -> list[RankedContract]:
     """The full pipeline: load a model, forecast every underlying, price
     every underlying's gate-passing chain against that forecast, and return
@@ -580,6 +588,14 @@ def rank_day(
     )
 
     prior_day = prior_trading_day(trading_day)
+    # One scan for the whole prior day, unfiltered by liquidity — see
+    # read_day_stats on both choices. The per-symbol, liquid-only version
+    # this replaces doubled rank_day's SQL and punched two holes in the
+    # staleness screen: a contract whose liquidity verdict flipped
+    # overnight had no prior row and passed as fresh, and a symbol that
+    # missed a capture skipped the screen entirely with nothing in the
+    # audit to say so.
+    prior_stats = read_day_stats(prior_day) if prior_day else None
     screen_drops: dict[str, int] = {}
     ranked: list[RankedContract] = []
     for symbol, drift in drift_by_symbol.items():
@@ -607,10 +623,26 @@ def rank_day(
         # vol-forecast ratio is computed on the *screened* chain too: a
         # 447% stale IV distorts the median exactly like it distorts a
         # ranking.
-        prior = read_quotes(symbol, prior_day, liquid_only=True) if prior_day else None
-        screened = screen_quotes(quotes, prior)
+        screened = screen_quotes(quotes, prior_stats)
         for reason, n in screened.dropped.items():
             screen_drops[reason] = screen_drops.get(reason, 0) + n
+        if not screened.staleness_ran:
+            # "Could not screen" is a different fact from "screened,
+            # nothing stale", and the audit must distinguish them — review
+            # found the screen silently off for exactly the symbols with
+            # the patchiest capture history.
+            screen_drops["stale_screen_unavailable_symbols"] = (
+                screen_drops.get("stale_screen_unavailable_symbols", 0) + 1
+            )
+        if screen_audit is not None:
+            # Per-contract attribution, threaded out so a screened-out
+            # contract still gets a decision-log row — "why didn't it buy
+            # X?" must have an answer when the answer is "the screens
+            # rejected its quote", which is now the single largest source
+            # of exclusions.
+            for reason, symbols in screened.dropped_rows.items():
+                for occ in symbols:
+                    screen_audit.append({"occ_symbol": occ, "underlying": symbol, "reason": reason})
         quotes = screened.passed
         if quotes.height == 0:
             continue
@@ -869,6 +901,8 @@ def score_held_contracts(
     for c in contracts:
         by_underlying.setdefault(c["underlying"], []).append(c["occ_symbol"])
 
+    _prior = prior_trading_day(trading_day)
+    prior_stats = read_day_stats(_prior) if _prior else None
     results: dict[str, RankedContract | None] = {c["occ_symbol"]: None for c in contracts}
     for underlying, occ_symbols in by_underlying.items():
         drift = drift_by_symbol.get(underlying)
@@ -880,16 +914,27 @@ def score_held_contracts(
         quotes = read_quotes(underlying, trading_day, liquid_only=False)
         if quotes.height == 0:
             continue
-        # The vol-forecast ratio is measured on the *screened* chain, the
-        # same reference rank_day uses — one stale 447%-IV print in the
-        # median would move every held position's re-score, and a monitor
-        # that prices against different reference data than the ranker is
-        # two definitions of "what does the model think". The held
-        # contracts themselves are NOT screened out: a position you hold
-        # must always get a verdict, even one whose own quote is stale —
-        # that staleness is precisely what its health check should surface.
-        reference = screen_quotes(quotes, None).passed
-        vol_ratio = _vol_forecast_ratio(vol, reference if reference.height > 0 else quotes)
+        # The vol-forecast ratio is measured on the same reference chain
+        # rank_day uses — the liquid subset, screened, with the same prior
+        # day for staleness. Review of the first version found it differed
+        # on both axes (full chain, no staleness), so the monitor and the
+        # ranker held two different definitions of "what does the model
+        # think" for the same symbol on the same day, and the comment
+        # claimed otherwise. Held contracts themselves are NOT screened
+        # out: a position you hold must always get a verdict, even one
+        # whose own quote is stale — that staleness is precisely what its
+        # health check should surface.
+        reference = screen_quotes(quotes.filter(pl.col("liquid")), prior_stats).passed
+        if reference.height > 0:
+            vol_ratio = _vol_forecast_ratio(vol, reference)
+        else:
+            # An empty screened reference means the chain is at its most
+            # corrupt — the first version fell back to the *unscreened*
+            # median here, handing the fully-corrupt set to the exact
+            # calculation the screens protect. 1.0 is the documented
+            # no-view fallback _vol_forecast_ratio itself uses when there
+            # is no market IV to compare against.
+            vol_ratio = 1.0
         held_quotes = quotes.filter(pl.col("occ_symbol").is_in(occ_symbols))
         if held_quotes.height == 0:
             continue

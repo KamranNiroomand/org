@@ -268,11 +268,22 @@ export interface RejectedEntry {
   detail: Record<string, unknown>;
 }
 
+/** A contract the quote screens rejected before ranking priced it — no EV,
+ * but still loggable, or "why didn't it buy X" answers with silence for
+ * the exact class of contract that motivated the decision log. */
+export interface ScreenedOutEntry {
+  occ_symbol: string;
+  underlying: string;
+  reason: string;
+}
+
 export interface SelectEntriesResult {
   model_run_id: string;
   model_beats_baseline: boolean;
   selected: SelectedEntry[];
   rejected: RejectedEntry[];
+  /** Optional for compatibility with a sidecar one release behind. */
+  screened_out?: ScreenedOutEntry[];
 }
 
 /**
