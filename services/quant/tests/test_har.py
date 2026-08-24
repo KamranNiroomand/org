@@ -20,7 +20,7 @@ from app.har import (
     DEFAULT_FORECAST_HORIZON,
     MONTHLY_WINDOW,
     HarCoefficients,
-    _shift_back,
+    InsufficientHistory,
     fit_har,
     forecast_vol_by_symbol,
     har_features,
@@ -162,7 +162,7 @@ class TestFitHar:
         panel = pl.DataFrame(
             {"rv_daily": [0.2, 0.3], "rv_weekly": [0.2, 0.3], "rv_monthly": [0.2, 0.3], "rv_forward": [0.2, 0.3]}
         )
-        with pytest.raises(ValueError, match="at least 4 observations"):
+        with pytest.raises(InsufficientHistory, match="at least 4 observations"):
             fit_har(panel)
 
     def test_zero_volatility_does_not_poison_the_fit_with_negative_infinity(self) -> None:
@@ -204,21 +204,48 @@ class TestJensenCorrection:
 
 
 class TestLeakGuard:
-    def test_the_fit_excludes_rows_whose_forward_window_has_not_closed(self) -> None:
-        # The defect this exists to prevent: filtering on the row's own date
-        # rather than its target's end date. A row dated `trading_day - 5`
-        # looks safely historical but its 21-day target runs well past
-        # `trading_day`, so training on it leaks the very window being
-        # forecast — and every downstream metric would look better for it.
-        cutoff = "2026-06-01"
-        shifted = _shift_back(cutoff, DEFAULT_FORECAST_HORIZON)
-        assert shifted < cutoff
-        # Generous by construction: at least the horizon in calendar days,
-        # so holidays cannot pull a still-open window into the fit.
-        from datetime import date
+    def test_every_row_carries_the_date_its_label_actually_closes_on(self) -> None:
+        # `forward_day` exists so usability is decided by an exact
+        # comparison rather than arithmetic on the row's own date.
+        feats = har_features(_bars("AAA", _walk(80, 0.01, 30)))
+        panel = har_targets(feats, horizon=21)
+        assert "forward_day" in panel.columns
+        for row in panel.iter_rows(named=True):
+            assert row["forward_day"] > row["day"]
 
-        gap = (date.fromisoformat(cutoff) - date.fromisoformat(shifted)).days
-        assert gap >= DEFAULT_FORECAST_HORIZON
+    def test_a_gap_in_the_history_cannot_smuggle_a_still_open_label_into_the_fit(self) -> None:
+        """The leak this replaced, reproduced.
+
+        The target is a shift of `horizon` *rows*, which equals `horizon`
+        trading days only for a symbol that traded every session. The old
+        guard subtracted `horizon * 7/5 + 7` calendar days from the row's
+        own date to decide usability — and on the real corpus 42 rows had
+        21 consecutive bars spanning more than those 36 days, BNY's gap
+        stretching them to 136. Such a row looks safely historical while
+        its label runs months past the trading day.
+
+        Here: 30 daily bars, a four-month hole, then 30 more. Rows just
+        before the hole have labels landing after it, and must be excluded
+        by any trading day that falls inside it.
+        """
+        early = _bars("GAP", _walk(30, 0.01, 31), "2026-01-01")
+        late = _bars("GAP", _walk(30, 0.01, 32), "2026-06-01")
+        bars = pl.concat([early, late])
+
+        panel = har_targets(har_features(bars), horizon=5)
+        trading_day = "2026-03-01"  # inside the hole
+
+        usable = panel.filter(pl.col("forward_day") <= trading_day)
+        # Whatever survives, every surviving label closed before the day.
+        for row in usable.iter_rows(named=True):
+            assert row["forward_day"] <= trading_day
+
+        # The old calendar approximation would have admitted rows whose
+        # labels land in June — after the trading day, inside the future.
+        leaked = panel.filter(
+            (pl.col("day") <= trading_day) & (pl.col("forward_day") > trading_day)
+        )
+        assert leaked.height > 0, "fixture failed to construct the leak it is testing"
 
     def test_forecast_never_reads_a_bar_after_the_trading_day(self) -> None:
         # End to end: truncating the corpus after the trading day must not
@@ -239,7 +266,10 @@ class TestLeakGuard:
 
     def test_too_little_closed_history_refuses_rather_than_fitting_on_scraps(self) -> None:
         bars = _bars("AAA", _walk(40, 0.01, 20), "2026-01-01")
-        with pytest.raises(ValueError, match="not enough history"):
+        # `InsufficientHistory`, not a bare ValueError: rank.py falls back
+        # to the trailing placeholder on exactly this and must not swallow
+        # a malformed bar reaching yang_zhang_vol under the same handler.
+        with pytest.raises(InsufficientHistory, match="not enough history"):
             forecast_vol_by_symbol(bars, "2026-01-25")
 
 

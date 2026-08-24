@@ -81,6 +81,18 @@ DEFAULT_FORECAST_HORIZON = 21
 _MIN_VOL = 1e-6
 
 
+class InsufficientHistory(ValueError):
+    """Not enough closed observations to fit a forecast.
+
+    A distinct type because the caller's fallback must be able to mean
+    *only* this. `rank.py` degrades to the trailing placeholder when it is
+    raised, and a bare `except ValueError` there would also swallow a
+    malformed bar reaching `yang_zhang_vol` — silently reverting the
+    volatility forecast for every symbol on one bad row, with nothing
+    reported. Subclasses ValueError so existing handlers still work.
+    """
+
+
 @dataclass(frozen=True)
 class HarCoefficients:
     """A fitted HAR-RV model. Coefficients are on **log** volatility."""
@@ -202,6 +214,15 @@ def har_targets(features: pl.DataFrame, horizon: int = DEFAULT_FORECAST_HORIZON)
         features.sort(["symbol", "day"])
         .with_columns(
             pl.col("rv_monthly").shift(-horizon).over("symbol").alias("rv_forward"),
+            # The date the target window actually closes on, carried
+            # explicitly rather than inferred later from the row's own date.
+            # The shift moves `horizon` *rows*, which equals `horizon`
+            # trading days only for a symbol that traded every session — and
+            # on the real corpus it does not: 21 consecutive bars of BNY
+            # span 136 calendar days across its gap. Any caller reasoning
+            # about when this label became observable must use this column,
+            # not arithmetic on `day`.
+            pl.col("day").shift(-horizon).over("symbol").alias("forward_day"),
         )
         .drop_nulls("rv_forward")
     )
@@ -218,7 +239,9 @@ def fit_har(panel: pl.DataFrame) -> HarCoefficients:
     least-squares solver does not.
     """
     if panel.height < 4:
-        raise ValueError(f"HAR needs at least 4 observations to fit 4 parameters, got {panel.height}")
+        raise InsufficientHistory(
+            f"HAR needs at least 4 observations to fit 4 parameters, got {panel.height}"
+        )
 
     def logs(col: str) -> np.ndarray:
         return np.log(np.maximum(panel[col].to_numpy().astype(float), _MIN_VOL))
@@ -243,6 +266,9 @@ def fit_har(panel: pl.DataFrame) -> HarCoefficients:
     )
 
 
+_fit_cache: dict[tuple[str, int, int], tuple[dict[str, float], HarCoefficients]] = {}
+
+
 def forecast_vol_by_symbol(
     bars: pl.DataFrame,
     trading_day: str,
@@ -261,18 +287,34 @@ def forecast_vol_by_symbol(
     flatter this forecast with information from the very window it is
     predicting.
     """
+    # Keyed on the corpus as well as the day: the panel only changes when
+    # bars are added, so a same-day re-rank reuses the fit, while a fresh
+    # capture invalidates it. `rank_day` runs from /rank, /select-entries
+    # and the 15-minute exit recheck, and rebuilding features over every
+    # bar in the corpus each time is ~2.5s of pure repetition.
+    cache_key = (trading_day, bars.height, horizon)
+    hit = _fit_cache.get(cache_key)
+    if hit is not None:
+        return hit
+
     features = har_features(bars)
     if features.height == 0:
-        raise ValueError("No HAR features could be built — not enough trailing bars.")
+        raise InsufficientHistory("No HAR features could be built — not enough trailing bars.")
 
     targets = har_targets(features, horizon)
-    # `rv_forward` on a row dated d is realized over the window ending
-    # `horizon` trading days after d, so the row is only usable once that
-    # end date is itself in the past. Approximating trading days with a
-    # generous calendar span keeps this conservative rather than clever.
-    usable = targets.filter(pl.col("day") <= _shift_back(trading_day, horizon))
+    # A row is usable once the window its label is realized over has
+    # actually closed — compared exactly, against the target's own end
+    # date. An earlier version approximated this by subtracting
+    # `horizon * 7/5 + 7` calendar days from the row's own date, which is
+    # right only for a symbol that trades every session. Measured on this
+    # corpus, 42 rows had 21 consecutive bars spanning more than those 36
+    # days (BNY's gap stretches them to 136), so their labels ran past the
+    # trading day and the model was fitted on the future it forecasts. The
+    # effect was small — 42 of 211,585 rows — but it grows silently with
+    # every halt or delisting gap, and an exact comparison costs nothing.
+    usable = targets.filter(pl.col("forward_day") <= trading_day)
     if usable.height < 4:
-        raise ValueError(
+        raise InsufficientHistory(
             f"Only {usable.height} HAR observation(s) close before {trading_day} — "
             f"not enough history to fit a volatility forecast."
         )
@@ -288,21 +330,13 @@ def forecast_vol_by_symbol(
     out: dict[str, float] = {}
     for row in latest.iter_rows(named=True):
         out[row["symbol"]] = coefs.predict(row["rv_daily"], row["rv_weekly"], row["rv_monthly"])
+
+    # Bounded so a long-lived process cannot accumulate one entry per
+    # (day, corpus size) forever; only the most recent few are ever reused.
+    if len(_fit_cache) > 8:
+        _fit_cache.clear()
+    _fit_cache[cache_key] = (out, coefs)
     return out, coefs
-
-
-def _shift_back(day: str, trading_days: int) -> str:
-    """`day` minus roughly `trading_days` trading days, as a date string.
-
-    Deliberately approximate and deliberately generous: 7/5 converts
-    trading days to calendar days and the extra week absorbs holidays. This
-    only ever *excludes* borderline rows from the fit, so erring long costs
-    a few observations while erring short would admit a leak.
-    """
-    from datetime import date, timedelta
-
-    calendar_days = int(trading_days * 7 / 5) + 7
-    return (date.fromisoformat(day) - timedelta(days=calendar_days)).isoformat()
 
 
 def annualized(daily_variance: float) -> float:
