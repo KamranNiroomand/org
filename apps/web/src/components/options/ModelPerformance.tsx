@@ -4,6 +4,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  Legend,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -140,65 +141,129 @@ function SkillChart({ runs }: { runs: Performance['runs'] }) {
 }
 
 /**
- * Train vs validation RMSE per boosting round — **every fold of one
- * training run**, side by side.
+ * Train vs validation RMSE per boosting round — one curve each, averaged
+ * across the walk-forward folds.
  *
- * The question a loss curve answers is "did this fit overfit", and the
- * out-of-fold summary metrics cannot answer it: they report where the fit
- * ended up, having already absorbed whatever happened on the way. Only the
- * curve shows a validation line turning upward while training keeps
- * falling.
+ * Averaging rather than drawing four separate charts: the question is
+ * whether *this training run* overfits, and four small charts made the
+ * reader do the averaging by eye. The folds are averaged per round over
+ * whichever folds still have a value there, so a run where early stopping
+ * cut some folds short does not get a cliff at the length of its shortest
+ * fold.
  *
- * All folds rather than just the first, because they disagree and the
- * disagreement is the information. On this corpus validation bottoms at
- * rounds 1, 6, 7 and 65 across the four folds — a single fold would have
- * suggested a clean answer that the others contradict.
+ * The dashed line marks where mean validation bottomed. That is a
+ * *diagnostic*, never a setting: choosing a round count against this curve
+ * would select on the same blocks the metrics above are computed from,
+ * turning every out-of-fold number on this page into an in-sample one.
  *
- * The best round is marked on each chart. That is a *diagnostic*, never a
- * setting: choosing a round count against these curves would be selecting
- * on the very block the reported metrics are computed from, turning every
- * out-of-fold number on this page into an in-sample one.
+ * One caveat the mean cannot express, so it is printed beside it: folds
+ * sit at very different error levels — on this corpus roughly 0.04 to 0.18
+ * — so the average is dominated by the worst fold and its minimum lands
+ * far later than most folds' own. The mean here bottoms around round 58
+ * while the individual folds bottom at 1, 6, 7 and 65. Reading only the
+ * averaged curve would understate how early most folds stop improving,
+ * which is the opposite of the mistake this chart exists to prevent.
  */
-function FoldCurve({ fold, series }: { fold: string; series: { train?: number[]; validation?: number[] } }) {
-  const train = series.train ?? [];
-  const validation = series.validation ?? [];
+function meanPerRound(curve: Performance['loss_curve'], key: 'train' | 'validation'): number[] {
+  const series = Object.values(curve)
+    .map((c) => c[key] ?? [])
+    .filter((a) => a.length > 0);
+  if (series.length === 0) return [];
+
+  const rounds = Math.max(...series.map((a) => a.length));
+  return Array.from({ length: rounds }, (_, i) => {
+    const values = series.map((a) => a[i]).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    return values.length === 0 ? NaN : values.reduce((a, b) => a + b, 0) / values.length;
+  });
+}
+
+function LossCurves({ curve }: { curve: Performance['loss_curve'] }) {
+  const train = meanPerRound(curve, 'train');
+  const validation = meanPerRound(curve, 'validation');
+
+  if (train.length === 0 && validation.length === 0) {
+    return (
+      <Empty>
+        Not recorded for this run. Loss history is written from each training run that followed it —
+        an absent curve is shown as absent rather than as a flat line, which is the shape a
+        perfectly fit model would have.
+      </Empty>
+    );
+  }
+
   const rounds = Math.max(train.length, validation.length);
   const points = Array.from({ length: rounds }, (_, i) => ({
     round: i + 1,
-    train: train[i] ?? null,
-    validation: validation[i] ?? null,
+    train: Number.isFinite(train[i]) ? train[i] : null,
+    validation: Number.isFinite(validation[i]) ? validation[i] : null,
   }));
 
-  const best = validation.length
-    ? validation.indexOf(Math.min(...validation.filter((v) => Number.isFinite(v)))) + 1
-    : null;
-  const overfits = best !== null && best < validation.length;
+  // Per-fold minima, printed alongside the mean because averaging hides
+  // them — see the note above.
+  const perFoldBest = Object.entries(curve)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([fold, series]) => {
+      const v = (series.validation ?? []).filter((x) => Number.isFinite(x));
+      if (v.length === 0) return null;
+      return { fold, best: (series.validation ?? []).indexOf(Math.min(...v)) + 1 };
+    })
+    .filter((x): x is { fold: string; best: number } => x !== null);
+
+  const finite = validation.filter((v) => Number.isFinite(v));
+  // Guarded against a curve with no finite values at all: `Math.min()` of
+  // nothing is Infinity, whose indexOf is -1, which would render as
+  // "best round 0" and drop a reference line at the y-axis.
+  const best = finite.length > 0 ? validation.indexOf(Math.min(...finite)) + 1 : null;
+  const foldCount = Object.keys(curve).length;
 
   return (
     <div className="rounded-lg border border-border">
-      <div className="flex items-baseline justify-between border-b border-border px-3 py-2">
-        <span className="text-xs font-medium">Fold {fold}</span>
-        <span className="text-xs text-muted">
+      <div className="flex items-baseline justify-between border-b border-border px-3 py-2 text-xs">
+        <span className="text-muted">
+          Mean of {foldCount} walk-forward fold{foldCount === 1 ? '' : 's'}
+        </span>
+        <span className="text-muted">
           {best === null ? (
             'no validation curve'
           ) : (
             <>
-              best round {best} of {rounds}
-              {overfits ? <span className="text-warning"> · {rounds - best} spent overfitting</span> : null}
+              validation bottoms at round {best} of {rounds}
+              {best < rounds ? (
+                <span className="text-warning"> · {rounds - best} rounds past it</span>
+              ) : null}
             </>
           )}
         </span>
       </div>
-      <div className="h-44 px-1 pt-2">
+      {perFoldBest.length > 1 && (
+        <div className="border-b border-border px-3 py-1.5 text-xs text-muted">
+          Per fold, validation bottoms at{' '}
+          {perFoldBest.map((f, i) => (
+            <span key={f.fold}>
+              {i > 0 ? ', ' : ''}
+              <span className="text-fg">{f.best}</span>
+            </span>
+          ))}
+          . Folds sit at different error levels, so the averaged curve above is pulled toward the
+          worst of them and bottoms later than most folds do on their own.
+        </div>
+      )}
+      <div className="h-72 px-2 pt-3">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={points} margin={{ left: 4, right: 10, top: 4, bottom: 0 }}>
+          <LineChart data={points} margin={{ left: 4, right: 12, top: 4, bottom: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 3" />
-            <XAxis dataKey="round" tick={{ fontSize: 10, fill: 'var(--color-muted)' }} tickLine={false} axisLine={false} />
-            <YAxis
-              tick={{ fontSize: 10, fill: 'var(--color-muted)' }}
+            <XAxis
+              dataKey="round"
+              tick={{ fontSize: 11, fill: 'var(--color-muted)' }}
               tickLine={false}
               axisLine={false}
-              width={52}
+              label={{ value: 'boosting round', position: 'insideBottom', offset: -2, fontSize: 11, fill: 'var(--color-muted)' }}
+            />
+            <YAxis
+              tick={{ fontSize: 11, fill: 'var(--color-muted)' }}
+              tickLine={false}
+              axisLine={false}
+              width={62}
               domain={['auto', 'auto']}
               tickFormatter={(v: number) => v.toFixed(4)}
             />
@@ -212,44 +277,20 @@ function FoldCurve({ fold, series }: { fold: string; series: { train?: number[];
               formatter={(v) => (typeof v === 'number' ? v.toFixed(5) : String(v))}
               labelFormatter={(r) => `Round ${r}`}
             />
-            {best !== null && (
-              <ReferenceLine x={best} stroke="var(--color-muted)" strokeDasharray="3 3" />
-            )}
-            <Line type="monotone" dataKey="train" name="train" stroke="var(--color-accent)" strokeWidth={1.75} dot={false} />
+            <Legend verticalAlign="top" height={24} wrapperStyle={{ fontSize: 12 }} />
+            {best !== null && <ReferenceLine x={best} stroke="var(--color-muted)" strokeDasharray="3 3" />}
+            <Line type="monotone" dataKey="train" name="Train loss" stroke="var(--color-accent)" strokeWidth={2} dot={false} />
             <Line
               type="monotone"
               dataKey="validation"
-              name="validation"
+              name="Validation loss"
               stroke="var(--color-warning)"
-              strokeWidth={1.75}
+              strokeWidth={2}
               dot={false}
             />
           </LineChart>
         </ResponsiveContainer>
       </div>
-    </div>
-  );
-}
-
-function LossCurves({ curve }: { curve: Performance['loss_curve'] }) {
-  const folds = Object.keys(curve).sort((a, b) => Number(a) - Number(b));
-  const withData = folds.filter((f) => (curve[f]?.train?.length ?? 0) > 0 || (curve[f]?.validation?.length ?? 0) > 0);
-
-  if (withData.length === 0) {
-    return (
-      <Empty>
-        Not recorded for this run. Loss history is written from each training run that followed it —
-        an absent curve is shown as absent rather than as a flat line, which is the shape a
-        perfectly fit model would have.
-      </Empty>
-    );
-  }
-
-  return (
-    <div className="grid gap-3 md:grid-cols-2">
-      {withData.map((f) => (
-        <FoldCurve key={f} fold={f} series={curve[f]!} />
-      ))}
     </div>
   );
 }
@@ -366,10 +407,10 @@ export function ModelPerformance() {
           </label>
         </div>
         <p className="mb-2 text-xs text-muted">
-          Train and validation RMSE per boosting round, every fold of this run. Validation turning
-          up while train keeps falling is overfitting; the dashed line marks where validation
-          bottomed. That mark is a diagnostic, never a setting — choosing a round count against
-          these curves would select on the same block the metrics above are computed from.
+          Root-mean-square error per boosting round, averaged across the walk-forward folds.
+          Validation turning up while train keeps falling is overfitting; the dashed line marks
+          where validation bottomed. That mark is a diagnostic, never a setting — choosing a round
+          count against it would select on the same blocks the metrics above are computed from.
         </p>
         <LossCurves curve={data.loss_curve} />
       </section>

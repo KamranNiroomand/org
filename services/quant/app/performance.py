@@ -129,6 +129,12 @@ def read_loss_curve(run_id: str, base_dir: Path | None = None) -> dict[str, dict
     return loaded
 
 
+def _has_curve_file(run_id: str, base_dir: Path | None) -> bool:
+    """Whether an artifact curve exists, without reading it."""
+    base = base_dir or (Path.home() / ".org" / "market" / "models")
+    return (base / run_id / "history.json").exists()
+
+
 def model_performance(
     target: str = "dir",
     base_dir: Path | None = None,
@@ -176,8 +182,12 @@ def model_performance(
                 "status": r.status,
                 "metrics": r.metrics,
                 # Whether a curve exists *without* shipping it, so the UI
-                # can offer only the runs that have one.
-                "has_loss_curve": bool(r.history) or bool(read_loss_curve(r.run_id, base_dir)),
+                # can offer only the runs that have one. A stat, not a
+                # parse: calling `read_loss_curve` here would json.loads
+                # every run's file on every request — tens of kilobytes
+                # each, to produce a boolean — which is exactly the cost
+                # the per-request curve limit above exists to avoid.
+                "has_loss_curve": bool(r.history) or _has_curve_file(r.run_id, base_dir),
             }
             for r in runs
         ],
