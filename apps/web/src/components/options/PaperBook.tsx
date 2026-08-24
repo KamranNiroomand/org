@@ -5,7 +5,7 @@ import { AlertTriangle } from 'lucide-react';
 import { formatMoney, money } from '@org/shared';
 import { Badge, Button, Card, CardHeader, Empty, Input, Skeleton, cn } from '../ui';
 import { StatTile } from '../charts';
-import { e4ToUsd, optionsApi, type PaperOrder } from '../../lib/optionsApi';
+import { e4ToUsd, optionsApi, type PaperEquityPoint, type PaperOrder } from '../../lib/optionsApi';
 
 /**
  * Artificial money, real accounting.
@@ -83,6 +83,118 @@ function EquityChart({ points }: { points: Array<{ day: string; equity: number }
     </div>
   );
 }
+
+/**
+ * Day-by-day profit and loss, which the equity chart above cannot give you:
+ * a curve shows the shape, a table answers "what happened on the 21st".
+ *
+ * Realized and unrealized are separate columns on purpose, because they are
+ * different claims. Realized is money the book actually banked when a
+ * position closed. Unrealized is a *mark*, and on this data plan a mark is
+ * the contract's close rather than a bid — there is no quote entitlement,
+ * so nothing here has been tested against a price anyone would actually
+ * fill at. Adding them into one "P&L" number would launder that distinction
+ * away, which is exactly the number a paper book most wants to flatter.
+ *
+ * `realizedPlToDateE4` is cumulative in the database, so the daily figure
+ * is a difference between consecutive rows — and only between *stored*
+ * rows. A day the marking job never ran is simply absent, and its P&L
+ * lands on the next row that exists rather than being invented; the gap
+ * column says so rather than drawing a flat line through it.
+ */
+function DailyPnl({ points, startingBalanceE4 }: { points: PaperEquityPoint[]; startingBalanceE4: number }) {
+  if (points.length === 0) {
+    return (
+      <div className="px-6 py-8 text-center text-sm text-muted">
+        No marked days yet. “Mark now” above records one for today.
+      </div>
+    );
+  }
+
+  const rows = points
+    .map((p, i) => {
+      const prev = i > 0 ? points[i - 1] : undefined;
+      const prevEquity = prev?.totalEquityE4 ?? startingBalanceE4;
+      return {
+        ...p,
+        changeE4: p.totalEquityE4 - prevEquity,
+        realizedTodayE4: p.realizedPlToDateE4 - (prev?.realizedPlToDateE4 ?? 0),
+        // Both columns are *daily*, which is worth stating because the
+        // first version was not: realized was a delta and unrealized was
+        // a to-date figure, so two columns of one row silently meant
+        // different periods on a table whose whole premise is that those
+        // two claims must not be conflated.
+        //
+        // Daily also buys an invariant worth having: Change = Realized +
+        // Unrealized, exactly. A row where those stop adding up is a bug
+        // in the marking job, and now it is visible on the page.
+        unrealizedTodayE4:
+          p.totalEquityE4 - startingBalanceE4 - p.realizedPlToDateE4 - unrealizedToDate(prev, startingBalanceE4),
+      };
+    })
+    .reverse();
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-[13px]">
+        <thead className="border-b border-border text-left text-xs text-muted">
+          <tr>
+            <th className="px-3 py-2 font-medium">Day</th>
+            <th className="px-3 py-2 text-right font-medium">Equity</th>
+            <th className="px-3 py-2 text-right font-medium">Change</th>
+            <th className="px-3 py-2 text-right font-medium">Day %</th>
+            <th className="px-3 py-2 text-right font-medium">Realized</th>
+            <th className="px-3 py-2 text-right font-medium">Unrealized</th>
+            <th className="px-3 py-2 text-right font-medium">Cash</th>
+            <th className="px-3 py-2 text-right font-medium">Since start</th>
+          </tr>
+        </thead>
+        <tbody className="tnum">
+          {rows.map((r) => (
+            <tr key={r.day} className="border-b border-border/50 last:border-0">
+              <td className="px-3 py-2">{r.day}</td>
+              <td className="px-3 py-2 text-right">{usd(r.totalEquityE4)}</td>
+              <td className={cn('px-3 py-2 text-right', toneFor(r.changeE4))}>{signed(r.changeE4)}</td>
+              <td className={cn('px-3 py-2 text-right', toneFor(r.dayReturnPct ?? 0))}>
+                {pct(r.dayReturnPct, 3)}
+              </td>
+              <td className={cn('px-3 py-2 text-right', toneFor(r.realizedTodayE4))}>
+                {r.realizedTodayE4 === 0 ? '—' : signed(r.realizedTodayE4)}
+              </td>
+              <td className={cn('px-3 py-2 text-right', toneFor(r.unrealizedTodayE4))}>
+                {r.unrealizedTodayE4 === 0 ? '—' : signed(r.unrealizedTodayE4)}
+              </td>
+              <td className="px-3 py-2 text-right">{usd(r.cashE4)}</td>
+              <td className={cn('px-3 py-2 text-right', toneFor(r.cumulativeReturnPct))}>
+                {pct(r.cumulativeReturnPct, 3)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="px-3 py-2 text-xs text-muted">
+        Realized is banked on close. Unrealized is a mark — with no quote entitlement on this data
+        plan it is the contract’s close, not a bid, so it has never been tested against a price
+        anyone would fill at. Both are daily, so Change = Realized + Unrealized on every row. A
+        day with no row is a day the marking job did not run.
+      </p>
+    </div>
+  );
+}
+
+/** Unrealized P&L carried into a row, so the next row can express its own
+ * as a daily change. Zero before the first stored row. */
+function unrealizedToDate(prev: PaperEquityPoint | undefined, startingBalanceE4: number): number {
+  if (!prev) return 0;
+  return prev.totalEquityE4 - startingBalanceE4 - prev.realizedPlToDateE4;
+}
+
+/** Reuses the file's own `usd`, so every dollar figure on this tab is
+ * formatted one way — including the minus. An earlier version prefixed
+ * U+2212 while `usd` emits U+002D for negatives, which put two different
+ * minus characters two columns apart in the same row. */
+const signed = (e4: number) => (e4 >= 0 ? `+${usd(e4)}` : usd(e4));
+const toneFor = (v: number) => (v > 0 ? 'text-positive' : v < 0 ? 'text-negative' : 'text-muted');
 
 function OpenOrderForm({ onOpened }: { onOpened: () => void }) {
   const [occSymbol, setOccSymbol] = useState('');
@@ -341,6 +453,14 @@ export function PaperBook() {
           }
         />
         <EquityChart points={points} />
+      </Card>
+
+      <Card className="overflow-hidden">
+        <CardHeader
+          title="Daily profit and loss"
+          subtitle="Realized and unrealized kept apart — they are different claims"
+        />
+        <DailyPnl points={data.equity} startingBalanceE4={data.startingBalanceE4} />
       </Card>
 
       <OpenOrderForm onOpened={invalidate} />
