@@ -103,10 +103,65 @@ class TestEvaluateExit:
         base.update(overrides)
         return ExitTarget(**base)
 
-    def test_exits_on_hitting_the_profit_target(self) -> None:
+    def test_reaching_the_target_raises_the_stop_instead_of_closing(self) -> None:
+        # This asserted `exit_now` in v1. That rule cut every winner at the
+        # target while losers still ran to the stop or to zero — capping the
+        # one tail a long option is bought for. The target now activates a
+        # trailing stop and the position keeps running.
         decision = evaluate_exit(current_price=3.00, dte=10, target=self._target())
+        assert decision.action == "hold"
+        assert decision.triggered_by == "trail_raised"
+        assert decision.new_stop_loss_price == pytest.approx(3.00 * 0.7)
+
+    def test_a_winner_still_escalates_on_news_and_keeps_its_raised_stop(self) -> None:
+        # The bug this pins: the trail branch used to return before the
+        # review checks. Under the old rule that cost nothing — the
+        # position was closed at the target, so there was nothing left to
+        # review. Now it holds above the target indefinitely, and an early
+        # return meant a winning position could never escalate again: a
+        # restatement would ride the trailing stop down with nobody
+        # looking. The raised stop must survive the escalation too.
+        decision = evaluate_exit(
+            current_price=3.00, dte=10, target=self._target(), new_documents_count=2
+        )
+        assert decision.action == "needs_review"
+        assert decision.triggered_by == "new_news"
+        assert decision.new_stop_loss_price == pytest.approx(3.00 * 0.7)
+
+    def test_a_winner_still_escalates_on_an_ev_sign_flip(self) -> None:
+        decision = evaluate_exit(
+            current_price=3.00, dte=10, target=self._target(), entry_ev=5.0, current_ev=-1.0
+        )
+        assert decision.action == "needs_review"
+        assert decision.triggered_by == "ev_sign_flip"
+        assert decision.new_stop_loss_price == pytest.approx(3.00 * 0.7)
+
+    def test_the_trailing_stop_only_ever_ratchets_upward(self) -> None:
+        # A stop that can move down is not a stop. At a price whose trail
+        # would sit below the stop already in force, the existing stop
+        # stands and nothing is written.
+        decision = evaluate_exit(
+            current_price=3.00, dte=10, target=self._target(stop_loss_price=2.50)
+        )
+        assert decision.action == "hold"
+        assert decision.new_stop_loss_price is None
+
+    def test_a_ratcheted_stop_is_what_later_closes_the_position(self) -> None:
+        # The other half of the rule: once the stop has trailed up to 2.10,
+        # a fall back to it exits — the give-back is bounded, the upside
+        # was not.
+        decision = evaluate_exit(
+            current_price=2.10, dte=10, target=self._target(stop_loss_price=2.10)
+        )
         assert decision.action == "exit_now"
-        assert decision.triggered_by == "profit_target"
+        assert decision.triggered_by == "stop_loss"
+
+    def test_a_bigger_winner_trails_from_a_higher_price(self) -> None:
+        # The point of the whole change: a 5x move is not truncated at the
+        # target, and its stop sits proportionally higher.
+        decision = evaluate_exit(current_price=10.00, dte=10, target=self._target())
+        assert decision.action == "hold"
+        assert decision.new_stop_loss_price == pytest.approx(7.00)
 
     def test_exits_on_hitting_the_stop_loss(self) -> None:
         decision = evaluate_exit(current_price=1.00, dte=10, target=self._target())
@@ -150,11 +205,13 @@ class TestEvaluateExit:
         assert decision.triggered_by == "unchanged"
 
     def test_deterministic_rules_are_checked_before_any_review_trigger(self) -> None:
-        # A profit-target hit and a simultaneous EV sign flip: the cheap,
+        # A stop-loss breach and a simultaneous EV sign flip: the cheap,
         # deterministic exit must win — no reason to spend an LLM call on a
-        # position the price-based rule already resolves.
+        # position the price-based rule already resolves. (Used the profit
+        # target before it stopped being an exit; the stop is now the
+        # deterministic close.)
         decision = evaluate_exit(
-            current_price=3.00, dte=10, target=self._target(), entry_ev=5.0, current_ev=-1.0
+            current_price=0.50, dte=10, target=self._target(), entry_ev=5.0, current_ev=-1.0
         )
         assert decision.action == "exit_now"
-        assert decision.triggered_by == "profit_target"
+        assert decision.triggered_by == "stop_loss"

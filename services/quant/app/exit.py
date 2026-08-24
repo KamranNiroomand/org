@@ -41,6 +41,11 @@ DEFAULT_PROFIT_TARGET_PCT = 0.50
 DEFAULT_STOP_LOSS_PCT = 0.50
 MIN_DTE_FLOOR = 3
 
+#: How far below the running price the trailing stop sits once the profit
+#: target has been reached. See `evaluate_exit` for why reaching the target
+#: raises a stop rather than closing the position.
+DEFAULT_TRAIL_PCT = 0.30
+
 
 @dataclass(frozen=True)
 class ExitTarget:
@@ -112,7 +117,7 @@ def compute_initial_exit_target(
 
 ExitAction = Literal["hold", "exit_now", "needs_review"]
 ExitTrigger = Literal[
-    "profit_target", "stop_loss", "dte_floor", "ev_sign_flip", "new_news", "unchanged"
+    "trail_raised", "stop_loss", "dte_floor", "ev_sign_flip", "new_news", "unchanged"
 ]
 
 
@@ -121,6 +126,9 @@ class ExitDecision:
     action: ExitAction
     new_target_exit_price: float | None
     new_target_exit_date: str | None
+    #: A raised trailing stop, or None when the stop is unchanged. Only
+    #: ever higher than the stop it replaces — see `evaluate_exit`.
+    new_stop_loss_price: float | None
     reason: str
     triggered_by: ExitTrigger
 
@@ -133,32 +141,35 @@ def evaluate_exit(
     current_ev: float | None = None,
     new_documents_count: int = 0,
     min_dte_floor: int = MIN_DTE_FLOOR,
+    trail_pct: float = DEFAULT_TRAIL_PCT,
 ) -> ExitDecision:
     """Recheck logic for an open position, run every time the intraday job
     fires. Deterministic rules first — checked in order of how urgent they
     are to act on — then a `needs_review` escalation for genuinely
     ambiguous cases. See the module docstring for why this never touches
     the model directly.
+
+    **The profit target no longer closes the position.** v1 exited at a
+    fixed +50%, which capped the one tail a long option is bought for
+    while leaving the losing tail untouched. The target is now the level
+    at which the stop starts trailing the price; see the comment on that
+    branch. `new_stop_loss_price` carries the raised stop, and the caller
+    must persist it — a ratchet that is not written down resets on every
+    pass and the position never actually trails anything.
     """
-    if current_price >= target.target_exit_price:
-        return ExitDecision(
-            action="exit_now",
-            new_target_exit_price=None,
-            new_target_exit_date=None,
-            reason=(
-                f"Live price {current_price:.2f} reached the "
-                f"{target.target_exit_price:.2f} profit target."
-            ),
-            triggered_by="profit_target",
-        )
+    # The stop is checked first, and it is the *current* stop — which may
+    # have been ratcheted upward by an earlier pass (see below). A trailing
+    # stop being hit and an original stop being hit are the same event:
+    # price fell to the floor the position was willing to give back.
     if current_price <= target.stop_loss_price:
         return ExitDecision(
             action="exit_now",
             new_target_exit_price=None,
             new_target_exit_date=None,
+            new_stop_loss_price=None,
             reason=(
                 f"Live price {current_price:.2f} hit the "
-                f"{target.stop_loss_price:.2f} stop-loss."
+                f"{target.stop_loss_price:.2f} stop."
             ),
             triggered_by="stop_loss",
         )
@@ -167,9 +178,44 @@ def evaluate_exit(
             action="exit_now",
             new_target_exit_price=None,
             new_target_exit_date=None,
+            new_stop_loss_price=None,
             reason=f"Only {dte} day(s) to expiry, inside the {min_dte_floor}-day floor.",
             triggered_by="dte_floor",
         )
+
+    # Reaching the profit target raises the stop; it does not close the
+    # position. This is the one rule in this module that is a real
+    # departure from v1 rather than a tunable constant, so the reasoning
+    # is spelled out.
+    #
+    # A long option's payoff is convex: the loss is bounded at the premium
+    # paid, while the gain is not bounded at all. That asymmetry is the
+    # entire reason to own one rather than the underlying. Closing every
+    # winner at a fixed +50% truncates exactly the right tail the position
+    # exists to capture, while leaving the full left tail intact — the
+    # losers still run to -50% or to zero. A rule that caps the upside and
+    # not the downside inverts the payoff that was bought.
+    #
+    # So the target becomes an *activation* level. Above it, the stop
+    # ratchets up to trail the running price and the position keeps
+    # running until either the trail is hit or the DTE floor forces the
+    # issue. The ratchet is monotone by construction — `max` against the
+    # existing stop — because a stop that can move down is not a stop; it
+    # is how a small loss becomes a large one.
+    #
+    # The ratchet is *computed* here but not returned yet. Returning early
+    # would skip the review triggers below, and under the old rule that
+    # cost nothing — the position was closed at the target, so there was
+    # nothing left to review. Now it holds above the target indefinitely,
+    # and an early return would mean a winning position could never
+    # escalate again: a restatement or an EV collapse would ride the
+    # trailing stop down with nobody looking. So the raised stop travels
+    # with whatever decision the checks below reach.
+    trailed_stop: float | None = None
+    if current_price >= target.target_exit_price:
+        trailed = current_price * (1.0 - trail_pct)
+        if trailed > target.stop_loss_price:
+            trailed_stop = trailed
 
     ev_flipped = (
         entry_ev is not None and current_ev is not None and (entry_ev >= 0) != (current_ev >= 0)
@@ -179,6 +225,7 @@ def evaluate_exit(
             action="needs_review",
             new_target_exit_price=None,
             new_target_exit_date=None,
+            new_stop_loss_price=trailed_stop,
             reason=(
                 f"Expected value flipped sign since entry "
                 f"({entry_ev:.2f} → {current_ev:.2f})."
@@ -190,6 +237,7 @@ def evaluate_exit(
             action="needs_review",
             new_target_exit_price=None,
             new_target_exit_date=None,
+            new_stop_loss_price=trailed_stop,
             reason=(
                 f"{new_documents_count} new document(s) on the underlying "
                 f"since the last check."
@@ -197,10 +245,26 @@ def evaluate_exit(
             triggered_by="new_news",
         )
 
+    if trailed_stop is not None:
+        return ExitDecision(
+            action="hold",
+            new_target_exit_price=target.target_exit_price,
+            new_target_exit_date=target.target_exit_date,
+            new_stop_loss_price=trailed_stop,
+            reason=(
+                f"Live price {current_price:.2f} is at or above the "
+                f"{target.target_exit_price:.2f} target; letting it run with the stop "
+                f"raised from {target.stop_loss_price:.2f} to {trailed_stop:.2f} "
+                f"({trail_pct:.0%} below the running price)."
+            ),
+            triggered_by="trail_raised",
+        )
+
     return ExitDecision(
         action="hold",
         new_target_exit_price=target.target_exit_price,
         new_target_exit_date=target.target_exit_date,
+        new_stop_loss_price=None,
         reason="No trigger condition met; target unchanged.",
         triggered_by="unchanged",
     )

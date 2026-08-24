@@ -8,7 +8,13 @@ import { paperDb } from '../../db/paper/index.js';
 import { paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
 import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
 import { closeOrder } from '../paper.js';
-import { evaluateExit, positionHealth as scoreHeldContracts, QuantRefusal, QuantUnavailable } from '../quant.js';
+import {
+  computeExitTarget,
+  evaluateExit,
+  positionHealth as scoreHeldContracts,
+  QuantRefusal,
+  QuantUnavailable,
+} from '../quant.js';
 import { readDocumentsSince } from '../text/news.js';
 import { nowIso, todayKey } from '../util.js';
 import { PolygonProvider } from './polygon.js';
@@ -30,6 +36,7 @@ export interface ExitEngineDeps {
    * without fighting `config`'s deliberate read-only typing. */
   anthropicConfigured: boolean;
   maxCallsPerRun: number;
+  computeExitTarget: typeof computeExitTarget;
 }
 
 const defaultDeps: ExitEngineDeps = {
@@ -38,6 +45,7 @@ const defaultDeps: ExitEngineDeps = {
   adviseOnExit,
   anthropicConfigured: config.anthropic.configured,
   maxCallsPerRun: config.market.exitRecheck.maxCallsPerRun,
+  computeExitTarget,
 };
 
 /**
@@ -60,12 +68,104 @@ export interface ExitEngineSummary {
   startedAt: string;
   finishedAt: string;
   checked: number;
+  /** Open model positions that had no exit plan and were given one this
+   * run — see `adoptUnmanagedOrders`. Normally 0. */
+  adopted: number;
   closed: number;
   revised: number;
   escalated: number;
   llmCallsMade: number;
   status: 'done' | 'partial';
   errors: string[];
+}
+
+/**
+ * Give an exit plan to any open `source: 'model'` position that has none.
+ *
+ * `managedOpenOrders` filters on all three plan fields being non-null, so
+ * a position without them is not merely unmanaged — it is *invisible*
+ * here, and stays invisible forever. That is not hypothetical: on
+ * 2026-08-24 all three open positions on the paper book had null targets,
+ * so every recheck since the engine shipped had nothing to check. One was
+ * a $122,440 position.
+ *
+ * Running this on every pass rather than as a one-off backfill script is
+ * deliberate. The failure that produces an unmanaged position is a write
+ * that did not land — a crash between insert and update, a sidecar that
+ * was down at entry — and those recur. A self-healing step turns a
+ * permanent hole into at most a 15-minute one.
+ *
+ * The plan is anchored to **today**, not the original entry day: a
+ * horizon measured from an entry several days past can land a target date
+ * already behind us, which is a stale number rather than a plan. A
+ * position too close to expiry for any honest target is left alone and
+ * reported, not given a fabricated one.
+ */
+async function adoptUnmanagedOrders(
+  log: FastifyBaseLogger,
+  deps: ExitEngineDeps,
+  summary: ExitEngineSummary,
+): Promise<void> {
+  const orphans = paperDb
+    .select()
+    .from(paperOrders)
+    .where(and(eq(paperOrders.status, 'open'), eq(paperOrders.source, 'model')))
+    .all()
+    .filter((o) => o.targetExitPriceE4 === null || o.stopLossPriceE4 === null || o.targetExitDate === null);
+  if (orphans.length === 0) return;
+
+  const today = todayKey();
+  for (const order of orphans) {
+    try {
+      const contract = marketDb
+        .select({ expiry: optionContracts.expiry })
+        .from(optionContracts)
+        .where(eq(optionContracts.occSymbol, order.occSymbol))
+        .get();
+      if (!contract) {
+        summary.errors.push(`${order.occSymbol}: no contract row, cannot compute an exit plan.`);
+        continue;
+      }
+      const plan = await deps.computeExitTarget({
+        entryPriceE4: order.entryPriceE4,
+        expiry: contract.expiry,
+        anchorDay: today,
+      });
+      if (plan.targetE4 === null) {
+        summary.errors.push(`${order.occSymbol}: no exit plan is computable — ${plan.refusal}`);
+        continue;
+      }
+      paperDb
+        .update(paperOrders)
+        // `exitUpdatedAt` is left null on purpose. It is the cutoff
+        // `readDocumentsSince` uses, and an orphaned position has never
+        // been rechecked, so its whole document history is still owed a
+        // review. Stamping it here would discard that backlog at the
+        // exact moment the engine finally takes charge — five days of
+        // unreviewed news, for the real Aug-19 position. Leaving it null
+        // lets the first managed pass escalate once on the accumulated
+        // news, after which the advisor path advances the cutoff
+        // legitimately.
+        .set({
+          targetExitPriceE4: plan.targetE4.targetExitPriceE4,
+          stopLossPriceE4: plan.targetE4.stopLossPriceE4,
+          targetExitDate: plan.targetE4.targetExitDate,
+        })
+        .where(eq(paperOrders.id, order.id))
+        .run();
+      summary.adopted += 1;
+      log.info(
+        `Exit engine adopted ${order.occSymbol}: target ${plan.targetE4.targetExitPriceE4 / 10_000}, ` +
+          `stop ${plan.targetE4.stopLossPriceE4 / 10_000}, by ${plan.targetE4.targetExitDate}`,
+      );
+    } catch (err) {
+      // One position failing to adopt must not stop the rest, nor the
+      // recheck of positions that already have plans.
+      summary.errors.push(
+        `${order.occSymbol}: could not compute an exit plan — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }
 
 function managedOpenOrders() {
@@ -95,6 +195,7 @@ export async function runExitEngine(
     startedAt,
     finishedAt: startedAt,
     checked: 0,
+    adopted: 0,
     closed: 0,
     revised: 0,
     escalated: 0,
@@ -110,6 +211,10 @@ export async function runExitEngine(
   exitRechecking = true;
 
   try {
+    // Before anything else: a position with no plan is invisible to the
+    // query below, so adopting first is what lets it be managed at all.
+    await adoptUnmanagedOrders(log, deps, summary);
+
     const orders = managedOpenOrders();
 
     // Batched, the same reason positionHealth.ts's computePositionHealth
@@ -195,6 +300,48 @@ export async function runExitEngine(
           closeAndTally(order.id, quote.bidE4);
           continue;
         }
+
+        // The ratchet is persisted before the action is branched on, not
+        // inside the `hold` arm, because `evaluate_exit` also attaches a
+        // raised stop to a `needs_review` — a winning position that is
+        // simultaneously escalating should still tighten its stop on the
+        // same pass rather than wait on an advisor call.
+        //
+        // If the raised stop is not written it resets every pass and the
+        // position trails nothing: the rule would look implemented and do
+        // nothing. Guarded on being strictly higher so a bug that ever
+        // proposed a lower stop widens no risk; `evaluate_exit` already
+        // guarantees monotonicity, and this is the cheap second lock.
+        //
+        // `exitUpdatedAt` is deliberately NOT touched here. It doubles as
+        // the cutoff for `readDocumentsSince` above, where advancing it
+        // means "the advisor has reviewed every document counted" — which
+        // a rule-based stop raise has not done. Stamping it on a ratchet
+        // buried unreviewed news permanently, silently, every 15 minutes.
+        if (decision.newStopLossPriceE4 !== null && decision.newStopLossPriceE4 > order.stopLossPriceE4!) {
+          summary.revised += 1;
+          paperDb.transaction((tx) => {
+            tx.insert(paperExitRevisions)
+              .values({
+                orderId: order.id,
+                revisedAt: nowIso(),
+                oldTargetExitPriceE4: order.targetExitPriceE4,
+                newTargetExitPriceE4: order.targetExitPriceE4,
+                oldTargetExitDate: order.targetExitDate,
+                newTargetExitDate: order.targetExitDate,
+                oldStopLossPriceE4: order.stopLossPriceE4,
+                newStopLossPriceE4: decision.newStopLossPriceE4,
+                reason: decision.reason,
+                triggeredBy: 'rule',
+              })
+              .run();
+            tx.update(paperOrders)
+              .set({ stopLossPriceE4: decision.newStopLossPriceE4 })
+              .where(eq(paperOrders.id, order.id))
+              .run();
+          });
+        }
+
         if (decision.action === 'hold') {
           continue;
         }

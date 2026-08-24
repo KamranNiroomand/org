@@ -55,3 +55,12 @@ logs/
 # Machine-local Claude Code permission grants
 .claude/settings.local.json
 
+
+# Belt and braces after a real incident: this repo used to live under an
+# iCloud-synced Desktop, and iCloud uploading ~60k build files corrupted
+# node_modules, blocked every Node and Python process on file I/O, and
+# left the server unable to restart for a day. It now lives outside any
+# synced folder, which is the actual fix. This pattern stays only so the
+# `.nosync` escape hatch is never accidentally committed if anyone needs
+# it again.
+*.nosync

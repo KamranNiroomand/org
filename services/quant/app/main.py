@@ -423,6 +423,9 @@ class ExitDecisionResponse(BaseModel):
     action: str
     new_target_exit_price: float | None
     new_target_exit_date: str | None
+    #: A raised trailing stop the caller must persist, or null when the
+    #: stop is unchanged — see `evaluate_exit`.
+    new_stop_loss_price: float | None
     reason: str
     triggered_by: str
 
@@ -450,8 +453,91 @@ def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
         action=decision.action,
         new_target_exit_price=decision.new_target_exit_price,
         new_target_exit_date=decision.new_target_exit_date,
+        new_stop_loss_price=decision.new_stop_loss_price,
         reason=decision.reason,
         triggered_by=decision.triggered_by,
+    )
+
+
+class ExitTargetResponse(BaseModel):
+    target_exit_price: float
+    stop_loss_price: float
+    target_exit_date: str
+
+
+class ComputeExitTargetRequest(BaseModel):
+    """An exit plan for a position that is already open.
+
+    The entry-time path (`/rank`, `/select-entries`) attaches a plan to
+    every contract it suggests, so this exists for the positions that
+    somehow have none — opened before the exit engine existed, or opened
+    through a code path whose plan-write did not land. Those positions are
+    invisible to `managedOpenOrders()` and are therefore never managed at
+    all, which is strictly worse than a plan computed a few days late.
+
+    `horizon` is read from the registered model rather than supplied, for
+    the same reason `/select-entries` reads it: the forecast horizon is a
+    property of the model, and a caller passing its own number could
+    silently produce a target date the model's prediction says nothing
+    about.
+    """
+
+    entry_price: float = Field(gt=0)
+    expiry: str = Field(description="Contract expiry, YYYY-MM-DD.")
+    #: The day the plan is anchored to. For an adopted position this is
+    #: normally *today*, not the original entry day: a horizon measured
+    #: from an entry several days past could land a target date already in
+    #: the past, which is not a plan, just a stale number.
+    anchor_day: str
+
+
+class ComputeExitTargetResponse(BaseModel):
+    #: Null when the contract's remaining life leaves no date that clears
+    #: the DTE floor — the caller must leave such a position unmanaged
+    #: rather than invent a target inside the floor. See exit.py.
+    target: ExitTargetResponse | None
+    refusal: str | None
+    horizon: int
+    model_run_id: str
+
+
+@app.post("/exit-target", response_model=ComputeExitTargetResponse)
+def compute_exit_target(request: ComputeExitTargetRequest) -> ComputeExitTargetResponse:
+    """Compute a first-pass exit plan for an already-open position."""
+    try:
+        model_dir = latest_model_dir()
+        _, manifest = load_model(model_dir)
+    except SystemExit as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    horizon = manifest.get("horizon")
+    if horizon is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Model {manifest['run_id']} has no `horizon` in its manifest, so no exit plan "
+                f"can be computed for any position."
+            ),
+        )
+
+    try:
+        target = compute_initial_exit_target(
+            request.entry_price, request.expiry, request.anchor_day, horizon
+        )
+    except ValueError as e:
+        return ComputeExitTargetResponse(
+            target=None, refusal=str(e), horizon=horizon, model_run_id=manifest["run_id"]
+        )
+
+    return ComputeExitTargetResponse(
+        target=ExitTargetResponse(
+            target_exit_price=target.target_exit_price,
+            stop_loss_price=target.stop_loss_price,
+            target_exit_date=target.target_exit_date,
+        ),
+        refusal=None,
+        horizon=horizon,
+        model_run_id=manifest["run_id"],
     )
 
 

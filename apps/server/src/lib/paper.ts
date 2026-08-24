@@ -218,6 +218,40 @@ function orderMultiplier(order: typeof paperOrders.$inferSelect): number {
 }
 
 /**
+ * The underlying an order is exposure to — resolved, never skipped.
+ *
+ * This exists because the obvious version of it caused a real duplicate.
+ * `heldUnderlyings` was built with `if (o.underlying)`, so a row whose
+ * denormalized column was null — every order written before that column
+ * existed — silently vanished from the held set, and auto-entry read the
+ * absence as "not held". On 2026-08-24 it opened a second SNDK position
+ * on top of an Aug-19 one that was still open, doubling exposure to a
+ * single forecast. The comment on that code called the null case "a
+ * one-time gap that closes as those orders close"; those orders never
+ * closed, so the gap stayed open until it fired.
+ *
+ * A null must therefore never mean "no underlying". Falling back to the
+ * live contract row recovers the real symbol (including dotted ones like
+ * BRK.B, which the OCC root spells BRKB and cannot be inverted back). If
+ * even that is gone — pruned or expired — the OCC root is still a better
+ * answer than nothing: it will miss a dotted name, but it cannot invent
+ * an absence of exposure that isn't real.
+ */
+function orderUnderlying(order: typeof paperOrders.$inferSelect): string {
+  if (order.underlying !== null) return order.underlying;
+  try {
+    return contractMultiplier(order.occSymbol).underlying;
+  } catch {
+    return occRoot(order.occSymbol);
+  }
+}
+
+/** The 6-character, space-padded root an OCC symbol starts with. */
+function occRoot(occSymbol: string): string {
+  return occSymbol.slice(0, 6).trim();
+}
+
+/**
  * What the account can actually still deploy right now — the input
  * auto-entry's capital constraint is computed from.
  *
@@ -246,7 +280,7 @@ export function accountCapacity(): AccountCapacity {
       cashE4 += o.exitPriceE4 * o.quantity * multiplier;
     } else {
       openPositionCount += 1;
-      if (o.underlying) heldUnderlyings.add(o.underlying);
+      heldUnderlyings.add(orderUnderlying(o));
     }
   }
 

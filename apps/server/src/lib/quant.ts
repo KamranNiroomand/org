@@ -313,10 +313,90 @@ export interface ExitTarget {
 
 export type ExitAction = 'hold' | 'exit_now' | 'needs_review';
 
+/**
+ * A first-pass exit plan for a position that is *already* open.
+ *
+ * The entry-time paths (`/rank`, `/select-entries`) attach a plan to every
+ * contract they suggest, so this exists only for positions that ended up
+ * with none — opened before the exit engine existed, or through a path
+ * whose plan-write did not land. Such a position is invisible to
+ * `managedOpenOrders()` and so is never managed at all, which is strictly
+ * worse than a plan computed a few days late.
+ *
+ * `targetE4` is null when the contract is too close to expiry for any
+ * honest target to exist; `refusal` then says why. That is not an error —
+ * the position stays unmanaged, which is the correct answer rather than a
+ * fabricated target inside the DTE floor.
+ */
+export interface ComputeExitTargetResult {
+  targetE4: ExitTarget | null;
+  refusal: string | null;
+  horizon: number;
+  modelRunId: string;
+}
+
+export interface ComputeExitTargetInput {
+  entryPriceE4: number;
+  expiry: string;
+  /** Normally today, not the original entry day — see the Python docstring. */
+  anchorDay: string;
+}
+
+export async function computeExitTarget(input: ComputeExitTargetInput): Promise<ComputeExitTargetResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/exit-target`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        entry_price: input.entryPriceE4 / 10_000,
+        expiry: input.expiry,
+        anchor_day: input.anchorDay,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  // A 409 means the sidecar has no usable model to read a horizon from —
+  // a refusal about the model, not about this position, so it surfaces as
+  // QuantRefusal the same way the ranking paths' 409s do.
+  if (res.status === 409) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new QuantRefusal(body.detail ?? 'Quant service refused to compute an exit target.');
+  }
+  if (!res.ok) {
+    throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as {
+    target: { target_exit_price: number; stop_loss_price: number; target_exit_date: string } | null;
+    refusal: string | null;
+    horizon: number;
+    model_run_id: string;
+  };
+  return {
+    targetE4:
+      body.target === null
+        ? null
+        : {
+            targetExitPriceE4: Math.round(body.target.target_exit_price * 10_000),
+            stopLossPriceE4: Math.round(body.target.stop_loss_price * 10_000),
+            targetExitDate: body.target.target_exit_date,
+          },
+    refusal: body.refusal,
+    horizon: body.horizon,
+    modelRunId: body.model_run_id,
+  };
+}
+
 export interface ExitDecisionResult {
   action: ExitAction;
   newTargetExitPriceE4: number | null;
   newTargetExitDate: string | null;
+  /** A raised trailing stop the caller must persist, or null when the stop
+   * is unchanged. Only ever higher than the stop it replaces — see
+   * `evaluate_exit` in exit.py. */
+  newStopLossPriceE4: number | null;
   reason: string;
   triggeredBy: string;
 }
@@ -367,6 +447,7 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
     action: ExitAction;
     new_target_exit_price: number | null;
     new_target_exit_date: string | null;
+    new_stop_loss_price: number | null;
     reason: string;
     triggered_by: string;
   };
@@ -374,6 +455,7 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
     action: body.action,
     newTargetExitPriceE4: body.new_target_exit_price !== null ? Math.round(body.new_target_exit_price * 10_000) : null,
     newTargetExitDate: body.new_target_exit_date,
+    newStopLossPriceE4: body.new_stop_loss_price !== null ? Math.round(body.new_stop_loss_price * 10_000) : null,
     reason: body.reason,
     triggeredBy: body.triggered_by,
   };
