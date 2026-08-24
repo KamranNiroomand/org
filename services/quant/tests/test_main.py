@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.rank import RankedContract
+from app.rank import ModelChoice, RankedContract
 from app.train import FEATURE_COLS
 
 client = TestClient(app)
@@ -200,6 +200,13 @@ def _write_fake_model(run_dir: Path, beats_baseline: bool) -> None:
     )
 
 
+def _choice(run_dir: Path, source: str = "champion") -> ModelChoice:
+    """`/rank` selects through `resolve_model` so it can report *why* a run
+    was chosen — the registry's champion, or a fallback. Tests that stub
+    model selection for /rank must return that, not a bare path."""
+    return ModelChoice(directory=run_dir, run_id=run_dir.name, source=source)
+
+
 _FAKE_CONTRACT = RankedContract(
     occ_symbol="AAPL260116C00150000",
     underlying="AAPL",
@@ -228,7 +235,10 @@ class TestRank:
         def _raise():
             raise SystemExit(f"No trained models found under {tmp_path / 'empty'}")
 
-        monkeypatch.setattr("app.main.latest_model_dir", _raise)
+        # `/rank` selects through `resolve_model`, not `latest_model_dir`,
+        # so that it can report whether the registry's champion or a
+        # fallback answered — see rank.py::resolve_model.
+        monkeypatch.setattr("app.main.resolve_model", _raise)
         r = client.post("/rank", json={"day": "2026-01-01"})
         assert r.status_code == 409
         assert "No trained models" in r.json()["detail"]
@@ -236,7 +246,7 @@ class TestRank:
     def test_refuses_a_model_that_does_not_beat_baseline_without_force(self, tmp_path, monkeypatch) -> None:
         run_dir = tmp_path / "weak"
         _write_fake_model(run_dir, beats_baseline=False)
-        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(run_dir))
 
         def _refuse(*args, **kwargs):
             raise SystemExit("does not beat the mean baseline")
@@ -249,7 +259,7 @@ class TestRank:
     def test_returns_ranked_contracts_with_the_models_own_metrics_attached(self, tmp_path, monkeypatch) -> None:
         run_dir = tmp_path / "weak"
         _write_fake_model(run_dir, beats_baseline=False)
-        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(run_dir))
         monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [_FAKE_CONTRACT])
 
         r = client.post("/rank", json={"day": "2026-01-01", "top": 10, "force": True})
@@ -272,7 +282,7 @@ class TestRank:
     def test_force_defaults_to_true_so_the_ui_always_gets_a_response(self, tmp_path, monkeypatch) -> None:
         run_dir = tmp_path / "weak"
         _write_fake_model(run_dir, beats_baseline=False)
-        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(run_dir))
 
         seen_force = {}
 
@@ -288,7 +298,7 @@ class TestRank:
     def test_max_capital_reaches_rank_day_unchanged(self, tmp_path, monkeypatch) -> None:
         run_dir = tmp_path / "weak"
         _write_fake_model(run_dir, beats_baseline=False)
-        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(run_dir))
 
         seen = {}
 
@@ -304,7 +314,7 @@ class TestRank:
     def test_max_capital_defaults_to_none(self, tmp_path, monkeypatch) -> None:
         run_dir = tmp_path / "weak"
         _write_fake_model(run_dir, beats_baseline=False)
-        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(run_dir))
 
         seen = {}
 
@@ -318,9 +328,25 @@ class TestRank:
         assert seen["max_capital"] is None
 
     def test_max_capital_must_be_positive(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr("app.main.latest_model_dir", lambda: tmp_path / "unused")
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(tmp_path / "unused"))
         r = client.post("/rank", json={"day": "2026-01-01", "max_capital": 0})
         assert r.status_code == 422
+
+
+    def test_reports_whether_the_champion_or_a_fallback_answered(self, tmp_path, monkeypatch) -> None:
+        # The divergence this exists to make visible: the registry could
+        # name one model champion while a different one served every
+        # request, silently. Reporting the source is what turns that from
+        # invisible into obvious.
+        run_dir = tmp_path / "weak"
+        _write_fake_model(run_dir, beats_baseline=False)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [_FAKE_CONTRACT])
+
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(run_dir, "champion"))
+        assert client.post("/rank", json={"day": "2026-01-01", "force": True}).json()["model_source"] == "champion"
+
+        monkeypatch.setattr("app.main.resolve_model", lambda: _choice(run_dir, "newest"))
+        assert client.post("/rank", json={"day": "2026-01-01", "force": True}).json()["model_source"] == "newest"
 
 
 class TestPositionHealth:

@@ -24,6 +24,7 @@ from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import (
     RankedContract,
     latest_model_dir,
+    resolve_model,
     load_model,
     rank_day,
     score_held_contracts,
@@ -308,6 +309,12 @@ class RankedContractResponse(BaseModel):
 
 class RankResponse(BaseModel):
     model_run_id: str
+    #: How that run was chosen: "champion" when the registry named it,
+    #: "newest" when nothing is promoted. Reported because the two used to
+    #: be able to disagree invisibly — see `resolve_model` in rank.py.
+    model_source: str
+    #: Why a fallback was used, when one was. Null on the champion path.
+    model_fallback_reason: str | None = None
     #: The single most important field in this response — see rank.py's
     #: own refusal-by-default design. A caller that only reads `contracts`
     #: and ignores this is exactly the mistake the whole harness exists to
@@ -320,7 +327,8 @@ class RankResponse(BaseModel):
 @app.post("/rank", response_model=RankResponse)
 def rank(request: RankRequest) -> RankResponse:
     try:
-        model_dir = latest_model_dir()
+        choice = resolve_model()
+        model_dir = choice.directory
         _, manifest = load_model(model_dir)
         ranked = rank_day(
             request.day, model_dir, top=request.top, force=request.force, max_capital=request.max_capital
@@ -337,6 +345,8 @@ def rank(request: RankRequest) -> RankResponse:
     horizon = manifest.get("horizon")
     return RankResponse(
         model_run_id=manifest["run_id"],
+        model_source=choice.source,
+        model_fallback_reason=choice.fallback_reason,
         model_beats_baseline=manifest["metrics"]["beats_baseline"],
         model_information_coefficient=manifest["metrics"]["information_coefficient"],
         contracts=[RankedContractResponse.from_ranked(c, entry_day=request.day, horizon=horizon) for c in ranked],

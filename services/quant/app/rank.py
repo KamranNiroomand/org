@@ -45,7 +45,7 @@ from pathlib import Path
 import lightgbm as lgb
 import polars as pl
 
-from .db import read_bars, read_quotes, read_risk_free_curve
+from .db import read_bars, read_champion_run, read_quotes, read_risk_free_curve
 from .features import build_feature_panel
 from .pricing import norm_cdf
 from .har import InsufficientHistory, forecast_vol_by_symbol
@@ -365,14 +365,90 @@ def load_model(run_dir: Path) -> tuple[lgb.Booster, dict]:
     return booster, {**manifest, "feature_cols": features["feature_cols"]}
 
 
-def latest_model_dir(base_dir: Path | None = None) -> Path:
+@dataclass(frozen=True)
+class ModelChoice:
+    """Which model was selected, and on what grounds."""
+
+    directory: Path
+    run_id: str
+    #: "champion" when the registry named it, "newest" when nothing is
+    #: promoted and this fell back to the most recently written artifact.
+    source: str
+    #: Why the registry could not be consulted, when that is the reason for
+    #: a fallback. Carried rather than swallowed: an operator seeing
+    #: "newest" while the registry plainly shows a champion needs the
+    #: exception text to know why, and discarding it repeats in miniature
+    #: the defect this whole selector exists to fix.
+    fallback_reason: str | None = None
+
+
+def active_model_dir(base_dir: Path | None = None, target: str = "dir") -> Path:
+    """The model the system should actually serve.
+
+    **The registry's champion, if there is one.** That sounds obvious and
+    was not the case: `model_runs` has carried a `champion` status and a
+    manual promote route since the project plan's champion/challenger
+    policy was written, and nothing on the serving path read either. This
+    function picked `max(candidates, key=lambda d: d.name)` instead, on the
+    reasoning — true in the comment, false in practice — that a
+    date-prefixed run_id sorts chronologically. It does across dates. Within
+    a date the suffix is a config hash, so three runs trained the same day
+    order arbitrarily.
+
+    The consequence was a database that could say one model was live while
+    the ranker served another, silently. On 2026-08-24 three runs were
+    trained in an afternoon and the promoted one was served only because
+    its hash happened to begin with `f`; a hash beginning `0` would have
+    left the champion promoted and unused, with nothing anywhere reporting
+    it. That is the same class of divergence — believed state versus
+    running state — that cost a day earlier in the same week.
+
+    Falling back to **most recently written**, not last alphabetically,
+    when nothing is promoted: the fallback had the identical bug and no
+    reason to keep it.
+    """
+    return resolve_model(base_dir, target).directory
+
+
+def resolve_model(base_dir: Path | None = None, target: str = "dir") -> ModelChoice:
+    """`active_model_dir` with the reasoning attached — see its docstring.
+
+    Callers that surface which model answered a request should use this;
+    a selection nobody can observe is how the divergence above went
+    unnoticed in the first place.
+    """
     base = base_dir or (Path.home() / ".org" / "market" / "models")
     candidates = [d for d in base.iterdir() if d.is_dir() and (d / "manifest.json").exists()] if base.exists() else []
     if not candidates:
         raise SystemExit(f"No trained models found under {base} — run `python -m app.train` first.")
-    # run_id is date-prefixed (see train.py), so lexicographic order is
-    # chronological order.
-    return max(candidates, key=lambda d: d.name)
+
+    by_name = {d.name: d for d in candidates}
+    reason: str | None = None
+    try:
+        champion = read_champion_run(target)
+    except Exception as e:
+        # A registry that cannot be read must not take ranking down with
+        # it: market.db may be mid-sync, or predate the model_runs table.
+        # Falling back is correct; falling back *silently* is not, so both
+        # the source and the reason travel with the answer.
+        champion = None
+        reason = f"registry unreadable: {e}"
+
+    if champion is not None:
+        directory = by_name.get(champion["artifact_dir"]) or by_name.get(champion["run_id"])
+        if directory is not None:
+            return ModelChoice(directory=directory, run_id=champion["run_id"], source="champion")
+        reason = f"champion {champion['run_id']} is registered but its artifact is missing"
+    elif reason is None:
+        reason = f"no {target} model is promoted"
+
+    newest = max(candidates, key=lambda d: (d / "manifest.json").stat().st_mtime)
+    return ModelChoice(directory=newest, run_id=newest.name, source="newest", fallback_reason=reason)
+
+
+#: Retained so existing callers and tests keep working; `active_model_dir`
+#: is the name that says what it does.
+latest_model_dir = active_model_dir
 
 
 def _forecast_inputs(
