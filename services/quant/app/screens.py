@@ -41,17 +41,32 @@ import polars as pl
 #: than 1.2; option price violates obvious no-arbitrage option bounds;
 #: reported option trading volume is zero; option bid quote is zero or
 #: midpoint of bid and ask quotes is less than $1/8."
-MONEYNESS_MIN = 0.8
-MONEYNESS_MAX = 1.2
+#:
+#: Their fixed 0.8–1.2 band selected near-ATM ~45-day options for a study
+#: universe; review showed a fixed band applied across this system's whole
+#: 14–60 DTE, 4%–80% vol universe gets it backwards at both ends. In
+#: standardized terms — |ln(K/S)| / (σ√T), distance from ATM measured in
+#: the underlying's own volatility units — their band is ≈1.7σ for a
+#: typical 30%-vol name at 45 days. A 55%-IV biotech's sensible directional
+#: strikes at K/S ≈ 1.3 sit *inside* 1.7σ but were hard-dropped by the raw
+#: band, silently emptying the underlying from the board; IEF at 4% vol
+#: listed 20σ+ strikes with no economic content that the raw band happily
+#: admitted. So the band is standardized at 2.0σ, with a raw [0.5, 2.0]
+#: sanity rail retained for rows whose σ reference is itself junk.
+STANDARDIZED_MONEYNESS_MAX = 2.0
+RAW_MONEYNESS_MIN = 0.5
+RAW_MONEYNESS_MAX = 2.0
 MIN_PRICE = 0.125  # the literature's $1/8 minimum, against our close
-#: Above this solved IV, treat the print as unreliable regardless of how it
-#: got there. 200%+ IV on a listed equity option is overwhelmingly a data
-#: artifact at daily-close resolution (the SNDK print solved at 447%);
-#: genuine triple-digit IV exists (biotech binaries, meme squeezes) but a
-#: system with no intraday quotes cannot tell those apart from staleness,
-#: and the cost of skipping a real one is far below the cost of ranking a
-#: fictional one first.
-MAX_IV = 2.0
+#: The unbelievable-IV ceiling, in **total volatility** σ√T rather than
+#: annualized σ. A flat annualized ceiling bites hardest at the short end,
+#: where genuinely-priced event vol is mechanically highest: 250% IV two
+#: weeks before earnings is a real market (σ√T ≈ 0.49), while the SNDK
+#: stale print's 447% at 28 days is σ√T ≈ 1.24 — no listed equity option
+#: prices a ±124% one-sigma move over a month. 0.75 separates the two
+#: populations the flat ceiling conflated. An absolute σ ≤ 5.0 insanity
+#: rail backstops rows whose expiry parse fails.
+MAX_TOTAL_VOL = 0.75
+MAX_IV_ABSOLUTE = 5.0
 
 
 @dataclass
@@ -81,10 +96,11 @@ class ScreenResult:
 def screen_quotes(
     quotes: pl.DataFrame,
     prior_stats: pl.DataFrame | None = None,
-    moneyness_min: float = MONEYNESS_MIN,
-    moneyness_max: float = MONEYNESS_MAX,
+    trading_day: str | None = None,
+    symbol_vol: float | None = None,
+    standardized_max: float = STANDARDIZED_MONEYNESS_MAX,
     min_price: float = MIN_PRICE,
-    max_iv: float = MAX_IV,
+    max_total_vol: float = MAX_TOTAL_VOL,
 ) -> ScreenResult:
     """Apply the literature's screens to one underlying's chain for one day.
 
@@ -128,16 +144,46 @@ def screen_quotes(
     # when the truth is "the underlying had no price".
     apply("no_spot", pl.col("underlying_price").is_not_null() & (pl.col("underlying_price") > 0))
 
-    # Cao & Han's screens, adapted to close-only data.
+    # Years to expiry, calendar-day convention matching pricing.py. Needed
+    # by both vol-aware screens; without a trading_day they degrade to
+    # their raw fallbacks rather than guessing.
+    years = None
+    if trading_day is not None:
+        years = (
+            (pl.col("expiry").str.to_date() - pl.lit(trading_day).str.to_date())
+            .dt.total_days()
+            .clip(lower_bound=1)
+            / 365.0
+        )
+
+    # Moneyness, standardized — distance from ATM in the underlying's own
+    # volatility units. See the constants block for why the raw literature
+    # band gets a mixed-vol universe backwards at both ends. σ comes from
+    # the caller (the HAR forecast, per underlying) when available; the
+    # chain's own median IV otherwise — never the row's own IV, which
+    # would let a corrupt print widen its own admission band.
     apply(
-        "moneyness",
-        (pl.col("strike") / pl.col("underlying_price")).is_between(moneyness_min, moneyness_max),
+        "raw_moneyness",
+        (pl.col("strike") / pl.col("underlying_price")).is_between(RAW_MONEYNESS_MIN, RAW_MONEYNESS_MAX),
     )
+    if years is not None:
+        sigma = symbol_vol
+        if sigma is None or sigma <= 0:
+            chain_iv = df["iv"].drop_nulls()
+            sigma = float(chain_iv.median()) if chain_iv.len() > 0 else None
+        if sigma is not None and sigma > 0:
+            std_moneyness = (pl.col("strike") / pl.col("underlying_price")).log().abs() / (
+                sigma * years.sqrt()
+            )
+            apply("moneyness", std_moneyness <= standardized_max)
+
     apply("min_price", pl.col("price") >= min_price)
     apply("zero_volume", pl.col("volume") > 0)
 
-    # Unbelievable IV — see MAX_IV's comment.
-    apply("extreme_iv", pl.col("iv") <= max_iv)
+    # Unbelievable IV, in total-vol terms — see MAX_TOTAL_VOL's comment.
+    apply("extreme_iv", pl.col("iv") <= MAX_IV_ABSOLUTE)
+    if years is not None:
+        apply("extreme_total_vol", pl.col("iv") * years.sqrt() <= max_total_vol)
 
     # No-arbitrage bounds. Kept even though the incident price passed them:
     # they are nearly free, and a hard violation is certainly bad data.

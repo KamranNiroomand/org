@@ -623,7 +623,7 @@ def rank_day(
         # vol-forecast ratio is computed on the *screened* chain too: a
         # 447% stale IV distorts the median exactly like it distorts a
         # ranking.
-        screened = screen_quotes(quotes, prior_stats)
+        screened = screen_quotes(quotes, prior_stats, trading_day=trading_day, symbol_vol=vol)
         for reason, n in screened.dropped.items():
             screen_drops[reason] = screen_drops.get(reason, 0) + n
         if not screened.staleness_ran:
@@ -924,7 +924,9 @@ def score_held_contracts(
         # out: a position you hold must always get a verdict, even one
         # whose own quote is stale — that staleness is precisely what its
         # health check should surface.
-        reference = screen_quotes(quotes.filter(pl.col("liquid")), prior_stats).passed
+        reference = screen_quotes(
+            quotes.filter(pl.col("liquid")), prior_stats, trading_day=trading_day, symbol_vol=vol
+        ).passed
         if reference.height > 0:
             vol_ratio = _vol_forecast_ratio(vol, reference)
         else:

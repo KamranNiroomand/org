@@ -13,7 +13,13 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from app.screens import MAX_IV, MIN_PRICE, ScreenResult, screen_quotes
+from app.screens import (
+    MAX_IV_ABSOLUTE,
+    MAX_TOTAL_VOL,
+    MIN_PRICE,
+    ScreenResult,
+    screen_quotes,
+)
 
 
 def _chain(rows: list[dict]) -> pl.DataFrame:
@@ -64,12 +70,13 @@ class TestTheIncident:
         assert intrinsic < self.SNDK["price"] < self.SNDK["strike"]
 
     def test_the_full_screen_set_rejects_it_without_needing_a_prior_day(self) -> None:
-        result = screen_quotes(_chain([self.SNDK]), prior_stats=None)
+        result = screen_quotes(_chain([self.SNDK]), prior_stats=None, trading_day="2026-08-21")
 
         assert result.passed.height == 0
-        # Attributed to the first screen that fires — moneyness (1.27) —
-        # and the extreme IV would catch it independently if the band moved.
-        assert "moneyness" in result.dropped
+        # 447% IV over 28 days is σ√T ≈ 1.24 — no listed option prices a
+        # ±124% one-sigma monthly move. The staleness screen catches it
+        # independently when a prior day exists.
+        assert "extreme_total_vol" in result.dropped
 
     def test_the_staleness_screen_catches_it_even_at_sane_moneyness(self) -> None:
         # Suppose the same frozen print sat at an unremarkable strike: the
@@ -86,21 +93,46 @@ class TestTheIncident:
 
 
 class TestIndividualScreens:
-    def test_moneyness_band_is_the_literature_s(self) -> None:
-        # Prices set above intrinsic so the arbitrage screen stays quiet
-        # and only the moneyness band decides — EDGE_LO is a call with $20
-        # intrinsic, and pricing it at the fixture default of $5 would
-        # (correctly) trip the bounds screen first.
+    def test_moneyness_scales_with_the_underlying_s_own_volatility(self) -> None:
+        """The review finding that motivated standardization: a fixed
+        0.8–1.2 band cut the strikes a high-vol name's directional trade
+        would actually use, while admitting a low-vol name's economically
+        empty 20σ ladder. Distance from ATM is now measured in σ√T."""
+        # 30 days out. K/S = 1.25 → |ln| ≈ 0.223.
+        rows = [{"occ_symbol": "K125", "strike": 125.0, "price": 6.0, "close": 6.0, "iv": 0.6}]
+
+        # High-vol name (σ=0.60): 0.223 / (0.60·√(28/365)) ≈ 1.3σ — inside.
+        high = screen_quotes(_chain(rows), trading_day="2026-08-21", symbol_vol=0.60)
+        assert high.passed.height == 1
+
+        # Low-vol name (σ=0.08): same strike is ≈10σ — economically empty, out.
+        low = screen_quotes(_chain(rows), trading_day="2026-08-21", symbol_vol=0.08)
+        assert low.dropped.get("moneyness") == 1
+
+    def test_the_raw_sanity_rail_still_catches_nonsense_without_vol_context(self) -> None:
+        # No trading_day → the standardized band cannot run; the [0.5, 2.0]
+        # rail still rejects strikes no vol regime could justify.
         rows = [
-            {"occ_symbol": "DEEP", "strike": 70.0, "price": 31.0, "close": 31.0},   # 0.70 — out
-            {"occ_symbol": "EDGE_LO", "strike": 80.0, "price": 21.0, "close": 21.0},  # 0.80 — in, inclusive
-            {"occ_symbol": "ATM", "strike": 100.0},
-            {"occ_symbol": "EDGE_HI", "strike": 120.0},  # 1.20 — in
-            {"occ_symbol": "FAR", "strike": 127.0},   # 1.27 — out (the incident's)
+            {"occ_symbol": "ABSURD", "strike": 300.0, "price": 1.0, "close": 1.0},
+            {"occ_symbol": "SANE", "strike": 110.0},
         ]
         result = screen_quotes(_chain(rows))
-        kept = set(result.passed["occ_symbol"].to_list())
-        assert kept == {"EDGE_LO", "ATM", "EDGE_HI"}
+        assert set(result.passed["occ_symbol"].to_list()) == {"SANE"}
+        assert result.dropped.get("raw_moneyness") == 1
+
+    def test_sigma_reference_is_never_the_row_s_own_iv(self) -> None:
+        # A corrupt print must not widen its own admission band. With no
+        # symbol_vol the reference is the *chain median*, so one wild row
+        # in a sane chain is judged by the sane majority.
+        rows = [
+            {"occ_symbol": "WILD", "strike": 160.0, "iv": 3.0, "price": 2.0, "close": 2.0},
+            {"occ_symbol": "A", "strike": 100.0, "iv": 0.30},
+            {"occ_symbol": "B", "strike": 102.0, "iv": 0.32},
+        ]
+        result = screen_quotes(_chain(rows), trading_day="2026-08-21")
+        # Judged at σ≈0.32: ln(1.6)/(0.32·√(28/365)) ≈ 5.3σ — out.
+        assert "WILD" not in set(result.passed["occ_symbol"].to_list())
+
 
     def test_zero_volume_is_rejected(self) -> None:
         result = screen_quotes(_chain([{"volume": 0}]))
@@ -113,8 +145,22 @@ class TestIndividualScreens:
         assert result.dropped == {"min_price": 1}
         assert MIN_PRICE == 0.125
 
-    def test_extreme_iv_is_rejected(self) -> None:
-        result = screen_quotes(_chain([{"iv": MAX_IV + 0.01}]))
+    def test_the_iv_ceiling_is_total_vol_so_short_dated_event_vol_survives(self) -> None:
+        """A flat annualized ceiling bit hardest at the short end, where
+        genuinely-priced event vol is mechanically highest. In σ√T terms
+        the two populations separate."""
+        # 250% IV, 14 days out: σ√T ≈ 0.49 — a real pre-earnings market.
+        earnings = {"occ_symbol": "EVT", "expiry": "2026-09-04", "iv": 2.5, "strike": 100.0}
+        kept = screen_quotes(_chain([earnings]), trading_day="2026-08-21")
+        assert kept.passed.height == 1
+
+        # The incident's 447% at 28 days: σ√T ≈ 1.24 — no real market. Out.
+        stale = {"occ_symbol": "STALE", "iv": 4.47, "strike": 100.0}
+        out = screen_quotes(_chain([stale]), trading_day="2026-08-21")
+        assert out.dropped.get("extreme_total_vol") == 1
+
+    def test_the_absolute_iv_rail_holds_even_without_a_trading_day(self) -> None:
+        result = screen_quotes(_chain([{"iv": MAX_IV_ABSOLUTE + 0.1}]))
         assert result.dropped == {"extreme_iv": 1}
 
     def test_arbitrage_bounds_reject_an_impossible_call(self) -> None:
@@ -211,7 +257,7 @@ class TestAudit:
             {"occ_symbol": "NOVOL", "volume": 0},
             {"occ_symbol": "CHEAP", "price": 0.05, "close": 0.05},
             {"occ_symbol": "WILD", "iv": 9.9},
-            {"occ_symbol": "FAR", "strike": 200.0},
+            {"occ_symbol": "FAR", "strike": 210.0},
         ]
         result = screen_quotes(_chain(rows))
 
