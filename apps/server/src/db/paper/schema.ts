@@ -96,8 +96,14 @@ export const paperOrders = sqliteTable(
      * Initial values come from `services/quant/app/exit.py`'s
      * `compute_initial_exit_target`; the profit target and date can move
      * over the position's life — see `paperExitRevisions` for the history
-     * of why. The stop-loss does not move once set: a moving stop is a
-     * different (and easy to get wrong) strategy this v1 does not attempt.
+     * of why.
+     *
+     * The stop moves too, in one direction only. Once price reaches the
+     * target, `evaluate_exit` ratchets the stop up to trail the running
+     * price rather than closing the position — capping a long option's
+     * upside while leaving its downside intact inverts the payoff it was
+     * bought for. The ratchet is monotone: a stop that can move down is
+     * not a stop.
      */
     targetExitPriceE4: integer('target_exit_price_e4'),
     stopLossPriceE4: integer('stop_loss_price_e4'),
@@ -140,6 +146,11 @@ export const paperExitRevisions = sqliteTable(
     newTargetExitPriceE4: integer('new_target_exit_price_e4'),
     oldTargetExitDate: text('old_target_exit_date'),
     newTargetExitDate: text('new_target_exit_date'),
+    /** Set when a pass ratcheted the trailing stop upward. A stop that
+     * moves with no audit trail is exactly what this table exists to
+     * prevent, so the ratchet records both sides like the target does. */
+    oldStopLossPriceE4: integer('old_stop_loss_price_e4'),
+    newStopLossPriceE4: integer('new_stop_loss_price_e4'),
     reason: text('reason').notNull(),
     /** Whether a deterministic rule or an LLM escalation decided this — see exitEngine.ts. */
     triggeredBy: text('triggered_by', { enum: ['rule', 'llm'] }).notNull(),

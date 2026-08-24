@@ -423,6 +423,9 @@ class ExitDecisionResponse(BaseModel):
     action: str
     new_target_exit_price: float | None
     new_target_exit_date: str | None
+    #: A raised trailing stop the caller must persist, or null when the
+    #: stop is unchanged — see `evaluate_exit`.
+    new_stop_loss_price: float | None
     reason: str
     triggered_by: str
 
@@ -450,6 +453,7 @@ def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
         action=decision.action,
         new_target_exit_price=decision.new_target_exit_price,
         new_target_exit_date=decision.new_target_exit_date,
+        new_stop_loss_price=decision.new_stop_loss_price,
         reason=decision.reason,
         triggered_by=decision.triggered_by,
     )

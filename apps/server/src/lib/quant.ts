@@ -393,6 +393,10 @@ export interface ExitDecisionResult {
   action: ExitAction;
   newTargetExitPriceE4: number | null;
   newTargetExitDate: string | null;
+  /** A raised trailing stop the caller must persist, or null when the stop
+   * is unchanged. Only ever higher than the stop it replaces — see
+   * `evaluate_exit` in exit.py. */
+  newStopLossPriceE4: number | null;
   reason: string;
   triggeredBy: string;
 }
@@ -443,6 +447,7 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
     action: ExitAction;
     new_target_exit_price: number | null;
     new_target_exit_date: string | null;
+    new_stop_loss_price: number | null;
     reason: string;
     triggered_by: string;
   };
@@ -450,6 +455,7 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
     action: body.action,
     newTargetExitPriceE4: body.new_target_exit_price !== null ? Math.round(body.new_target_exit_price * 10_000) : null,
     newTargetExitDate: body.new_target_exit_date,
+    newStopLossPriceE4: body.new_stop_loss_price !== null ? Math.round(body.new_stop_loss_price * 10_000) : null,
     reason: body.reason,
     triggeredBy: body.triggered_by,
   };

@@ -293,6 +293,35 @@ export async function runExitEngine(
           continue;
         }
         if (decision.action === 'hold') {
+          // A ratcheted stop is the one `hold` that still writes. If the
+          // raised stop is not persisted it resets every pass and the
+          // position trails nothing — the rule would look implemented and
+          // do nothing. Guarded on being strictly higher so a bug that
+          // ever proposed a lower stop widens no risk; `evaluate_exit`
+          // already guarantees it, and this is the cheap second lock.
+          if (decision.newStopLossPriceE4 !== null && decision.newStopLossPriceE4 > order.stopLossPriceE4!) {
+            summary.revised += 1;
+            paperDb.transaction((tx) => {
+              tx.insert(paperExitRevisions)
+                .values({
+                  orderId: order.id,
+                  revisedAt: nowIso(),
+                  oldTargetExitPriceE4: order.targetExitPriceE4,
+                  newTargetExitPriceE4: order.targetExitPriceE4,
+                  oldTargetExitDate: order.targetExitDate,
+                  newTargetExitDate: order.targetExitDate,
+                  oldStopLossPriceE4: order.stopLossPriceE4,
+                  newStopLossPriceE4: decision.newStopLossPriceE4,
+                  reason: decision.reason,
+                  triggeredBy: 'rule',
+                })
+                .run();
+              tx.update(paperOrders)
+                .set({ stopLossPriceE4: decision.newStopLossPriceE4, exitUpdatedAt: nowIso() })
+                .where(eq(paperOrders.id, order.id))
+                .run();
+            });
+          }
           continue;
         }
 
