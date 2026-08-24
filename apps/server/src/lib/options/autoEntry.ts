@@ -3,7 +3,7 @@ import { accountCapacity, contractMultiplier, logDecisions, openOrder, PaperErro
 import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
-import { selectEntries, QuantRefusal, QuantUnavailable, type RejectedEntry, type SelectedEntry } from '../quant.js';
+import { selectEntries, QuantRefusal, QuantUnavailable, type RejectedEntry, type ScreenedOutEntry, type SelectedEntry } from '../quant.js';
 
 /**
  * Once/day, alongside the existing rank refresh: opens every contract the
@@ -58,6 +58,7 @@ export async function runAutoEntry(
 
   let selected: SelectedEntry[];
   let rejected: RejectedEntry[];
+  let screenedOut: ScreenedOutEntry[];
   try {
     const result = await selectEntriesFn({
         day,
@@ -73,6 +74,7 @@ export async function runAutoEntry(
       });
     selected = result.selected;
     rejected = result.rejected;
+    screenedOut = result.screened_out ?? [];
   } catch (err) {
     const reason =
       err instanceof QuantRefusal || err instanceof QuantUnavailable
@@ -87,14 +89,24 @@ export async function runAutoEntry(
   // Written once at the end rather than per-candidate: a few hundred
   // single-row inserts on a cron path is a few hundred needless round
   // trips, and a partial log is harder to reason about than a whole one.
-  const decisions: DecisionRow[] = rejected.map((r) => ({
+  const decisions: DecisionRow[] = screenedOut.map((r) => ({
+    day,
+    occSymbol: r.occ_symbol,
+    underlying: r.underlying,
+    decision: 'rejected' as const,
+    // Prefixed so a GROUP BY separates "the screens distrusted the quote"
+    // from "the allocator turned it down" — different fixes.
+    reason: `screened_${r.reason}`,
+    detail: {},
+  }));
+  decisions.push(...rejected.map((r) => ({
     day,
     occSymbol: r.contract.occ_symbol,
     underlying: r.contract.underlying,
     decision: 'rejected' as const,
     reason: r.reason,
     detail: { ...r.detail, ev: r.contract.ev, ev_per_risk: r.contract.ev_per_risk, prob_profit: r.contract.prob_profit, dte: r.contract.dte },
-  }));
+  })));
 
   // Before the early return, not after it. A day that opened nothing is
   // the day whose reasoning is most worth having — "the market offered

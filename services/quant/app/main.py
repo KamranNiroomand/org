@@ -627,6 +627,21 @@ class RejectedEntry(BaseModel):
     detail: dict
 
 
+class ScreenedOutEntry(BaseModel):
+    """A contract the quote screens rejected before ranking ever priced it.
+
+    Returned so the caller can log it: screening is now the single largest
+    source of exclusions, and without this a screened-out contract left no
+    decision-log row at all — "why didn't it buy X?" answered with silence,
+    which is the exact failure paper_decision_log was built to end, for the
+    exact contract that motivated it.
+    """
+
+    occ_symbol: str
+    underlying: str
+    reason: str
+
+
 class SelectEntriesResponse(BaseModel):
     model_run_id: str
     model_beats_baseline: bool
@@ -638,6 +653,9 @@ class SelectEntriesResponse(BaseModel):
     #: rule that stopped it. Ordered as they were considered — by EV
     #: descending — so the first few are the near-misses.
     rejected: list[RejectedEntry]
+    #: Contracts the quote screens dropped before ranking — never priced,
+    #: so they carry no EV, but they must still be loggable.
+    screened_out: list[ScreenedOutEntry]
 
 
 @app.post("/select-entries", response_model=SelectEntriesResponse)
@@ -650,6 +668,7 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
         # so filtering afterwards can leave nothing in band on a board
         # whose long-dated contracts alone fill the cut. See rank_day's
         # docstring. `select_entries` re-applies it as a cheap invariant.
+        screen_audit: list[dict] = []
         ranked = rank_day(
             request.day,
             model_dir,
@@ -657,6 +676,7 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
             force=True,
             min_dte=request.min_dte,
             max_dte=request.max_dte,
+            screen_audit=screen_audit,
         )
     except SystemExit as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
@@ -700,6 +720,12 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
     return SelectEntriesResponse(
         model_run_id=manifest["run_id"],
         model_beats_baseline=manifest["metrics"]["beats_baseline"],
+        screened_out=[
+            ScreenedOutEntry(
+                occ_symbol=a["occ_symbol"], underlying=a["underlying"], reason=a["reason"]
+            )
+            for a in screen_audit
+        ],
         rejected=[
             RejectedEntry(
                 contract=RankedContractResponse.from_ranked(

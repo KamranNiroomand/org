@@ -23,6 +23,7 @@ import pytest
 
 from app.db import reading
 from app.pricing import bsm_price
+from app.screens import ScreenResult
 from app.rank import (
     MAX_ANNUALIZED_DRIFT,
     RankedContract,
@@ -410,6 +411,13 @@ class TestRankDayDteBand:
             lambda *a, **k: ({"TEST": 0.05}, {"TEST": 0.3}, [(30, 0.04)], {"horizon": 5}),
         )
         monkeypatch.setattr("app.rank.read_quotes", lambda *a, **k: pl.DataFrame({"x": [1]}))
+        # The quote screens run between read_quotes and rank_underlying now;
+        # these tests are about the DTE band, so the screens pass everything
+        # through untouched.
+        monkeypatch.setattr(
+            "app.rank.screen_quotes", lambda q, p=None, **k: ScreenResult(passed=q)
+        )
+        monkeypatch.setattr("app.rank.prior_trading_day", lambda *a, **k: None)
         monkeypatch.setattr("app.rank._vol_forecast_ratio", lambda *a, **k: 1.0)
         monkeypatch.setattr("app.rank.rank_underlying", lambda *a, **k: contracts)
 

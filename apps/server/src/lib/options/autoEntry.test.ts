@@ -12,6 +12,7 @@ import { nowIso } from '../util.js';
 import type {
   RankedContract,
   RejectedEntry,
+  ScreenedOutEntry,
   SelectedEntry,
   SelectEntriesInput,
   SelectEntriesResult,
@@ -78,10 +79,11 @@ function selectFn(
   selected: SelectedEntry[],
   captured?: { input?: SelectEntriesInput },
   rejected: RejectedEntry[] = [],
+  screenedOut: ScreenedOutEntry[] = [],
 ) {
   return async (input: SelectEntriesInput): Promise<SelectEntriesResult> => {
     if (captured) captured.input = input;
-    return { model_run_id: 'test', model_beats_baseline: false, selected, rejected };
+    return { model_run_id: 'test', model_beats_baseline: false, selected, rejected, screened_out: screenedOut };
   };
 }
 
@@ -238,6 +240,28 @@ describe('runAutoEntry', () => {
     expect(result.opened).toEqual([]);
     expect(result.skippedReason).toContain('more than the');
     expect(paperDb.select().from(paperOrders).all()).toHaveLength(0);
+  });
+
+  it('records a screened-out contract, which never even reached the allocator', async () => {
+    // The regression review caught: the quote screens run before ranking,
+    // so a screened-out contract produced no EntryRejection and therefore
+    // no decision-log row — "why didn't it buy X?" answered with silence
+    // for the exact class of contract (a stale print) that motivated the
+    // decision log in the first place.
+    const summary = await runAutoEntry(
+      '2026-08-18',
+      selectFn([], undefined, [], [
+        { occ_symbol: 'SNDK  260918P02270000', underlying: 'SNDK', reason: 'stale_price' },
+      ]),
+    );
+
+    expect(summary.opened).toEqual([]);
+    const rows = decisionsForDay('2026-08-18');
+    const screened = rows.find((r) => r.occSymbol === 'SNDK  260918P02270000');
+    expect(screened?.decision).toBe('rejected');
+    // Prefixed so a GROUP BY separates "the screens distrusted the quote"
+    // from "the allocator turned it down" — different problems, different fixes.
+    expect(screened?.reason).toBe('screened_stale_price');
   });
 
   it('records why every rejected candidate was rejected', async () => {
