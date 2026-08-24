@@ -374,9 +374,15 @@ class ModelChoice:
     #: "champion" when the registry named it, "newest" when nothing is
     #: promoted and this fell back to the most recently written artifact.
     source: str
+    #: Why the registry could not be consulted, when that is the reason for
+    #: a fallback. Carried rather than swallowed: an operator seeing
+    #: "newest" while the registry plainly shows a champion needs the
+    #: exception text to know why, and discarding it repeats in miniature
+    #: the defect this whole selector exists to fix.
+    fallback_reason: str | None = None
 
 
-def active_model_dir(base_dir: Path | None = None) -> Path:
+def active_model_dir(base_dir: Path | None = None, target: str = "dir") -> Path:
     """The model the system should actually serve.
 
     **The registry's champion, if there is one.** That sounds obvious and
@@ -401,10 +407,10 @@ def active_model_dir(base_dir: Path | None = None) -> Path:
     when nothing is promoted: the fallback had the identical bug and no
     reason to keep it.
     """
-    return resolve_model(base_dir).directory
+    return resolve_model(base_dir, target).directory
 
 
-def resolve_model(base_dir: Path | None = None) -> ModelChoice:
+def resolve_model(base_dir: Path | None = None, target: str = "dir") -> ModelChoice:
     """`active_model_dir` with the reasoning attached — see its docstring.
 
     Callers that surface which model answered a request should use this;
@@ -417,22 +423,27 @@ def resolve_model(base_dir: Path | None = None) -> ModelChoice:
         raise SystemExit(f"No trained models found under {base} — run `python -m app.train` first.")
 
     by_name = {d.name: d for d in candidates}
+    reason: str | None = None
     try:
-        champion = read_champion_run()
-    except Exception:
+        champion = read_champion_run(target)
+    except Exception as e:
         # A registry that cannot be read must not take ranking down with
         # it: market.db may be mid-sync, or predate the model_runs table.
-        # Falling back is correct; falling back *silently* is not, so the
-        # source travels with the answer.
+        # Falling back is correct; falling back *silently* is not, so both
+        # the source and the reason travel with the answer.
         champion = None
+        reason = f"registry unreadable: {e}"
 
     if champion is not None:
         directory = by_name.get(champion["artifact_dir"]) or by_name.get(champion["run_id"])
         if directory is not None:
             return ModelChoice(directory=directory, run_id=champion["run_id"], source="champion")
+        reason = f"champion {champion['run_id']} is registered but its artifact is missing"
+    elif reason is None:
+        reason = f"no {target} model is promoted"
 
     newest = max(candidates, key=lambda d: (d / "manifest.json").stat().st_mtime)
-    return ModelChoice(directory=newest, run_id=newest.name, source="newest")
+    return ModelChoice(directory=newest, run_id=newest.name, source="newest", fallback_reason=reason)
 
 
 #: Retained so existing callers and tests keep working; `active_model_dir`

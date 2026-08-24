@@ -888,7 +888,7 @@ class TestModelSelection:
 
         monkeypatch.setattr(
             "app.rank.read_champion_run",
-            lambda: {
+            lambda target="dir": {
                 "run_id": "2026-08-24-dir-h5-0aaaaaaaaaaa",
                 "artifact_dir": "2026-08-24-dir-h5-0aaaaaaaaaaa",
                 "status": "champion",
@@ -911,7 +911,7 @@ class TestModelSelection:
         os.utime(first / "manifest.json", (1_000_000, 1_000_000))
         os.utime(newest / "manifest.json", (2_000_000, 2_000_000))
 
-        monkeypatch.setattr("app.rank.read_champion_run", lambda: None)
+        monkeypatch.setattr("app.rank.read_champion_run", lambda target="dir": None)
 
         choice = resolve_model(base)
 
@@ -928,7 +928,7 @@ class TestModelSelection:
         self._artifact(base, "2026-08-24-dir-h5-ffffffffffff")
         monkeypatch.setattr(
             "app.rank.read_champion_run",
-            lambda: {
+            lambda target="dir": {
                 "run_id": "gone",
                 "artifact_dir": "gone",
                 "status": "champion",
@@ -948,7 +948,7 @@ class TestModelSelection:
         base = tmp_path / "models"
         self._artifact(base, "2026-08-24-dir-h5-ffffffffffff")
 
-        def _boom():
+        def _boom(target: str = "dir"):
             raise RuntimeError("no such table: model_runs")
 
         monkeypatch.setattr("app.rank.read_champion_run", _boom)
@@ -957,7 +957,54 @@ class TestModelSelection:
 
         assert choice.source == "newest"
 
+    def test_a_champion_for_another_target_is_not_served(self, tmp_path, monkeypatch) -> None:
+        """Promotion is per-target: the promote route demotes only
+        champions sharing the run's own target, so `dir` and `vrp`
+        champions coexist by design. An unfiltered query would hand /rank
+        whichever was promoted last — a model trained for a different
+        quantity, with a different feature set. Only dir models exist
+        today, but vrp is the architecture's stated eventual target.
+        """
+        base = tmp_path / "models"
+        self._artifact(base, "2026-08-24-dir-h5-aaaaaaaaaaaa")
+
+        seen: list[str] = []
+
+        def _champion(target: str = "dir"):
+            seen.append(target)
+            return None
+
+        monkeypatch.setattr("app.rank.read_champion_run", _champion)
+
+        resolve_model(base, target="vrp")
+
+        # The target must reach the query; without it the filter cannot work.
+        assert seen == ["vrp"]
+
+    def test_a_fallback_always_says_why(self, tmp_path, monkeypatch) -> None:
+        # `source` shows *that* a fallback happened; without the reason an
+        # operator seeing "newest" beside a visibly promoted champion has
+        # no way to learn why — the same discard-the-explanation shape this
+        # selector exists to fix.
+        base = tmp_path / "models"
+        self._artifact(base, "2026-08-24-dir-h5-aaaaaaaaaaaa")
+
+        monkeypatch.setattr("app.rank.read_champion_run", lambda target="dir": None)
+        assert "no dir model is promoted" in resolve_model(base).fallback_reason
+
+        def _boom(target: str = "dir"):
+            raise RuntimeError("no such table: model_runs")
+
+        monkeypatch.setattr("app.rank.read_champion_run", _boom)
+        assert "no such table" in resolve_model(base).fallback_reason
+
+        monkeypatch.setattr(
+            "app.rank.read_champion_run",
+            lambda target="dir": {"run_id": "gone", "artifact_dir": "gone", "status": "champion", "promoted_at": "x"},
+        )
+        assert "artifact is missing" in resolve_model(base).fallback_reason
+
     def test_no_artifacts_at_all_still_refuses_loudly(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr("app.rank.read_champion_run", lambda: None)
+        monkeypatch.setattr("app.rank.read_champion_run", lambda target="dir": None)
         with pytest.raises(SystemExit, match="No trained models found"):
             resolve_model(tmp_path / "empty")

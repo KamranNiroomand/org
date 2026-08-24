@@ -313,6 +313,8 @@ class RankResponse(BaseModel):
     #: "newest" when nothing is promoted. Reported because the two used to
     #: be able to disagree invisibly — see `resolve_model` in rank.py.
     model_source: str
+    #: Why a fallback was used, when one was. Null on the champion path.
+    model_fallback_reason: str | None = None
     #: The single most important field in this response — see rank.py's
     #: own refusal-by-default design. A caller that only reads `contracts`
     #: and ignores this is exactly the mistake the whole harness exists to
@@ -344,6 +346,7 @@ def rank(request: RankRequest) -> RankResponse:
     return RankResponse(
         model_run_id=manifest["run_id"],
         model_source=choice.source,
+        model_fallback_reason=choice.fallback_reason,
         model_beats_baseline=manifest["metrics"]["beats_baseline"],
         model_information_coefficient=manifest["metrics"]["information_coefficient"],
         contracts=[RankedContractResponse.from_ranked(c, entry_day=request.day, horizon=horizon) for c in ranked],

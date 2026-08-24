@@ -331,8 +331,18 @@ def read_contract_history(occ_symbols: list[str]) -> pl.DataFrame:
     )
 
 
-def read_champion_run() -> dict | None:
-    """The run the registry says is live, or None if nothing is promoted.
+def read_champion_run(target: str = "dir") -> dict | None:
+    """The run the registry says is live for `target`, or None.
+
+    **Filtered by target, because promotion is per-target.** The promote
+    route demotes only champions sharing the run's own target — its
+    comment reads "Only one champion per target at a time" — so `dir` and
+    `vrp` champions coexist by design. An unfiltered query would return
+    whichever was promoted most recently across all targets, so promoting
+    a vrp champion would silently hand `/rank` a model trained for a
+    different quantity, with a different feature set. Only `dir` models
+    exist today, but vrp is named throughout this codebase as the eventual
+    primary target.
 
     Exists because promotion used to be pure bookkeeping. `model_runs` has
     carried a `champion` status and a manual promote route since the
@@ -355,10 +365,11 @@ def read_champion_run() -> dict | None:
             """
             SELECT run_id, artifact_dir, status, promoted_at
             FROM model_runs
-            WHERE status = 'champion'
+            WHERE status = 'champion' AND target = ?
             ORDER BY promoted_at DESC
             LIMIT 1
-            """
+            """,
+            (target,),
         ).fetchone()
     if row is None:
         return None
