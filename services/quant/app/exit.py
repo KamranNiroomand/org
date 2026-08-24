@@ -202,22 +202,20 @@ def evaluate_exit(
     # issue. The ratchet is monotone by construction — `max` against the
     # existing stop — because a stop that can move down is not a stop; it
     # is how a small loss becomes a large one.
+    #
+    # The ratchet is *computed* here but not returned yet. Returning early
+    # would skip the review triggers below, and under the old rule that
+    # cost nothing — the position was closed at the target, so there was
+    # nothing left to review. Now it holds above the target indefinitely,
+    # and an early return would mean a winning position could never
+    # escalate again: a restatement or an EV collapse would ride the
+    # trailing stop down with nobody looking. So the raised stop travels
+    # with whatever decision the checks below reach.
+    trailed_stop: float | None = None
     if current_price >= target.target_exit_price:
         trailed = current_price * (1.0 - trail_pct)
         if trailed > target.stop_loss_price:
-            return ExitDecision(
-                action="hold",
-                new_target_exit_price=target.target_exit_price,
-                new_target_exit_date=target.target_exit_date,
-                new_stop_loss_price=trailed,
-                reason=(
-                    f"Live price {current_price:.2f} is at or above the "
-                    f"{target.target_exit_price:.2f} target; letting it run with the stop "
-                    f"raised from {target.stop_loss_price:.2f} to {trailed:.2f} "
-                    f"({trail_pct:.0%} below the running price)."
-                ),
-                triggered_by="trail_raised",
-            )
+            trailed_stop = trailed
 
     ev_flipped = (
         entry_ev is not None and current_ev is not None and (entry_ev >= 0) != (current_ev >= 0)
@@ -227,7 +225,7 @@ def evaluate_exit(
             action="needs_review",
             new_target_exit_price=None,
             new_target_exit_date=None,
-            new_stop_loss_price=None,
+            new_stop_loss_price=trailed_stop,
             reason=(
                 f"Expected value flipped sign since entry "
                 f"({entry_ev:.2f} → {current_ev:.2f})."
@@ -239,12 +237,27 @@ def evaluate_exit(
             action="needs_review",
             new_target_exit_price=None,
             new_target_exit_date=None,
-            new_stop_loss_price=None,
+            new_stop_loss_price=trailed_stop,
             reason=(
                 f"{new_documents_count} new document(s) on the underlying "
                 f"since the last check."
             ),
             triggered_by="new_news",
+        )
+
+    if trailed_stop is not None:
+        return ExitDecision(
+            action="hold",
+            new_target_exit_price=target.target_exit_price,
+            new_target_exit_date=target.target_exit_date,
+            new_stop_loss_price=trailed_stop,
+            reason=(
+                f"Live price {current_price:.2f} is at or above the "
+                f"{target.target_exit_price:.2f} target; letting it run with the stop "
+                f"raised from {target.stop_loss_price:.2f} to {trailed_stop:.2f} "
+                f"({trail_pct:.0%} below the running price)."
+            ),
+            triggered_by="trail_raised",
         )
 
     return ExitDecision(

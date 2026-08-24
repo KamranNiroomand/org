@@ -171,6 +171,52 @@ describe('runExitEngine', () => {
     expect(revisions[0]?.triggeredBy).toBe('rule');
   });
 
+  it('does not advance the news cutoff when only a rule raised the stop', async () => {
+    // `exitUpdatedAt` doubles as the cutoff for `readDocumentsSince`, and
+    // the advisor path advances it to record "every document counted has
+    // now been reviewed". A rule-based ratchet has reviewed nothing, so
+    // stamping it there buried unreviewed news permanently, every pass.
+    const id = openManagedPosition();
+    const before = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).all()[0];
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(3.0))), {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async () => ({
+        action: 'hold',
+        newTargetExitPriceE4: toE4(1.5),
+        newTargetExitDate: '2026-09-01',
+        newStopLossPriceE4: toE4(2.1),
+        reason: 'stop raised',
+        triggeredBy: 'trail_raised',
+      }),
+    });
+
+    const [after] = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).all();
+    expect(after?.stopLossPriceE4).toBe(toE4(2.1)); // the ratchet still landed
+    expect(after?.exitUpdatedAt).toBe(before?.exitUpdatedAt ?? null);
+  });
+
+  it('leaves an adopted position’s news backlog pending review', async () => {
+    // An orphan has never been rechecked, so its whole document history is
+    // still owed a review. Stamping exitUpdatedAt on adoption would throw
+    // that away at the moment the engine finally takes charge.
+    openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ENTRY_E4, source: 'model' });
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), {
+      ...NEVER_REVIEW_DEPS,
+      computeExitTarget: async () => ({
+        targetE4: { targetExitPriceE4: toE4(1.5), stopLossPriceE4: toE4(0.5), targetExitDate: '2026-09-01' },
+        refusal: null,
+        horizon: 5,
+        modelRunId: 'test',
+      }),
+    });
+
+    const [order] = paperDb.select().from(paperOrders).all();
+    expect(order?.targetExitPriceE4).toBe(toE4(1.5)); // adopted
+    expect(order?.exitUpdatedAt).toBeNull(); // but the backlog still counts
+  });
+
   it('never lowers a stop, even if asked to', async () => {
     // A stop that can move down is not a stop. `evaluate_exit` already
     // guarantees the ratchet is monotone; this is the second lock.

@@ -113,6 +113,29 @@ class TestEvaluateExit:
         assert decision.triggered_by == "trail_raised"
         assert decision.new_stop_loss_price == pytest.approx(3.00 * 0.7)
 
+    def test_a_winner_still_escalates_on_news_and_keeps_its_raised_stop(self) -> None:
+        # The bug this pins: the trail branch used to return before the
+        # review checks. Under the old rule that cost nothing — the
+        # position was closed at the target, so there was nothing left to
+        # review. Now it holds above the target indefinitely, and an early
+        # return meant a winning position could never escalate again: a
+        # restatement would ride the trailing stop down with nobody
+        # looking. The raised stop must survive the escalation too.
+        decision = evaluate_exit(
+            current_price=3.00, dte=10, target=self._target(), new_documents_count=2
+        )
+        assert decision.action == "needs_review"
+        assert decision.triggered_by == "new_news"
+        assert decision.new_stop_loss_price == pytest.approx(3.00 * 0.7)
+
+    def test_a_winner_still_escalates_on_an_ev_sign_flip(self) -> None:
+        decision = evaluate_exit(
+            current_price=3.00, dte=10, target=self._target(), entry_ev=5.0, current_ev=-1.0
+        )
+        assert decision.action == "needs_review"
+        assert decision.triggered_by == "ev_sign_flip"
+        assert decision.new_stop_loss_price == pytest.approx(3.00 * 0.7)
+
     def test_the_trailing_stop_only_ever_ratchets_upward(self) -> None:
         # A stop that can move down is not a stop. At a price whose trail
         # would sit below the stop already in force, the existing stop
