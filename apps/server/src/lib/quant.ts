@@ -244,12 +244,25 @@ export interface SelectEntriesInput {
   maxNewPositions: number;
   minEvPerRisk: number;
   minProbProfit: number;
+  minDte: number;
+  maxDte: number;
+}
+
+/**
+ * A chosen contract and how much of it to buy. Size comes back from the
+ * sidecar rather than being decided here — see `select_entries` for why
+ * position sizing is part of the selection decision, not a caller detail.
+ */
+export interface SelectedEntry {
+  contract: RankedContract;
+  quantity: number;
+  cost: number;
 }
 
 export interface SelectEntriesResult {
   model_run_id: string;
   model_beats_baseline: boolean;
-  selected: RankedContract[];
+  selected: SelectedEntry[];
 }
 
 /**
@@ -274,6 +287,8 @@ export async function selectEntries(input: SelectEntriesInput): Promise<SelectEn
         max_new_positions: input.maxNewPositions,
         min_ev_per_risk: input.minEvPerRisk,
         min_prob_profit: input.minProbProfit,
+        min_dte: input.minDte,
+        max_dte: input.maxDte,
       }),
       signal: AbortSignal.timeout(120_000),
     });

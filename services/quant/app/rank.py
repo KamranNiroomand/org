@@ -445,12 +445,27 @@ def rank_day(
     round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
     force: bool = False,
     max_capital: float | None = None,
+    min_dte: int | None = None,
+    max_dte: int | None = None,
 ) -> list[RankedContract]:
     """The full pipeline: load a model, forecast every underlying, price
     every underlying's gate-passing chain against that forecast, and return
     the top `top` contracts by expected value. See `rank_underlying`'s own
     docstring for why `max_capital` has to be applied per-contract here,
     before ranking, rather than by the caller filtering the result after.
+
+    `min_dte`/`max_dte` are applied here for the same reason, and it
+    matters more than it looks. `ev` is an absolute dollar figure, and
+    `forecast_value` compounds a constant drift over the contract's whole
+    life — so on one underlying the longer-dated contract carries the
+    larger EV almost mechanically, and the top-`top` slice skews long.
+    Leaving the maturity filter to the caller therefore does not just cost
+    a few candidates: on a board with enough long-dated contracts to fill
+    `top` on their own, every in-band candidate is cut before the caller
+    ever sees one, and an empty selection reads as "the market offered
+    nothing today" when it was really the truncation. Both bounds are
+    inclusive; `None` disables that end (the Signal Board wants the whole
+    board, unfiltered).
     """
     drift_by_symbol, vol_by_symbol, rate_curve, _manifest = _forecast_inputs(
         trading_day, model_dir, vol_window, force
@@ -490,8 +505,32 @@ def rank_day(
             )
         )
 
+    # Before the sort and the cut, per the docstring above.
+    if min_dte is not None:
+        ranked = [c for c in ranked if c.dte >= min_dte]
+    if max_dte is not None:
+        ranked = [c for c in ranked if c.dte <= max_dte]
+
     ranked.sort(key=lambda c: c.ev, reverse=True)
     return ranked[:top]
+
+
+@dataclass
+class EntrySelection:
+    """One accepted candidate and how much of it to buy.
+
+    Size is part of the selection, not an afterthought for the caller —
+    which contract to buy and how much of the account to put behind it are
+    the same decision, and splitting them is how the caller ended up
+    hard-coding `quantity: 1` for every position regardless of price.
+    """
+
+    contract: RankedContract
+    quantity: int
+    #: Total dollars committed: `market_price * multiplier * quantity`. The
+    #: caller needs this for its own reconciliation, and recomputing it
+    #: from the contract risks drifting from the multiplier used here.
+    cost: float
 
 
 def select_entries(
@@ -503,49 +542,105 @@ def select_entries(
     max_new_positions: int,
     min_ev_per_risk: float,
     min_prob_profit: float,
+    min_dte: int,
+    max_dte: int,
     multiplier: int = DEFAULT_MULTIPLIER,
-) -> list[RankedContract]:
+) -> list[EntrySelection]:
     """Capital-constrained entry selection — how many positions to open
-    today is decided by what the market actually offers, not a fixed count.
+    today, *and how much of each*, decided by what the market actually
+    offers rather than a fixed count and a hard-coded single contract.
 
     Replaces the original "pick exactly one winner" rule, which had a real
     hole found live: with no price cap anywhere, the top-ranked contract on
     a real day cost $122,440 for one contract — more than the whole paper
-    account. Here a candidate is only accepted if its full cost
-    (`market_price * multiplier`) fits within the capital still remaining
-    after every earlier (higher-EV) acceptance, so the account can never be
-    committed past what it actually has.
+    account. Here a candidate is only accepted if its full cost fits within
+    the capital still remaining after every earlier (higher-EV) acceptance,
+    so the account can never be committed past what it actually has.
 
-    Selection is greedy by EV, deliberately: the ranked list is already
-    sorted by the model's own preference, and a knapsack-optimal packing
-    that skips the model's best pick to squeeze in two lesser ones would
-    substitute a capital-efficiency objective for the model's ranking. One
-    accepted contract per underlying per day, and never an underlying
-    already held — both are the same one-position-per-underlying rule
-    autoEntry.ts has enforced since it existed (doubling a name doubles
-    exposure to one forecast, not diversification).
+    **Order is greedy by EV; size is equal-weight, and that split is
+    deliberate.** The ranked list is already sorted by the model's own
+    preference, and a knapsack-optimal packing that skipped the model's
+    best pick to squeeze in two lesser ones would substitute a
+    capital-efficiency objective for the model's ranking. But *sizing* by
+    EV would be a different and much worse idea: EV is a forecast mean, and
+    forecast means carry by far the largest estimation error of any input a
+    portfolio decision uses — an order of magnitude more consequential than
+    errors in variance (Chopra & Ziemba 1993). Concentrating capital
+    proportional to EV bets the book on the least reliable number in it.
+    Equal weight across the day's available slots is the naive-1/N rule
+    that repeatedly beats estimation-heavy optimizers out of sample
+    (DeMiguel, Garlappi & Uppal 2009), and it is the honest choice for a
+    model that has not yet cleared its own significance hurdle.
 
-    A day with one real, affordable opportunity opens one position; a day
-    with five genuinely independent ones opens up to `max_new_positions`;
-    a day where one name dominates the whole board still opens at most one.
+    The weight is one share of the *book*, not of the day: available
+    capital is divided by the concurrent-position room, not by the
+    per-day cap. Two consequences, both intentional and both easy to
+    mistake for bugs. A day offering one qualifying candidate deploys
+    roughly one slot's worth and leaves the rest in cash — a thin day is
+    evidence for less exposure, not for a bigger bet on what little
+    cleared the bar. And a day that fills its per-day cap still leaves
+    room for later days at comparable size, instead of spending the whole
+    account on whichever names happened to qualify first.
+
+    One accepted contract per underlying per day, and never an underlying
+    already held — the same one-position-per-underlying rule autoEntry.ts
+    has enforced since it existed (doubling a name doubles exposure to one
+    forecast, not diversification).
+
+    **`min_dte`/`max_dte` confine entries to maturities the forecast can
+    actually speak to.** The direction model predicts a return over one
+    fixed horizon (5 trading days today) and `_annualize_horizon_return`
+    turns that into a constant continuous drift so any DTE can be priced —
+    an assumption the module docstring already flags as probably false,
+    since signal decays with maturity. A 200-DTE contract ranked on that
+    drift has almost all of its EV resting on extrapolation past anything
+    the model measured. Below the floor the opposite problem: a contract
+    expiring inside the forecast window cannot be held through it and
+    still exited above `exit.py`'s DTE floor, so it is forced out on the
+    calendar rather than on the signal. Both bounds are first-pass and
+    untuned — a band, not a validated optimum.
     """
     remaining = available_capital
     room = max(0, max_concurrent_positions - open_position_count)
     budget_slots = min(room, max_new_positions)
+    if budget_slots <= 0 or remaining <= 0:
+        return []
+
+    # Equal weight across every position the *book* can hold, not across
+    # the ones this one day may open. Dividing by the daily cap instead
+    # sizes each of today's picks as though today were the only day the
+    # book will ever fill: at the shipped 10-concurrent/5-per-day defaults
+    # that puts 100% of deployable capital into day one's five names, and
+    # day two's five then arrive at a fifth the size — a 5:1 overweight
+    # decided by which name happened to clear the bar first. Chronological
+    # accident is not conviction, and concentrating on it is exactly what
+    # the equal-weight rule above exists to prevent.
+    per_slot_budget = available_capital / room
+
     taken_underlyings: set[str] = set()
-    selected: list[RankedContract] = []
+    selected: list[EntrySelection] = []
 
     for c in sorted(candidates, key=lambda c: c.ev, reverse=True):
         if len(selected) >= budget_slots:
             break
         if c.ev_per_risk < min_ev_per_risk or c.prob_profit < min_prob_profit:
             continue
+        if c.dte < min_dte or c.dte > max_dte:
+            continue
         if c.underlying in held_underlyings or c.underlying in taken_underlyings:
             continue
-        cost = c.market_price * multiplier
-        if cost > remaining:
+        cost_per_contract = c.market_price * multiplier
+        if cost_per_contract <= 0 or cost_per_contract > remaining:
             continue
-        selected.append(c)
+        # At least one contract — a candidate that fits in `remaining` at
+        # all is worth a single unit even when one unit overshoots its
+        # equal-weight slot, which is the common case for an expensive
+        # contract in a small account.
+        quantity = max(1, int(per_slot_budget // cost_per_contract))
+        # ...but never more than the cash actually left.
+        quantity = min(quantity, int(remaining // cost_per_contract))
+        cost = cost_per_contract * quantity
+        selected.append(EntrySelection(contract=c, quantity=quantity, cost=cost))
         taken_underlyings.add(c.underlying)
         remaining -= cost
 
