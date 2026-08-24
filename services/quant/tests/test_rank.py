@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 
 import lightgbm as lgb
@@ -35,6 +36,7 @@ from app.rank import (
     probability_of_profit,
     rank_day,
     rank_underlying,
+    resolve_model,
     score_held_contracts,
     select_entries,
 )
@@ -855,3 +857,107 @@ class TestSelectEntriesDteBand:
         selected = self._select([leap, a, b], max_new_positions=2)
 
         assert [s.contract.underlying for s in selected] == ["AAA", "BBB"]
+
+
+class TestModelSelection:
+    """Which model actually gets served, and why.
+
+    Promotion was pure bookkeeping until this: `model_runs` carried a
+    `champion` status and a promote route, and the serving path read
+    neither. These tests pin the case that made that invisible.
+    """
+
+    def _artifact(self, base: Path, name: str) -> Path:
+        d = base / name
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text(json.dumps({"run_id": name}))
+        return d
+
+    def test_serves_the_registry_champion_even_when_it_sorts_first(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The bug, pinned. Three runs trained the same day order by config
+        hash, not by time. The old selector took the lexicographic maximum,
+        so a champion whose hash begins `0` stayed promoted and unused
+        while a different model answered every request — with nothing
+        anywhere reporting the divergence.
+        """
+        base = tmp_path / "models"
+        self._artifact(base, "2026-08-24-dir-h5-0aaaaaaaaaaa")  # the champion
+        self._artifact(base, "2026-08-24-dir-h5-ffffffffffff")  # sorts last
+
+        monkeypatch.setattr(
+            "app.rank.read_champion_run",
+            lambda: {
+                "run_id": "2026-08-24-dir-h5-0aaaaaaaaaaa",
+                "artifact_dir": "2026-08-24-dir-h5-0aaaaaaaaaaa",
+                "status": "champion",
+                "promoted_at": "2026-08-24T15:35:13Z",
+            },
+        )
+
+        choice = resolve_model(base)
+
+        assert choice.run_id == "2026-08-24-dir-h5-0aaaaaaaaaaa"
+        assert choice.source == "champion"
+
+    def test_falls_back_to_the_newest_written_not_the_last_alphabetically(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # The fallback had the identical defect and no reason to keep it.
+        base = tmp_path / "models"
+        first = self._artifact(base, "2026-08-24-dir-h5-ffffffffffff")
+        newest = self._artifact(base, "2026-08-24-dir-h5-000000000000")
+        os.utime(first / "manifest.json", (1_000_000, 1_000_000))
+        os.utime(newest / "manifest.json", (2_000_000, 2_000_000))
+
+        monkeypatch.setattr("app.rank.read_champion_run", lambda: None)
+
+        choice = resolve_model(base)
+
+        assert choice.run_id == "2026-08-24-dir-h5-000000000000"
+        assert choice.source == "newest"
+
+    def test_a_champion_whose_artifact_is_missing_degrades_rather_than_crashing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # A registry row can outlive its files — pruned, or synced from a
+        # machine whose artifacts never came with it. Ranking must still
+        # work, and must not claim the champion answered.
+        base = tmp_path / "models"
+        self._artifact(base, "2026-08-24-dir-h5-ffffffffffff")
+        monkeypatch.setattr(
+            "app.rank.read_champion_run",
+            lambda: {
+                "run_id": "gone",
+                "artifact_dir": "gone",
+                "status": "champion",
+                "promoted_at": "2026-08-24T15:35:13Z",
+            },
+        )
+
+        choice = resolve_model(base)
+
+        assert choice.source == "newest"
+        assert choice.run_id == "2026-08-24-dir-h5-ffffffffffff"
+
+    def test_an_unreadable_registry_does_not_take_ranking_down(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # market.db may be mid-sync or predate the model_runs table.
+        base = tmp_path / "models"
+        self._artifact(base, "2026-08-24-dir-h5-ffffffffffff")
+
+        def _boom():
+            raise RuntimeError("no such table: model_runs")
+
+        monkeypatch.setattr("app.rank.read_champion_run", _boom)
+
+        choice = resolve_model(base)
+
+        assert choice.source == "newest"
+
+    def test_no_artifacts_at_all_still_refuses_loudly(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("app.rank.read_champion_run", lambda: None)
+        with pytest.raises(SystemExit, match="No trained models found"):
+            resolve_model(tmp_path / "empty")
