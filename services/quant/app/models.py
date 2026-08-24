@@ -40,6 +40,17 @@ class TrainingResult:
     target: str
     feature_cols: list[str]
     folds: list[FoldPrediction] = field(default_factory=list)
+    #: Per-boosting-round RMSE for each fold, as
+    #: `{fold: {"train": [...], "validation": [...]}}`. Empty until a caller
+    #: asks for it — see `train_lgbm_regressor`'s `record_history`.
+    #:
+    #: The out-of-fold metrics elsewhere in this class say whether the model
+    #: generalizes; this says *how it got there*, which is the one question
+    #: they cannot answer. A model whose validation curve turns up while its
+    #: training curve keeps falling is overfitting, and until this existed
+    #: there was no way to see that at all — only a final number that had
+    #: already absorbed it.
+    history: dict[int, dict[str, list[float]]] = field(default_factory=dict)
 
     @property
     def actual(self) -> np.ndarray:
@@ -116,6 +127,7 @@ def train_lgbm_regressor(
     splits: list[WalkForwardSplit],
     day_col: str = "day",
     params: dict[str, object] | None = None,
+    record_history: bool = False,
 ) -> TrainingResult:
     """Trains one LightGBM regressor per fold and collects out-of-fold predictions.
 
@@ -123,6 +135,21 @@ def train_lgbm_regressor(
     walk-forward already grows the training set fold over fold, so refitting
     from scratch each time is what "retrain weekly on an expanding window"
     (the project plan's retraining policy) actually means in miniature.
+
+    `record_history` additionally captures per-round train and validation
+    RMSE into `TrainingResult.history`. Off by default because it makes the
+    fit evaluate both sets on every boosting round, which is real work for a
+    caller that only wants predictions. `train.py` turns it on; the metric
+    functions and every test that only needs out-of-fold predictions leave
+    it off.
+
+    The validation set is the fold's own **test** block, which is worth
+    being explicit about: those rows are out-of-fold for the model, so the
+    curve is an honest generalization curve and not a second training
+    signal — nothing selects on it, no early stopping, no round count tuned
+    against it. It is drawn, not optimized against. Using it to pick an
+    iteration count would quietly turn the out-of-fold metrics reported
+    beside it into in-sample ones.
     """
     result = TrainingResult(target=label_col, feature_cols=feature_cols)
     model_params = {**DEFAULT_LGBM_PARAMS, **(params or {})}
@@ -132,7 +159,29 @@ def train_lgbm_regressor(
         if train.height == 0 or test.height == 0:
             continue
         model = lgb.LGBMRegressor(**model_params)
-        model.fit(train[feature_cols].to_numpy(), train[label_col].to_numpy())
+        if record_history:
+            evals: dict[str, dict[str, list[float]]] = {}
+            model.fit(
+                train[feature_cols].to_numpy(),
+                train[label_col].to_numpy(),
+                # `eval_X`/`eval_y`, not the `eval_set` tuple list: LightGBM
+                # 4.7 deprecated the latter and warns on every fit.
+                # Tuples, not lists: LightGBM 4.7 treats a tuple as "several
+                # eval sets" and a list as "one set", which is the difference
+                # between two curves and a TypeError.
+                eval_X=(train[feature_cols].to_numpy(), test[feature_cols].to_numpy()),
+                eval_y=(train[label_col].to_numpy(), test[label_col].to_numpy()),
+                eval_names=["train", "validation"],
+                eval_metric="rmse",
+                callbacks=[lgb.record_evaluation(evals)],
+            )
+            result.history[split.fold] = {
+                name: [float(v) for v in metrics["rmse"]]
+                for name, metrics in evals.items()
+                if "rmse" in metrics
+            }
+        else:
+            model.fit(train[feature_cols].to_numpy(), train[label_col].to_numpy())
         predicted = model.predict(test[feature_cols].to_numpy())
         result.folds.append(
             FoldPrediction(

@@ -305,6 +305,51 @@ export async function selectEntries(input: SelectEntriesInput): Promise<SelectEn
   return (await res.json()) as SelectEntriesResult;
 }
 
+/**
+ * The model-performance dashboard's payload. A pass-through: every number
+ * here is computed in `services/quant/app/performance.py`, because a
+ * TypeScript reimplementation of a model-quality statistic would be a
+ * second definition of "is this model any good" free to drift from the
+ * one the training harness uses.
+ *
+ * `metrics` is deliberately loose. Runs registered before a metric existed
+ * simply lack that key — the two runs from before the honest-IC work carry
+ * no `ic_mean` at all — and the UI must render that as "not recorded"
+ * rather than as a zero, which would plot a real model as having no skill.
+ */
+export interface ModelPerformance {
+  target: string;
+  runs: Array<{
+    run_id: string;
+    registered_at: string;
+    status: string;
+    metrics: Record<string, number | boolean | null | undefined>;
+  }>;
+  /** The run the dashboard should lead with — the champion when one
+   * exists. Distinct from `latest_run_id` on purpose: the system serves
+   * the champion, so headlining the newest registration would describe a
+   * model that is not running. */
+  featured_run_id: string | null;
+  featured_is_champion: boolean;
+  latest_run_id: string | null;
+  /** `{fold: {train: number[], validation: number[]}}`, empty when the run
+   * predates loss-history recording. */
+  loss_curve: Record<string, { train?: number[]; validation?: number[] }>;
+}
+
+export async function modelPerformance(target = 'dir'): Promise<ModelPerformance> {
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/stock/performance?target=${encodeURIComponent(target)}`, {
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (!res.ok) throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  return (await res.json()) as ModelPerformance;
+}
+
 export interface ExitTarget {
   targetExitPriceE4: number;
   stopLossPriceE4: number;

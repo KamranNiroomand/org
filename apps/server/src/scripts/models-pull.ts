@@ -15,9 +15,10 @@ import { config } from '../config.js';
  * A model run directory is only ever written once and never modified after
  * — `train.py` writes into a fresh timestamped directory each run rather
  * than updating one in place — so there is no live-write hazard here the
- * way there is for `market.db`'s WAL file. `--ignore-existing` skips run
- * directories already pulled rather than re-copying every artifact on every
- * call, which matters once there are dozens of runs.
+ * way there is for `market.db`'s WAL file. `--update` skips artifacts the
+ * reader already holds at the same or newer mtime, which matters once
+ * there are dozens of runs, while still replacing one the runner has
+ * genuinely retrained — see the comment on the rsync call.
  *
  *   npm run models:pull -w @org/server
  */
@@ -37,9 +38,24 @@ if (!existsSync(config.market.modelsDir)) mkdirSync(config.market.modelsDir, { r
 
 console.log(`\nPulling ${remoteModels}\n  → ${config.market.modelsDir}\n`);
 
+// `--update` rather than `--ignore-existing`, which this used to pass on
+// the reasoning quoted above — that a run directory is written once and
+// never modified. That invariant does not actually hold. `_config_hash`
+// in train.py covers the target, the horizon and the feature *names*, so
+// changing a feature's implementation retrains into the *same* run_id
+// with a different model; that happened twice on 2026-08-24 alone. Under
+// `--ignore-existing` a reader that already held the earlier copy kept
+// its stale `model.txt` and `manifest.json` while any genuinely new file
+// (`history.json`) still arrived — leaving a directory half old and half
+// new, which is worse than either.
+//
+// `--update` keeps the cheap skip for the common case (an untouched run
+// transfers nothing, since mtimes match) while letting a genuinely newer
+// artifact through. The receiver is a reader that never writes here, so
+// "the remote copy is newer" is always the right answer.
 const result = spawnSync(
   'rsync',
-  ['-az', '--ignore-existing', '--progress', remoteModels, `${config.market.modelsDir}/`],
+  ['-az', '--update', '--progress', remoteModels, `${config.market.modelsDir}/`],
   { stdio: 'inherit' },
 );
 

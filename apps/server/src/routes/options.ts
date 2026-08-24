@@ -24,7 +24,7 @@ import { nowIso, todayKey } from '../lib/util.js';
 import { auditForLeakage } from '../lib/agents/leakageAudit.js';
 import { narrateSignal } from '../lib/agents/narrate.js';
 import { proposeHypotheses } from '../lib/agents/hypotheses.js';
-import { quantHealthy, rankDay, QuantRefusal, QuantUnavailable } from '../lib/quant.js';
+import { modelPerformance, quantHealthy, rankDay, QuantRefusal, QuantUnavailable } from '../lib/quant.js';
 
 /**
  * Status and control for the options corpus.
@@ -339,6 +339,25 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    * per the project plan's champion/shadow/promote policy. Never automatic
    * on an in-sample metric.
    */
+  /**
+   * Model-performance data for the dashboard. Thin on purpose — see
+   * `modelPerformance` and performance.py on why the computation is not
+   * here.
+   */
+  app.get('/api/quant/performance', async (req, reply) => {
+    const target = typeof (req.query as { target?: string })?.target === 'string'
+      ? (req.query as { target: string }).target
+      : 'dir';
+    try {
+      return await modelPerformance(target);
+    } catch (err) {
+      if (err instanceof QuantUnavailable) {
+        return reply.code(503).send({ error: `Quant service unavailable: ${err.message}` });
+      }
+      throw err;
+    }
+  });
+
   app.post<{ Params: { runId: string } }>('/api/quant/runs/:runId/promote', async (req, reply) => {
     const run = marketDb.select().from(modelRuns).where(eq(modelRuns.runId, req.params.runId)).get();
     if (!run) return reply.code(404).send({ error: 'Unknown run' });

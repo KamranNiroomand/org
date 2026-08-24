@@ -161,3 +161,70 @@ class TestAgainstRealBackfilledData:
         assert model_result.predicted.shape == model_result.actual.shape
         assert np.all(np.isfinite(model_result.predicted))
         assert np.all(np.isfinite(baseline_result.predicted))
+
+
+class TestLossHistory:
+    """Per-round train/validation RMSE — the one diagnostic the out-of-fold
+    summary metrics cannot provide."""
+
+    def _panel(self, n_days: int = 40, n_symbols: int = 25, seed: int = 0) -> pl.DataFrame:
+        rng = np.random.default_rng(seed)
+        days = [f"2026-01-{d:02d}" for d in range(1, n_days + 1)]
+        return pl.DataFrame(
+            [
+                {
+                    "day": d,
+                    "symbol": f"S{i}",
+                    "f1": float(rng.normal()),
+                    "f2": float(rng.normal()),
+                    "label": float(rng.normal() * 0.01),
+                }
+                for d in days
+                for i in range(n_symbols)
+            ]
+        )
+
+    def _splits(self, panel: pl.DataFrame):
+        days = sorted(panel["day"].unique().to_list())
+        return purged_walk_forward_splits(days, 2, 2, 1, 10)
+
+    def test_off_by_default_so_callers_that_only_want_predictions_pay_nothing(self) -> None:
+        panel = self._panel()
+        result = train_lgbm_regressor(panel, ["f1", "f2"], "label", self._splits(panel))
+        assert result.history == {}
+        assert len(result.folds) > 0  # predictions still produced
+
+    def test_records_both_curves_for_every_fold_when_asked(self) -> None:
+        panel = self._panel()
+        splits = self._splits(panel)
+        result = train_lgbm_regressor(panel, ["f1", "f2"], "label", splits, record_history=True)
+
+        assert set(result.history) == {f.fold for f in result.folds}
+        for curves in result.history.values():
+            assert curves["train"] and curves["validation"]
+            assert len(curves["train"]) == len(curves["validation"])
+
+    def test_recording_does_not_change_the_predictions(self) -> None:
+        # The curve is an observation of the fit, not a change to it. If
+        # turning it on moved the model, every metric reported beside it
+        # would describe a different model than the one that shipped.
+        panel = self._panel()
+        splits = self._splits(panel)
+        without = train_lgbm_regressor(panel, ["f1", "f2"], "label", splits)
+        with_history = train_lgbm_regressor(panel, ["f1", "f2"], "label", splits, record_history=True)
+
+        assert np.allclose(without.predicted, with_history.predicted)
+
+    def test_the_curve_can_show_overfitting(self) -> None:
+        # On pure noise there is nothing to learn, so validation RMSE must
+        # stop improving while training RMSE keeps falling. If the plumbing
+        # were wrong — both curves scored on the same rows, say — this
+        # would not hold, and the chart would quietly never show overfit.
+        panel = self._panel(seed=7)
+        splits = self._splits(panel)
+        result = train_lgbm_regressor(panel, ["f1", "f2"], "label", splits, record_history=True)
+
+        curves = result.history[min(result.history)]
+        train, validation = curves["train"], curves["validation"]
+        assert train[-1] < train[0]  # training error always falls on noise
+        assert validation.index(min(validation)) < len(validation) - 1  # best round is not the last

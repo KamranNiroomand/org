@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { cn } from '../ui';
 import { CorpusStatus } from './CorpusStatus';
+import { ModelPerformance } from './ModelPerformance';
 import { PaperBook } from './PaperBook';
 import { SignalBoard } from './SignalBoard';
 
@@ -13,12 +14,15 @@ import { SignalBoard } from './SignalBoard';
  * didn't rank, not as the main path.
  */
 
-type SubTab = 'status' | 'signals' | 'paper';
+type SubTab = 'status' | 'signals' | 'paper' | 'performance';
 
 const SUB_TABS: Array<[SubTab, string]> = [
   ['status', 'Status'],
   ['signals', 'Signals'],
   ['paper', 'Paper book'],
+  // Model quality only — trading P&L stays on the paper book. See
+  // ModelPerformance's own docstring on why the two never share a panel.
+  ['performance', 'Model'],
 ];
 
 export function OptionsTab() {
@@ -45,6 +49,7 @@ export function OptionsTab() {
       {tab === 'status' && <CorpusStatus />}
       {tab === 'signals' && <SignalBoard />}
       {tab === 'paper' && <PaperBook />}
+      {tab === 'performance' && <ModelPerformance />}
     </div>
   );
 }

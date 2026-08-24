@@ -122,7 +122,7 @@ def train(
     min_train = min_train_days or max(60, len(days) // (n_splits + 2))
     splits = purged_walk_forward_splits(days, n_splits, horizon, embargo, min_train)
 
-    model_result = train_lgbm_regressor(panel, FEATURE_COLS, "label", splits)
+    model_result = train_lgbm_regressor(panel, FEATURE_COLS, "label", splits, record_history=True)
     baseline_result = mean_baseline(panel, "label", splits)
 
     metrics = {
@@ -173,6 +173,14 @@ def train(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     final_model.booster_.save_model(str(run_dir / "model.txt"))
+    # The loss curve. Written as its own artifact rather than folded into
+    # manifest.json because it is two arrays per fold of a few hundred
+    # floats each, and the manifest is read on every model load — by
+    # `load_model`, by the registry, by every rank. A curve nobody needs at
+    # scoring time should not be parsed at scoring time.
+    (run_dir / "history.json").write_text(
+        json.dumps({str(fold): curves for fold, curves in model_result.history.items()}, indent=2)
+    )
     (run_dir / "features.json").write_text(
         json.dumps({"feature_cols": FEATURE_COLS, "target": "label", "config_hash": _config_hash(target, horizon, FEATURE_COLS)}, indent=2)
     )

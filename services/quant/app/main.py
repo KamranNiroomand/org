@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.classify import SymbolRow, classify_universe
 from app.exit import ExitTarget, compute_initial_exit_target, evaluate_exit
+from app.performance import model_performance
 from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import (
     RankedContract,
@@ -322,6 +323,17 @@ class RankResponse(BaseModel):
     model_beats_baseline: bool
     model_information_coefficient: float
     contracts: list[RankedContractResponse]
+
+
+@app.get("/stock/performance")
+def stock_performance(target: str = "dir") -> dict:
+    """The model-performance dashboard's data, computed in Python.
+
+    A pass-through on the Node side by design — see performance.py's module
+    docstring on why model-quality statistics must have exactly one
+    definition, and why trading P&L is deliberately not in this payload.
+    """
+    return model_performance(target)
 
 
 @app.post("/rank", response_model=RankResponse)
