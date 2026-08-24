@@ -239,6 +239,46 @@ class TestPayload:
 
         assert payload["loss_curve"]["0"]["train"] == [7.0]
 
+    def test_a_specific_run_can_be_requested(self, registry, tmp_path) -> None:
+        # "Per training run" — a reader looking at an older run's curves
+        # must not be silently shown the champion's instead.
+        _insert(
+            registry, "champ", "2026-08-20T00:00:00Z", {}, status="champion",
+            history={"0": {"train": [1.0], "validation": [1.0]}},
+        )
+        _insert(
+            registry, "older", "2026-08-19T00:00:00Z", {},
+            history={"0": {"train": [9.0], "validation": [9.0]}},
+        )
+
+        payload = perf.model_performance("dir", tmp_path, run_id="older")
+
+        assert payload["featured_run_id"] == "older"
+        assert payload["loss_curve"]["0"]["train"] == [9.0]
+        # ...and it must not claim a challenger is the live model.
+        assert payload["featured_is_champion"] is False
+
+    def test_an_unknown_run_falls_back_rather_than_erroring(self, registry, tmp_path) -> None:
+        # A stale link, or a run pruned since the page loaded, should show
+        # the champion's curve rather than a blank page.
+        _insert(registry, "champ", "2026-08-20T00:00:00Z", {}, status="champion")
+
+        payload = perf.model_performance("dir", tmp_path, run_id="does-not-exist")
+
+        assert payload["featured_run_id"] == "champ"
+        assert payload["featured_is_champion"] is True
+
+    def test_each_run_says_whether_it_has_a_curve_without_shipping_it(self, registry, tmp_path) -> None:
+        # The flag is what lets the UI offer only the runs that have one,
+        # without inlining every run's few hundred floats per fold.
+        _insert(registry, "with", "2026-08-20T00:00:00Z", {}, history={"0": {"train": [1.0]}})
+        _insert(registry, "without", "2026-08-21T00:00:00Z", {})
+
+        runs = {r["run_id"]: r for r in perf.model_performance("dir", tmp_path)["runs"]}
+
+        assert runs["with"]["has_loss_curve"] is True
+        assert runs["without"]["has_loss_curve"] is False
+
     def test_an_empty_registry_is_a_valid_payload(self, registry, tmp_path) -> None:
         payload = perf.model_performance("dir", tmp_path)
         assert payload["runs"] == []

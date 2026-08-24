@@ -334,6 +334,9 @@ export interface ModelPerformance {
     registered_at: string;
     status: string;
     metrics: Record<string, number | boolean | null | undefined>;
+    /** Whether this run has a curve, without shipping it — lets the UI
+     * offer only the runs that have one. */
+    has_loss_curve: boolean;
   }>;
   /** The run the dashboard should lead with — the champion when one
    * exists. Distinct from `latest_run_id` on purpose: the system serves
@@ -347,10 +350,14 @@ export interface ModelPerformance {
   loss_curve: Record<string, { train?: number[]; validation?: number[] }>;
 }
 
-export async function modelPerformance(target = 'dir'): Promise<ModelPerformance> {
+export async function modelPerformance(target = 'dir', run?: string): Promise<ModelPerformance> {
   let res: Response;
+  const query = new URLSearchParams({ target });
+  // Only one run's curve travels per request — see performance.py on why
+  // inlining every run's would grow the payload without bound.
+  if (run) query.set('run', run);
   try {
-    res = await fetch(`${config.market.quantUrl}/stock/performance?target=${encodeURIComponent(target)}`, {
+    res = await fetch(`${config.market.quantUrl}/stock/performance?${query}`, {
       signal: AbortSignal.timeout(20_000),
     });
   } catch (err) {
