@@ -40,7 +40,7 @@ from .cv import purged_walk_forward_splits
 from .db import read_bars
 from .features import build_feature_panel
 from .labels import direction_bucket, forward_return
-from .metrics import information_coefficient, rmse
+from .metrics import ic_summary, information_coefficient, rmse
 from .models import beats_baseline, mean_baseline, train_lgbm_regressor
 
 FEATURE_COLS = [
@@ -112,6 +112,7 @@ def train(
     embargo: int = 2,
     min_train_days: int | None = None,
     output_dir: Path | None = None,
+    n_trials: int = 1,
 ) -> Path:
     panel = build_panel(target, horizon)
     if panel.height < 200:
@@ -128,10 +129,31 @@ def train(
     baseline_result = mean_baseline(panel, "label", splits)
 
     metrics = {
+        # RMSE against a fold-mean predictor is kept for continuity, but it is
+        # not a useful gate at the effect sizes this problem has. Expected R²
+        # is roughly IC², so an IC of 0.02 — a respectable cross-sectional
+        # number — implies R² ≈ 0.04%, far below what RMSE can resolve against
+        # a mean predictor. Published best-in-class stock-level out-of-sample
+        # R² is itself only ~0.3-0.4% (Gu, Kelly & Xiu, RFS 2020). Failing
+        # `beats_baseline` therefore says almost nothing; read the IC block.
         "model_rmse": rmse(model_result.actual, model_result.predicted),
         "baseline_rmse": rmse(baseline_result.actual, baseline_result.predicted),
         "beats_baseline": beats_baseline(model_result, baseline_result),
+        # Pooled over every symbol-day. Retained only so the historical series
+        # on `model_runs` stays comparable — see the docstring on
+        # `information_coefficient` for why this number reads high.
         "information_coefficient": information_coefficient(model_result.actual, model_result.predicted),
+        # The honest read: daily cross-sectional rank IC, its dispersion, and
+        # a t-statistic on non-overlapping periods against a
+        # multiple-testing-aware hurdle.
+        **ic_summary(
+            model_result.days,
+            model_result.actual,
+            model_result.predicted,
+            horizon=horizon,
+            n_trials=n_trials,
+        ),
+        "n_trials": n_trials,
         "n_folds": len(model_result.folds),
         "n_test_rows": int(len(model_result.actual)),
         "n_train_days": len(days),
@@ -174,11 +196,24 @@ def train(
         )
     )
 
+    verdict = "CLEARS" if metrics["ic_clears_hurdle"] else "does NOT clear"
     print(f"\nTrained: {run_id}")
     print(f"  {metrics['n_train_days']} days, {metrics['n_symbols']} symbols, {metrics['n_test_rows']} out-of-fold rows")
-    print(f"  model RMSE {metrics['model_rmse']:.5f} vs baseline {metrics['baseline_rmse']:.5f}"
-          f" — {'beats' if metrics['beats_baseline'] else 'DOES NOT beat'} baseline")
-    print(f"  information coefficient: {metrics['information_coefficient']:.4f}")
+    print(
+        f"  daily cross-sectional rank IC: {metrics['ic_mean']:+.4f} "
+        f"(std {metrics['ic_std']:.4f}, ICIR {metrics['icir']:+.3f}, "
+        f"hit rate {metrics['ic_hit_rate']:.0%} over {metrics['ic_n_days']} days)"
+    )
+    print(
+        f"  t = {metrics['ic_t_stat']:+.2f} on {metrics['ic_n_effective']} non-overlapping periods "
+        f"vs hurdle {metrics['ic_t_hurdle']:.2f} for {metrics['n_trials']} trial(s) — {verdict}"
+    )
+    print(f"  daily Pearson IC {metrics['ic_mean_pearson']:+.4f} (gap vs rank flags outlier dependence)")
+    print(
+        f"  [legacy, not a gate] pooled IC {metrics['information_coefficient']:.4f}; "
+        f"RMSE {metrics['model_rmse']:.5f} vs baseline {metrics['baseline_rmse']:.5f} "
+        f"({'beats' if metrics['beats_baseline'] else 'does not beat'})"
+    )
     print(f"  artifact: {run_dir}\n")
 
     return run_dir
@@ -191,6 +226,19 @@ def main() -> None:
     parser.add_argument("--n-splits", type=int, default=4)
     parser.add_argument("--embargo", type=int, default=2)
     parser.add_argument("--min-train-days", type=int, default=None)
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=1,
+        help=(
+            "How many distinct configurations have been tried in this line of "
+            "work — every feature set, horizon, target and hyperparameter "
+            "combination considered, not just the runs that were kept. Raises "
+            "the t-statistic hurdle the IC must clear, because the more "
+            "configurations you look at, the better the luckiest one looks. "
+            "Leaving this at 1 while iterating quietly understates the bar."
+        ),
+    )
     args = parser.parse_args()
 
     train(
@@ -199,6 +247,7 @@ def main() -> None:
         n_splits=args.n_splits,
         embargo=args.embargo,
         min_train_days=args.min_train_days,
+        n_trials=args.n_trials,
     )
 
 
