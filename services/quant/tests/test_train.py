@@ -10,7 +10,7 @@ import json
 import lightgbm as lgb
 import pytest
 
-from app.train import FEATURE_COLS, build_panel, train
+from app.train import _config_hash, FEATURE_COLS, build_panel, train
 
 
 def _have_enough_bars() -> bool:
@@ -74,3 +74,32 @@ class TestTrainEndToEnd:
         # handful of rows and hand back a confident-looking manifest.
         with pytest.raises(SystemExit, match="too few"):
             train(target="dir", horizon=2000, n_splits=3, embargo=2, output_dir=tmp_path)
+
+
+class TestConfigHash:
+    """Anything that changes the fitted model must change the run id."""
+
+    def test_early_stopping_setting_changes_the_hash(self) -> None:
+        # It did not, and the three runs measuring early stopping all
+        # produced run_id 2026-08-24-dir-h5-f47646104951 and wrote into the
+        # same artifact directory — leaving the registry's champion
+        # pointing at the worst of the three. `models:pull` compounds such
+        # a collision rather than correcting it: a reader already holding
+        # the directory keeps whichever version arrived first.
+        cols = ["momentum_21d", "momentum_63d"]
+        hashes = {_config_hash("dir", 5, cols, es) for es in (None, 10, 50)}
+
+        assert len(hashes) == 3
+
+    def test_target_horizon_and_features_still_change_it(self) -> None:
+        cols = ["momentum_21d"]
+        base = _config_hash("dir", 5, cols, None)
+        assert _config_hash("vrp", 5, cols, None) != base
+        assert _config_hash("dir", 10, cols, None) != base
+        assert _config_hash("dir", 5, [*cols, "extra"], None) != base
+
+    def test_is_stable_for_an_unchanged_configuration(self) -> None:
+        # A hash that moved on its own would make every run look like a new
+        # configuration and defeat the point.
+        cols = ["momentum_21d", "momentum_63d"]
+        assert _config_hash("dir", 5, cols, 50) == _config_hash("dir", 5, cols, 50)

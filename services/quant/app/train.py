@@ -75,8 +75,38 @@ def _git_sha() -> str | None:
         return None  # a missing git sha should not fail a training run
 
 
-def _config_hash(target: str, horizon: int, feature_cols: list[str]) -> str:
-    payload = json.dumps({"target": target, "horizon": horizon, "features": feature_cols}, sort_keys=True)
+def _config_hash(
+    target: str,
+    horizon: int,
+    feature_cols: list[str],
+    early_stopping_rounds: int | None = None,
+) -> str:
+    """Identifies a training configuration. Anything that changes the
+    fitted model must be in here.
+
+    `early_stopping_rounds` is included because leaving it out collided
+    immediately: the three runs measuring it — off, patience 50, patience
+    10 — all produced run_id `2026-08-24-dir-h5-f47646104951` and wrote
+    into the same artifact directory, so the last one left the registry's
+    champion pointing at the *worst* of the three. Restoring it took a
+    retrain, a re-register, a re-snapshot and a re-pull on both machines.
+
+    `models:pull` compounds a collision rather than correcting it: a reader
+    already holding the directory keeps whichever version arrived first.
+
+    Still not covered, and worth knowing: feature *implementations*. Two
+    different definitions of the same column name hash identically, which
+    has also happened. A source hash over features.py would close that.
+    """
+    payload = json.dumps(
+        {
+            "target": target,
+            "horizon": horizon,
+            "features": feature_cols,
+            "early_stopping_rounds": early_stopping_rounds,
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
@@ -110,6 +140,7 @@ def train(
     min_train_days: int | None = None,
     output_dir: Path | None = None,
     n_trials: int = 1,
+    early_stopping_rounds: int | None = None,
 ) -> Path:
     panel = build_panel(target, horizon)
     if panel.height < 200:
@@ -122,7 +153,16 @@ def train(
     min_train = min_train_days or max(60, len(days) // (n_splits + 2))
     splits = purged_walk_forward_splits(days, n_splits, horizon, embargo, min_train)
 
-    model_result = train_lgbm_regressor(panel, FEATURE_COLS, "label", splits, record_history=True)
+    model_result = train_lgbm_regressor(
+        panel,
+        FEATURE_COLS,
+        "label",
+        splits,
+        record_history=True,
+        early_stopping_rounds=early_stopping_rounds,
+        horizon=horizon,
+        embargo=embargo,
+    )
     baseline_result = mean_baseline(panel, "label", splits)
 
     metrics = {
@@ -151,6 +191,11 @@ def train(
             n_trials=n_trials,
         ),
         "n_trials": n_trials,
+        # What early stopping chose per fold, when it ran — so a run's
+        # round counts are recoverable from the registry rather than only
+        # from a terminal that has since scrolled away.
+        "early_stopping_rounds": early_stopping_rounds,
+        "best_rounds": model_result.best_rounds,
         "n_folds": len(model_result.folds),
         "n_test_rows": int(len(model_result.actual)),
         "n_train_days": len(days),
@@ -164,10 +209,22 @@ def train(
     import lightgbm as lgb
     from .models import DEFAULT_LGBM_PARAMS
 
-    final_model = lgb.LGBMRegressor(**DEFAULT_LGBM_PARAMS)
+    final_params = dict(DEFAULT_LGBM_PARAMS)
+    if model_result.best_rounds:
+        # The deployed model gets the *median* fold's round count, not the
+        # default 100. Median rather than mean because a single fold whose
+        # inner split barely fit can pick an extreme count, and rather than
+        # max because the whole point is to stop before the noise-fitting
+        # the curve exposed. A refit on all data with a count learned from
+        # folds is the standard construction; it never touches the test
+        # blocks, which is what keeps the reported metrics out-of-fold.
+        chosen = sorted(model_result.best_rounds.values())
+        final_params["n_estimators"] = chosen[len(chosen) // 2]
+    final_model = lgb.LGBMRegressor(**final_params)
     final_model.fit(panel[FEATURE_COLS].to_numpy(), panel["label"].to_numpy())
 
-    run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{_config_hash(target, horizon, FEATURE_COLS)}"
+    config_hash = _config_hash(target, horizon, FEATURE_COLS, early_stopping_rounds)
+    run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{config_hash}"
     base_dir = output_dir or (Path.home() / ".org" / "market" / "models")
     run_dir = base_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -182,7 +239,7 @@ def train(
         json.dumps({str(fold): curves for fold, curves in model_result.history.items()}, indent=2)
     )
     (run_dir / "features.json").write_text(
-        json.dumps({"feature_cols": FEATURE_COLS, "target": "label", "config_hash": _config_hash(target, horizon, FEATURE_COLS)}, indent=2)
+        json.dumps({"feature_cols": FEATURE_COLS, "target": "label", "config_hash": config_hash}, indent=2)
     )
     (run_dir / "manifest.json").write_text(
         json.dumps(
@@ -232,6 +289,18 @@ def main() -> None:
     parser.add_argument("--embargo", type=int, default=2)
     parser.add_argument("--min-train-days", type=int, default=None)
     parser.add_argument(
+        "--early-stopping-rounds",
+        type=int,
+        default=None,
+        help=(
+            "Stop each fold's fit once a purged inner validation split has not "
+            "improved for this many rounds. The inner split is carved from the "
+            "*training* days with the same purge gap as the outer one, so round "
+            "selection never touches the test block the reported metrics are "
+            "computed on. Off by default until measured."
+        ),
+    )
+    parser.add_argument(
         "--n-trials",
         type=int,
         default=1,
@@ -253,6 +322,7 @@ def main() -> None:
         embargo=args.embargo,
         min_train_days=args.min_train_days,
         n_trials=args.n_trials,
+        early_stopping_rounds=args.early_stopping_rounds,
     )
 
 
