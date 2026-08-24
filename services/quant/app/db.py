@@ -374,3 +374,21 @@ def read_champion_run(target: str = "dir") -> dict | None:
     if row is None:
         return None
     return {"run_id": row[0], "artifact_dir": row[1], "status": row[2], "promoted_at": row[3]}
+
+
+def prior_trading_day(trading_day: str) -> str | None:
+    """The captured trading day immediately before `trading_day`, or None.
+
+    Drives the staleness screen in `screens.py`: a quote is only provably
+    stale relative to a previous capture, and "previous" must mean the
+    corpus's own prior day rather than calendar arithmetic — weekends,
+    holidays and missed captures all make calendar-yesterday a day with no
+    data, which would silently disable the screen exactly when capture is
+    patchy.
+    """
+    with reading() as conn:
+        row = conn.execute(
+            "SELECT MAX(trading_day) FROM option_quotes WHERE trading_day < ?",
+            (trading_day,),
+        ).fetchone()
+    return row[0] if row and row[0] else None

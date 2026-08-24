@@ -45,9 +45,10 @@ from pathlib import Path
 import lightgbm as lgb
 import polars as pl
 
-from .db import read_bars, read_champion_run, read_quotes, read_risk_free_curve
+from .db import prior_trading_day, read_bars, read_champion_run, read_quotes, read_risk_free_curve
 from .features import build_feature_panel
 from .pricing import norm_cdf
+from .screens import screen_quotes
 from .har import InsufficientHistory, forecast_vol_by_symbol
 from .vol import rolling_realized_vol
 
@@ -578,6 +579,8 @@ def rank_day(
         trading_day, model_dir, vol_window, force
     )
 
+    prior_day = prior_trading_day(trading_day)
+    screen_drops: dict[str, int] = {}
     ranked: list[RankedContract] = []
     for symbol, drift in drift_by_symbol.items():
         # A drift that landed exactly on the cap isn't a large-but-real
@@ -598,6 +601,19 @@ def rank_day(
         quotes = read_quotes(symbol, trading_day, liquid_only=True)
         if quotes.height == 0:
             continue
+        # The literature's quote screens, applied before anything is priced
+        # — see screens.py for the $122,440 stale-print incident that made
+        # them non-optional and the papers the thresholds come from. The
+        # vol-forecast ratio is computed on the *screened* chain too: a
+        # 447% stale IV distorts the median exactly like it distorts a
+        # ranking.
+        prior = read_quotes(symbol, prior_day, liquid_only=True) if prior_day else None
+        screened = screen_quotes(quotes, prior)
+        for reason, n in screened.dropped.items():
+            screen_drops[reason] = screen_drops.get(reason, 0) + n
+        quotes = screened.passed
+        if quotes.height == 0:
+            continue
         vol_ratio = _vol_forecast_ratio(vol, quotes)
         ranked.extend(
             rank_underlying(
@@ -611,6 +627,14 @@ def rank_day(
                 max_capital=max_capital,
             )
         )
+
+    # The screens' audit trail, printed rather than discarded: a screen
+    # that suddenly eats half the board must be visible, not just produce a
+    # mysteriously thin ranking. Same reasoning as the HAR fit line above.
+    if screen_drops:
+        total = sum(screen_drops.values())
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(screen_drops.items()))
+        print(f"  quote screens dropped {total}: {detail}")
 
     # Before the sort and the cut, per the docstring above.
     if min_dte is not None:
@@ -856,7 +880,16 @@ def score_held_contracts(
         quotes = read_quotes(underlying, trading_day, liquid_only=False)
         if quotes.height == 0:
             continue
-        vol_ratio = _vol_forecast_ratio(vol, quotes)
+        # The vol-forecast ratio is measured on the *screened* chain, the
+        # same reference rank_day uses — one stale 447%-IV print in the
+        # median would move every held position's re-score, and a monitor
+        # that prices against different reference data than the ranker is
+        # two definitions of "what does the model think". The held
+        # contracts themselves are NOT screened out: a position you hold
+        # must always get a verdict, even one whose own quote is stale —
+        # that staleness is precisely what its health check should surface.
+        reference = screen_quotes(quotes, None).passed
+        vol_ratio = _vol_forecast_ratio(vol, reference if reference.height > 0 else quotes)
         held_quotes = quotes.filter(pl.col("occ_symbol").is_in(occ_symbols))
         if held_quotes.height == 0:
             continue
