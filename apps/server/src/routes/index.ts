@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { config } from '../config.js';
 import { encryptionAvailable } from '../crypto.js';
 import { seedDefaultRules } from '../lib/categorize.js';
+import { versionStatus } from '../lib/version.js';
 import { calendarRoutes } from './calendar.js';
 import { financeRoutes } from './finance.js';
 import { claudeRoutes } from './claude.js';
@@ -33,6 +34,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // rather than failing at the moment the user tries.
       encryption: encryptionAvailable(),
     },
+    // The commit this process is actually running, and whether the working
+    // tree has moved since. See lib/version.ts for the incident that made
+    // "merged" and "running" worth telling apart.
+    build: versionStatus(),
   }));
 
   await app.register(taskRoutes);

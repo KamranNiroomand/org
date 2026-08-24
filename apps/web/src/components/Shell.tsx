@@ -13,6 +13,7 @@ import {
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { formatDual, todayCivil } from '@org/shared';
+import { StaleBuildBanner } from './StaleBuildBanner';
 import { CommandPalette } from './CommandPalette';
 import { TimerChip } from './TimerChip';
 import { cn } from './ui';
@@ -141,6 +142,7 @@ export function Shell() {
       </aside>
 
       <main className="min-w-0 flex-1 overflow-y-auto">
+        <StaleBuildBanner />
         <Outlet />
       </main>
 

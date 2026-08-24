@@ -8,6 +8,7 @@ import { runPaperMigrations } from './db/paper/migrate.js';
 import { registerAuth } from './auth.js';
 import { registerRoutes } from './routes/index.js';
 import { startScheduler } from './lib/scheduler.js';
+import { describeBootVersion, versionStatus } from './lib/version.js';
 
 const app = Fastify({
   logger: {
@@ -46,6 +47,14 @@ async function main() {
   const where = config.bindLan
     ? `http://${config.host}:${config.port} (LAN — password required)`
     : `http://127.0.0.1:${config.port} (localhost only)`;
+  // First line after the port, deliberately: when something is wrong the
+  // first question is "is this even the code I think it is?", and for a
+  // week the log could not answer it. See lib/version.ts.
+  app.log.info(describeBootVersion());
+  const v = versionStatus();
+  if (v.dirty) {
+    app.log.warn('Working tree has uncommitted changes — the running code matches no commit exactly');
+  }
   app.log.info(`Org server on ${where}`);
   app.log.info(`Database ${config.dbPath}`);
   app.log.info(
