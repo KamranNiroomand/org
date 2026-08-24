@@ -47,6 +47,9 @@ class RunSummary:
     #: nothing, so a metric added to `train.py` appears here without a
     #: change on this side.
     metrics: dict = field(default_factory=dict)
+    #: Per-fold train/validation RMSE, straight from `model_runs.history`.
+    #: Empty for a run registered before the curve was stored.
+    history: dict = field(default_factory=dict)
 
 
 def read_run_history(target: str | None = None) -> list[RunSummary]:
@@ -60,7 +63,7 @@ def read_run_history(target: str | None = None) -> list[RunSummary]:
     a model that improved and regressed rather than a sort bug.
     """
     query = """
-        SELECT run_id, target, registered_at, status, metrics
+        SELECT run_id, target, registered_at, status, metrics, history
         FROM model_runs
     """
     params: tuple = ()
@@ -73,7 +76,7 @@ def read_run_history(target: str | None = None) -> list[RunSummary]:
         rows = conn.execute(query, params).fetchall()
 
     out: list[RunSummary] = []
-    for run_id, run_target, registered_at, status, metrics_json in rows:
+    for run_id, run_target, registered_at, status, metrics_json, history_json in rows:
         try:
             metrics = json.loads(metrics_json) if metrics_json else {}
         except (TypeError, ValueError):
@@ -82,6 +85,10 @@ def read_run_history(target: str | None = None) -> list[RunSummary]:
             # reads as "no training happened", which is a different and
             # wrong story.
             metrics = {}
+        try:
+            history = json.loads(history_json) if history_json else {}
+        except (TypeError, ValueError):
+            history = {}
         out.append(
             RunSummary(
                 run_id=run_id,
@@ -89,18 +96,25 @@ def read_run_history(target: str | None = None) -> list[RunSummary]:
                 registered_at=registered_at,
                 status=status,
                 metrics=metrics,
+                history=history if isinstance(history, dict) else {},
             )
         )
     return out
 
 
 def read_loss_curve(run_id: str, base_dir: Path | None = None) -> dict[str, dict[str, list[float]]]:
-    """Per-fold train/validation RMSE for one run, or `{}` if not recorded.
+    """Per-fold train/validation RMSE from the **artifact file**.
 
-    Empty is the normal answer for any run trained before `history.json`
-    existed, and the caller must render that as "not recorded" rather than
-    as a flat line at zero — an invented curve is worse than an absent one,
-    because it is the shape a perfectly-fit model would have.
+    The registry is the primary source now — `model_runs.history` — and
+    this is the fallback for a run registered before that column existed,
+    or one whose artifact is present on a machine the registry has not
+    caught up with. Kept because a model directory should stay
+    self-describing away from any database.
+
+    Empty is the normal answer for any run trained before the curve was
+    recorded at all, and the caller must render that as "not recorded"
+    rather than as a flat line at zero — an invented curve is worse than an
+    absent one, because it is the shape a perfectly-fit model would have.
     """
     base = base_dir or (Path.home() / ".org" / "market" / "models")
     path = base / run_id / "history.json"
@@ -158,5 +172,8 @@ def model_performance(target: str = "dir", base_dir: Path | None = None) -> dict
         # answers "what was registered last", which is a different question
         # from "what is running" and should not be used for the latter.
         "latest_run_id": runs[-1].run_id if runs else None,
-        "loss_curve": read_loss_curve(featured.run_id, base_dir) if featured else {},
+        # Registry first, artifact second. They agree for anything
+        # registered since the column existed; the fallback covers a run
+        # whose files arrived before its registry row did.
+        "loss_curve": (featured.history or read_loss_curve(featured.run_id, base_dir)) if featured else {},
     }

@@ -7,10 +7,12 @@ import { runMarketMigrations } from '../db/market/migrate.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { paperDb } from '../db/paper/index.js';
 import { runPaperMigrations } from '../db/paper/migrate.js';
-import { paperEquity, paperExitRevisions, paperMarks, paperOrders } from '../db/paper/schema.js';
+import { paperDecisionLog, paperEquity, paperExitRevisions, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { nowIso } from './util.js';
 import {
   accountCapacity,
+  decisionsForDay,
+  logDecisions,
   closeOrder,
   computeDailyEquity,
   markOpenPositions,
@@ -79,6 +81,11 @@ beforeEach(() => {
   paperDb.delete(paperMarks).run();
   paperDb.delete(paperEquity).run();
   paperDb.delete(paperExitRevisions).run();
+  // Cleared like every other paper table. Without this the decision log
+  // accumulates across files sharing one on-disk database — see the note
+  // in vitest.config.ts — and a row this file wrote surfaces in another
+  // file's assertions.
+  paperDb.delete(paperDecisionLog).run();
   paperDb.delete(paperOrders).run();
   marketDb.delete(optionQuotes).run();
   marketDb.delete(optionContracts).run();
@@ -282,6 +289,56 @@ describe('computeDailyEquity', () => {
     computeDailyEquity(today);
     const rows = paperDb.select().from(paperEquity).all().filter((e) => e.day === today);
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('logDecisions', () => {
+  it('never throws, so a broken log cannot take down the run it describes', () => {
+    // A decision log exists to make a failed or surprising run explicable.
+    // A logger that turns a partial failure into a total one destroys
+    // exactly the evidence it was added to keep, so it reports failure by
+    // return value and the caller carries on.
+    const bad = [{ day: null, occSymbol: 'X', decision: 'opened', reason: 'r' }] as unknown as Parameters<
+      typeof logDecisions
+    >[0];
+
+    expect(() => logDecisions(bad)).not.toThrow();
+    expect(logDecisions(bad)).toBe(false);
+  });
+
+  it('is a no-op for an empty batch rather than an empty insert', () => {
+    expect(logDecisions([])).toBe(true);
+  });
+
+  it('writes a batch far larger than SQLite’s parameter ceiling', () => {
+    // 8 bound columns against a 32,766-parameter cap means a single
+    // INSERT throws at 4,096 rows — and the catch would then lose the
+    // *whole* run's decisions rather than some of them, hardest to notice
+    // on exactly the biggest day. Chunked, so the size stops mattering.
+    // A day no other test uses. `operatingTradingDay()` can resolve to
+    // today's real date, so writing 5,000 rows onto it would surface in
+    // the exit-engine file's assertions.
+    const rows = Array.from({ length: 5_000 }, (_, i) => ({
+      day: '1999-01-01',
+      occSymbol: `S${i}`,
+      decision: 'rejected' as const,
+      reason: 'ev_below_bar',
+    }));
+
+    expect(logDecisions(rows)).toBe(true);
+    expect(decisionsForDay('1999-01-01')).toHaveLength(5_000);
+  });
+
+  it('round-trips a decision with its detail intact', () => {
+    logDecisions([
+      { day: '2026-08-24', occSymbol: OCC, underlying: 'NVDA', decision: 'rejected', reason: 'ev_below_bar', detail: { ev_per_risk: 0.01, bar: 0.05 } },
+    ]);
+
+    const [row] = decisionsForDay('2026-08-24');
+    expect(row?.reason).toBe('ev_below_bar');
+    expect((row?.detail as Record<string, unknown>).bar).toBe(0.05);
+    // Another day's decisions are not returned — the log is read per day.
+    expect(decisionsForDay('2026-08-25')).toEqual([]);
   });
 });
 

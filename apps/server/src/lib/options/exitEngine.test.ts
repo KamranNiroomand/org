@@ -7,11 +7,12 @@ import { runMarketMigrations } from '../../db/market/migrate.js';
 import { optionContracts } from '../../db/market/schema.js';
 import { paperDb } from '../../db/paper/index.js';
 import { runPaperMigrations } from '../../db/paper/migrate.js';
-import { paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
-import { openOrder } from '../paper.js';
+import { paperDecisionLog, paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
+import { decisionsForDay, openOrder } from '../paper.js';
 import { QuantRefusal } from '../quant.js';
 import { nowIso } from '../util.js';
 import type { ChainQuote, ChainRequest, DailyBar, OptionsProvider } from './provider.js';
+import { operatingTradingDay } from './positionHealth.js';
 import { runExitEngine, revisionsByOrder, type ExitEngineDeps } from './exitEngine.js';
 
 /**
@@ -125,6 +126,7 @@ beforeEach(() => {
   runPaperMigrations();
   paperDb.delete(paperExitRevisions).run();
   paperDb.delete(paperOrders).run();
+  paperDb.delete(paperDecisionLog).run();
   marketDb.delete(optionContracts).run();
   seedContract();
 });
@@ -140,6 +142,81 @@ describe('runExitEngine', () => {
     openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ENTRY_E4, source: 'manual' });
     const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), NEVER_REVIEW_DEPS);
     expect(summary.checked).toBe(0);
+  });
+
+  it('records a decision for every position it looked at, including the ones it left alone', async () => {
+    // A position that was checked and held is a decision too, and it is
+    // the one that makes "was this being watched at all?" answerable —
+    // the question that went unanswered for five days while three open
+    // positions were invisible to this engine.
+    const id = openManagedPosition();
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), NEVER_REVIEW_DEPS);
+
+    const rows = decisionsForDay(operatingTradingDay());
+    const held = rows.find((r) => r.occSymbol === OCC && r.decision === 'held');
+    expect(held).toBeDefined();
+    expect(held?.reason).toBe('unchanged');
+    expect((held?.detail as Record<string, unknown>).orderId).toBe(id);
+  });
+
+  it('records a close with the rule that triggered it', async () => {
+    const id = openManagedPosition();
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(0.4))), {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async () => ({
+        action: 'exit_now',
+        newTargetExitPriceE4: null,
+        newTargetExitDate: null,
+        newStopLossPriceE4: null,
+        reason: 'Live price 0.40 hit the 0.50 stop.',
+        triggeredBy: 'stop_loss',
+      }),
+    });
+
+    const exited = decisionsForDay(operatingTradingDay()).find((r) => r.decision === 'exited');
+    expect(exited?.reason).toBe('stop_loss');
+    expect((exited?.detail as Record<string, unknown>).orderId).toBe(id);
+    expect((exited?.detail as Record<string, unknown>).exitPriceE4).toBe(toE4(0.4));
+  });
+
+  it('records an adoption, so a position joining the engine is visible', async () => {
+    openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: ENTRY_E4, source: 'model' });
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), {
+      ...NEVER_REVIEW_DEPS,
+      computeExitTarget: async () => ({
+        targetE4: { targetExitPriceE4: toE4(1.5), stopLossPriceE4: toE4(0.5), targetExitDate: '2026-09-01' },
+        refusal: null,
+        horizon: 5,
+        modelRunId: 'test',
+      }),
+    });
+
+    const adopted = decisionsForDay(operatingTradingDay()).find((r) => r.decision === 'adopted');
+    expect(adopted?.reason).toBe('had_no_exit_plan');
+    expect((adopted?.detail as Record<string, unknown>).stopLossPriceE4).toBe(toE4(0.5));
+  });
+
+  it('records a ratchet as a target move', async () => {
+    openManagedPosition();
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(3.0))), {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async () => ({
+        action: 'hold',
+        newTargetExitPriceE4: toE4(1.5),
+        newTargetExitDate: '2026-09-01',
+        newStopLossPriceE4: toE4(2.1),
+        reason: 'stop raised',
+        triggeredBy: 'trail_raised',
+      }),
+    });
+
+    const moved = decisionsForDay(operatingTradingDay()).find((r) => r.decision === 'target_moved');
+    expect(moved?.reason).toBe('trailing_stop_raised');
+    expect((moved?.detail as Record<string, unknown>).newStopLossPriceE4).toBe(toE4(2.1));
   });
 
   it('persists a ratcheted stop so the trail actually survives to the next pass', async () => {

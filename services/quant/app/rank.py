@@ -623,6 +623,31 @@ def rank_day(
 
 
 @dataclass
+class EntryRejection:
+    """A candidate that was considered and not taken, and why.
+
+    Every `continue` in `select_entries` used to discard this. The board is
+    cut to the top few hundred by EV, a handful are opened, and the
+    reasoning for every other one vanished when the function returned — so
+    "why didn't it buy X?" had no answer at all, ever. Reconstructing one
+    such decision by hand cost an afternoon on 2026-08-24, for a position
+    that turned out to be a bad price print.
+
+    `reason` is a fixed vocabulary rather than prose because the point is
+    to be able to *count* these: "how often does the DTE band bind" and
+    "how often do we run out of capital" are the questions that tell you
+    which constraint is actually shaping the book.
+    """
+
+    contract: RankedContract
+    reason: str
+    #: The specific numbers behind the reason — the bar and the value that
+    #: missed it — so a rejection can be re-judged later without rerunning
+    #: the day.
+    detail: dict
+
+
+@dataclass
 class EntrySelection:
     """One accepted candidate and how much of it to buy.
 
@@ -652,7 +677,7 @@ def select_entries(
     min_dte: int,
     max_dte: int,
     multiplier: int = DEFAULT_MULTIPLIER,
-) -> list[EntrySelection]:
+) -> tuple[list[EntrySelection], list[EntryRejection]]:
     """Capital-constrained entry selection — how many positions to open
     today, *and how much of each*, decided by what the market actually
     offers rather than a fixed count and a hard-coded single contract.
@@ -711,7 +736,18 @@ def select_entries(
     room = max(0, max_concurrent_positions - open_position_count)
     budget_slots = min(room, max_new_positions)
     if budget_slots <= 0 or remaining <= 0:
-        return []
+        # Still explain every candidate rather than returning silently: a
+        # day that opened nothing because the book was full looks exactly
+        # like a day the market offered nothing, and those call for
+        # opposite responses.
+        reason = "no_slots_remaining" if budget_slots <= 0 else "no_capital_remaining"
+        detail = {
+            "open_position_count": open_position_count,
+            "max_concurrent_positions": max_concurrent_positions,
+            "max_new_positions": max_new_positions,
+            "available_capital": available_capital,
+        }
+        return [], [EntryRejection(contract=c, reason=reason, detail=detail) for c in candidates]
 
     # Equal weight across every position the *book* can hold, not across
     # the ones this one day may open. Dividing by the daily cap instead
@@ -726,18 +762,38 @@ def select_entries(
 
     taken_underlyings: set[str] = set()
     selected: list[EntrySelection] = []
+    rejected: list[EntryRejection] = []
+
+    def reject(c: RankedContract, reason: str, **detail: object) -> None:
+        rejected.append(EntryRejection(contract=c, reason=reason, detail=dict(detail)))
 
     for c in sorted(candidates, key=lambda c: c.ev, reverse=True):
         if len(selected) >= budget_slots:
-            break
-        if c.ev_per_risk < min_ev_per_risk or c.prob_profit < min_prob_profit:
+            # Not "it failed a bar" — it never got looked at, which is a
+            # different fact and the one that says the cap was binding.
+            reject(c, "day_full", slots=budget_slots)
+            continue
+        if c.ev_per_risk < min_ev_per_risk:
+            reject(c, "ev_below_bar", ev_per_risk=c.ev_per_risk, bar=min_ev_per_risk)
+            continue
+        if c.prob_profit < min_prob_profit:
+            reject(c, "prob_below_bar", prob_profit=c.prob_profit, bar=min_prob_profit)
             continue
         if c.dte < min_dte or c.dte > max_dte:
+            reject(c, "dte_outside_band", dte=c.dte, min_dte=min_dte, max_dte=max_dte)
             continue
-        if c.underlying in held_underlyings or c.underlying in taken_underlyings:
+        if c.underlying in held_underlyings:
+            reject(c, "underlying_already_held", underlying=c.underlying)
+            continue
+        if c.underlying in taken_underlyings:
+            reject(c, "underlying_taken_today", underlying=c.underlying)
             continue
         cost_per_contract = c.market_price * multiplier
-        if cost_per_contract <= 0 or cost_per_contract > remaining:
+        if cost_per_contract <= 0:
+            reject(c, "price_not_positive", market_price=c.market_price)
+            continue
+        if cost_per_contract > remaining:
+            reject(c, "unaffordable", cost_per_contract=cost_per_contract, remaining=remaining)
             continue
         # At least one contract — a candidate that fits in `remaining` at
         # all is worth a single unit even when one unit overshoots its
@@ -751,7 +807,7 @@ def select_entries(
         taken_underlyings.add(c.underlying)
         remaining -= cost
 
-    return selected
+    return selected, rejected
 
 
 def score_held_contracts(

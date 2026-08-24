@@ -26,7 +26,7 @@ def registry(tmp_path, monkeypatch):
         """
         CREATE TABLE model_runs (
             run_id TEXT PRIMARY KEY, target TEXT, registered_at TEXT,
-            status TEXT, metrics TEXT
+            status TEXT, metrics TEXT, history TEXT
         )
         """
     )
@@ -51,11 +51,26 @@ class _reading:
         return False
 
 
-def _insert(db: Path, run_id: str, registered_at: str, metrics: dict | None, target="dir", status="challenger"):
+def _insert(
+    db: Path,
+    run_id: str,
+    registered_at: str,
+    metrics: dict | None,
+    target="dir",
+    status="challenger",
+    history: dict | None = None,
+):
     conn = sqlite3.connect(db)
     conn.execute(
-        "INSERT INTO model_runs VALUES (?,?,?,?,?)",
-        (run_id, target, registered_at, status, json.dumps(metrics) if metrics is not None else None),
+        "INSERT INTO model_runs VALUES (?,?,?,?,?,?)",
+        (
+            run_id,
+            target,
+            registered_at,
+            status,
+            json.dumps(metrics) if metrics is not None else None,
+            json.dumps(history) if history is not None else None,
+        ),
     )
     conn.commit()
     conn.close()
@@ -91,7 +106,9 @@ class TestRunHistory:
         # — a different and wrong story from "this run's metrics are
         # corrupt".
         conn = sqlite3.connect(registry)
-        conn.execute("INSERT INTO model_runs VALUES ('bad','dir','2026-08-20T00:00:00Z','challenger','{not json')")
+        conn.execute(
+            "INSERT INTO model_runs VALUES ('bad','dir','2026-08-20T00:00:00Z','challenger','{not json',NULL)"
+        )
         conn.commit()
         conn.close()
 
@@ -181,16 +198,46 @@ class TestPayload:
     def test_the_curve_follows_the_featured_run(self, registry, tmp_path) -> None:
         # A champion's curve, not the newest run's — otherwise the page
         # would show one model's overfitting under another model's name.
-        _insert(registry, "champ", "2026-08-20T00:00:00Z", {}, status="champion")
-        _insert(registry, "newer", "2026-08-24T00:00:00Z", {}, status="challenger")
-        for name, val in (("champ", 1.0), ("newer", 9.0)):
-            d = tmp_path / name
-            d.mkdir()
-            (d / "history.json").write_text(json.dumps({"0": {"train": [val], "validation": [val]}}))
+        _insert(
+            registry, "champ", "2026-08-20T00:00:00Z", {}, status="champion",
+            history={"0": {"train": [1.0], "validation": [1.0]}},
+        )
+        _insert(
+            registry, "newer", "2026-08-24T00:00:00Z", {}, status="challenger",
+            history={"0": {"train": [9.0], "validation": [9.0]}},
+        )
 
         payload = perf.model_performance("dir", tmp_path)
 
         assert payload["loss_curve"]["0"]["train"] == [1.0]
+
+    def test_the_registry_curve_wins_over_a_stale_artifact_file(self, registry, tmp_path) -> None:
+        # Both exist for a run that was retrained: the registry row is
+        # rewritten on re-registration, the artifact file may not have been
+        # re-pulled. The database is the source of truth.
+        _insert(
+            registry, "run", "2026-08-24T00:00:00Z", {},
+            history={"0": {"train": [1.0], "validation": [1.0]}},
+        )
+        d = tmp_path / "run"
+        d.mkdir()
+        (d / "history.json").write_text(json.dumps({"0": {"train": [99.0], "validation": [99.0]}}))
+
+        payload = perf.model_performance("dir", tmp_path)
+
+        assert payload["loss_curve"]["0"]["train"] == [1.0]
+
+    def test_falls_back_to_the_artifact_when_the_registry_has_no_curve(self, registry, tmp_path) -> None:
+        # A run registered before the column existed, or whose files
+        # arrived before its registry row did.
+        _insert(registry, "run", "2026-08-24T00:00:00Z", {})
+        d = tmp_path / "run"
+        d.mkdir()
+        (d / "history.json").write_text(json.dumps({"0": {"train": [7.0], "validation": [7.0]}}))
+
+        payload = perf.model_performance("dir", tmp_path)
+
+        assert payload["loss_curve"]["0"]["train"] == [7.0]
 
     def test_an_empty_registry_is_a_valid_payload(self, registry, tmp_path) -> None:
         payload = perf.model_performance("dir", tmp_path)

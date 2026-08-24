@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { paperDb } from '../db/paper/index.js';
-import { paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
+import { paperDecisionLog, paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { newId, nowIso } from './util.js';
 
 /**
@@ -421,4 +421,57 @@ export function computeDailyEquity(day: string): void {
       },
     })
     .run();
+}
+
+
+/**
+ * Append decisions to `paper_decision_log`.
+ *
+ * Batched in one statement because auto-entry produces one row per
+ * candidate considered — a few hundred a day — and a per-row insert on a
+ * cron path is a needless few hundred round trips.
+ *
+ * Deliberately never throws. A decision log that can take down the run it
+ * is describing is worse than no decision log: the whole point is to make
+ * a failed or surprising run explicable, and a logger that turns a partial
+ * failure into a total one destroys exactly the evidence it exists to
+ * keep. Callers get `false` and carry on.
+ */
+export function logDecisions(rows: Array<Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>>): boolean {
+  if (rows.length === 0) return true;
+  const createdAt = nowIso();
+  let ok = true;
+  // Chunked, because a multi-row INSERT binds 8 parameters per row and
+  // SQLite caps a statement at 32,766 of them — 4,096 rows throws `too
+  // many SQL variables` (verified against this project's SQLite 3.53.4).
+  // Auto-entry logs at most `top` candidates, currently 400, so today it
+  // is nowhere near; but `top` is a tunable request field and the universe
+  // is meant to grow, and crossing the limit with a single statement would
+  // lose the *whole* run's decisions rather than some of them — hardest to
+  // notice on exactly the biggest and most interesting day.
+  for (let i = 0; i < rows.length; i += DECISION_BATCH_SIZE) {
+    const chunk = rows.slice(i, i + DECISION_BATCH_SIZE);
+    try {
+      paperDb.insert(paperDecisionLog).values(chunk.map((r) => ({ ...r, createdAt }))).run();
+    } catch {
+      // One bad chunk must not cost the rest: a partial log beats none.
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+/** Rows per INSERT. 8 bound columns against SQLite's 32,766-parameter
+ * ceiling leaves 4,095; 1,000 keeps a wide margin and still batches. */
+const DECISION_BATCH_SIZE = 1_000;
+
+/** Decisions for one trading day, newest first — what the UI and any
+ * "why didn't it buy X" question read. */
+export function decisionsForDay(day: string): Array<typeof paperDecisionLog.$inferSelect> {
+  return paperDb
+    .select()
+    .from(paperDecisionLog)
+    .where(eq(paperDecisionLog.day, day))
+    .orderBy(desc(paperDecisionLog.id))
+    .all();
 }

@@ -509,6 +509,104 @@ class TestRankDayEndToEnd:
             assert abs(c.forecast_drift) < MAX_ANNUALIZED_DRIFT, c.occ_symbol
 
 
+class TestSelectEntriesRejections:
+    """Why a candidate was *not* taken.
+
+    Every `continue` in the selection loop used to discard this. The board
+    is cut to a few hundred by EV, a handful are opened, and the reasoning
+    for the rest vanished when the function returned — so "why didn't it
+    buy X?" had no answer at all. Reconstructing a single such decision by
+    hand cost an afternoon on 2026-08-24.
+    """
+
+    def _select(self, candidates, **overrides):
+        defaults = dict(
+            held_underlyings=set(),
+            available_capital=10_000.0,
+            open_position_count=0,
+            max_concurrent_positions=10,
+            max_new_positions=5,
+            min_ev_per_risk=0.05,
+            min_prob_profit=0.5,
+            min_dte=14,
+            max_dte=60,
+        )
+        defaults.update(overrides)
+        return select_entries(candidates, **defaults)
+
+    def _reasons(self, candidates, **overrides) -> dict[str, str]:
+        _, rejected = self._select(candidates, **overrides)
+        return {r.contract.underlying: r.reason for r in rejected}
+
+    def test_each_bar_names_itself(self) -> None:
+        # A fixed vocabulary rather than prose, because the point is to be
+        # able to count them: which constraint actually shapes the book is
+        # a question only a GROUP BY can answer.
+        reasons = self._reasons(
+            [
+                _candidate(underlying="LOWEV", occ_symbol="LOWEV 260918C00100000", ev_per_risk=0.01),
+                _candidate(underlying="LOWP", occ_symbol="LOWP  260918C00100000", prob_profit=0.2),
+                _candidate(underlying="FAR", occ_symbol="FAR   260918C00100000", dte=400),
+                _candidate(underlying="RICH", occ_symbol="RICH  260918C00100000", market_price=9_999.0),
+            ]
+        )
+
+        assert reasons["LOWEV"] == "ev_below_bar"
+        assert reasons["LOWP"] == "prob_below_bar"
+        assert reasons["FAR"] == "dte_outside_band"
+        assert reasons["RICH"] == "unaffordable"
+
+    def test_already_held_and_taken_today_are_different_reasons(self) -> None:
+        # Both mean "one position per underlying", but one is a standing
+        # position and the other is this run's own earlier pick. Counting
+        # them together would hide how often the book is simply full of a
+        # name versus how concentrated a single day's board is.
+        first = _candidate(underlying="DUP", occ_symbol="DUP1  260918C00100000", ev=50.0)
+        second = _candidate(underlying="DUP", occ_symbol="DUP2  260918C00100000", ev=40.0)
+        held = _candidate(underlying="HELD", occ_symbol="HELD  260918C00100000", ev=30.0)
+
+        reasons = self._reasons([first, second, held], held_underlyings={"HELD"})
+
+        assert reasons["HELD"] == "underlying_already_held"
+        # `second` shares DUP with `first`, which was taken this run.
+        assert any(r.reason == "underlying_taken_today" for _, r in [("", r) for r in self._select([first, second, held], held_underlyings={"HELD"})[1]])
+
+    def test_a_full_book_explains_every_candidate_rather_than_returning_silently(self) -> None:
+        # A day that opened nothing because the book was full looks exactly
+        # like a day the market offered nothing, and those call for
+        # opposite responses.
+        cands = [_candidate(underlying=f"S{i}", occ_symbol=f"S{i}    260918C00100000") for i in range(3)]
+
+        selected, rejected = self._select(cands, open_position_count=10, max_concurrent_positions=10)
+
+        assert selected == []
+        assert len(rejected) == 3
+        assert {r.reason for r in rejected} == {"no_slots_remaining"}
+
+    def test_candidates_past_the_daily_cap_say_they_were_never_looked_at(self) -> None:
+        # Not "it failed a bar" — it never got evaluated, which is the fact
+        # that says the cap was binding.
+        cands = [
+            _candidate(underlying=f"S{i}", occ_symbol=f"S{i}    260918C00100000", ev=100.0 - i)
+            for i in range(4)
+        ]
+
+        selected, rejected = self._select(cands, max_new_positions=2)
+
+        assert len(selected) == 2
+        assert {r.reason for r in rejected} == {"day_full"}
+
+    def test_the_detail_carries_the_bar_and_the_value_that_missed_it(self) -> None:
+        # So a rejection can be re-judged later without rerunning the day.
+        _, rejected = self._select(
+            [_candidate(underlying="LOWP", occ_symbol="LOWP  260918C00100000", prob_profit=0.2)]
+        )
+
+        detail = rejected[0].detail
+        assert detail["prob_profit"] == pytest.approx(0.2)
+        assert detail["bar"] == pytest.approx(0.5)
+
+
 class TestScoreHeldContracts:
     """The position-health path: re-scores specific, already-held
     contracts, rather than picking fresh candidates like `rank_day`.
@@ -620,7 +718,10 @@ class TestSelectEntries:
             max_dte=60,
         )
         defaults.update(overrides)
-        return select_entries(candidates, **defaults)
+        # Selections only — `select_entries` also returns rejections now,
+        # and the tests below are about what gets taken. `_select_with_reasons`
+        # is for the ones about why something did not.
+        return select_entries(candidates, **defaults)[0]
 
     def test_opens_every_independent_affordable_candidate_up_to_the_daily_cap(self) -> None:
         candidates = [
@@ -708,7 +809,10 @@ class TestSelectEntriesSizing:
             max_dte=60,
         )
         defaults.update(overrides)
-        return select_entries(candidates, **defaults)
+        # Selections only — `select_entries` also returns rejections now,
+        # and the tests below are about what gets taken. `_select_with_reasons`
+        # is for the ones about why something did not.
+        return select_entries(candidates, **defaults)[0]
 
     def test_two_differently_priced_contracts_get_near_equal_dollar_weight(self) -> None:
         # $10,000 over 10 concurrent slots is a $1,000 budget each. A $200
@@ -819,7 +923,10 @@ class TestSelectEntriesDteBand:
             max_dte=60,
         )
         defaults.update(overrides)
-        return select_entries(candidates, **defaults)
+        # Selections only — `select_entries` also returns rejections now,
+        # and the tests below are about what gets taken. `_select_with_reasons`
+        # is for the ones about why something did not.
+        return select_entries(candidates, **defaults)[0]
 
     def test_a_far_dated_contract_is_excluded_however_good_its_ev_looks(self) -> None:
         # 400 DTE with the board's best EV. That EV is the fixed-horizon
