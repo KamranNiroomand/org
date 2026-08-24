@@ -184,6 +184,7 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
         "volume": pl.Int64,
         "open_interest": pl.Int64,
         "underlying_price": pl.Float64,
+        "underlying_asof_day": pl.Utf8,
         "iv": pl.Float64,
         "delta": pl.Float64,
         "gamma": pl.Float64,
@@ -195,7 +196,8 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
         WITH ranked AS (
             SELECT c.underlying, c.expiry, c.type, c.strike_e4,
                    q.occ_symbol, q.bid_e4, q.ask_e4, q.close_e4, q.volume, q.open_interest,
-                   q.underlying_e4, q.iv_bps, q.delta, q.gamma, q.vega, q.theta, q.liquid,
+                   q.underlying_e4, q.underlying_asof_day,
+                   q.iv_bps, q.delta, q.gamma, q.vega, q.theta, q.liquid,
                    ROW_NUMBER() OVER (PARTITION BY q.occ_symbol ORDER BY q.as_of DESC) AS rn
             FROM option_quotes q
             JOIN option_contracts c ON c.occ_symbol = q.occ_symbol
@@ -242,6 +244,10 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
             "volume": [r["volume"] for r in rows],
             "open_interest": [r["open_interest"] for r in rows],
             "underlying_price": [r["underlying_e4"] / _E4 for r in rows],
+            # Null on rows captured before provenance existed — unknown, not
+            # fresh. screens.py skips the stale-spot check on null rather
+            # than treating absence as evidence either way.
+            "underlying_asof_day": [r["underlying_asof_day"] for r in rows],
             "iv": [(r["iv_bps"] / 10_000.0) if r["iv_bps"] is not None else None for r in rows],
             "delta": [r["delta"] for r in rows],
             "gamma": [r["gamma"] for r in rows],

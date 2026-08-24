@@ -92,6 +92,7 @@ function liveQuote(bidE4: number | null): ChainQuote {
     volume: 10,
     openInterest: 10,
     underlyingE4: toE4(230),
+    underlyingAsOfDay: '2026-08-18',
     asOf: nowIso(),
     tradingDay: '2026-08-18',
     vendorIv: null,

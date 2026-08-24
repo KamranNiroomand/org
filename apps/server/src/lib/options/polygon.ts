@@ -306,13 +306,24 @@ export class PolygonProvider implements OptionsProvider {
    * measured for moneyness, so this is fetched once per chain rather than
    * read per row.
    */
-  private async latestUnderlyingE4(symbol: string, day: string): Promise<number | null> {
+  private async latestUnderlyingE4(
+    symbol: string,
+    day: string,
+  ): Promise<{ closeE4: number; asOfDay: string } | null> {
     const from = new Date(Date.parse(`${day}T00:00:00Z`) - 10 * 86_400_000)
       .toISOString()
       .slice(0, 10);
     const bars = await this.fetchBars(symbol, from, day);
     const last = bars.at(-1);
-    return last ? last.closeE4 : null;
+    // The bar's own day travels with its close. `bars.at(-1)` over a
+    // trailing window silently hands back a prior day's close whenever the
+    // requested day's aggregate is not yet published — a stale spot that
+    // shifts every spot-dependent screen on exactly the gap days that
+    // matter. The date makes that condition checkable downstream instead
+    // of invisible; this function deliberately does not decide what to do
+    // about it, because "how stale is too stale" is a screening policy,
+    // not a fetch concern.
+    return last ? { closeE4: last.closeE4, asOfDay: last.day } : null;
   }
 
   private async fetchLiveChain(request: ChainRequest): Promise<ChainQuote[]> {
@@ -320,7 +331,7 @@ export class PolygonProvider implements OptionsProvider {
     const tradingDay = asOf.slice(0, 10);
     const underlying = request.underlying.toUpperCase();
 
-    const [raw, underlyingE4] = await Promise.all([
+    const [raw, spot] = await Promise.all([
       getAll<SnapshotResult>(`/v3/snapshot/options/${encodeURIComponent(underlying)}?limit=250`),
       this.latestUnderlyingE4(underlying, tradingDay),
     ]);
@@ -328,7 +339,7 @@ export class PolygonProvider implements OptionsProvider {
     // Without a spot nothing here can be priced or placed on a moneyness axis,
     // and inventing one would corrupt every derived value. Better to capture
     // nothing for this symbol tonight and say so than to store a fiction.
-    if (underlyingE4 === null || underlyingE4 <= 0) {
+    if (spot === null || spot.closeE4 <= 0) {
       throw new ProviderError(
         `no recent close for ${underlying} — cannot anchor its chain to a spot price`,
       );
@@ -373,7 +384,8 @@ export class PolygonProvider implements OptionsProvider {
         closeE4: typeof r.day?.close === 'number' ? toE4(r.day.close) : null,
         volume: r.day?.volume ?? 0,
         openInterest: r.open_interest ?? 0,
-        underlyingE4,
+        underlyingE4: spot.closeE4,
+        underlyingAsOfDay: spot.asOfDay,
         asOf,
         tradingDay,
         vendorIv: typeof r.implied_volatility === 'number' ? r.implied_volatility : null,
