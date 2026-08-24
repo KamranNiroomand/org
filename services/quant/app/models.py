@@ -49,6 +49,21 @@ class TrainingResult:
     def predicted(self) -> np.ndarray:
         return np.concatenate([f.predicted for f in self.folds]) if self.folds else np.array([])
 
+    @property
+    def days(self) -> np.ndarray:
+        """The trading day each out-of-fold row belongs to.
+
+        Needed to score the model the way it is actually used: a *daily
+        cross-sectional* comparison of predictions against outcomes. Pooling
+        every symbol-day into one correlation instead measures something
+        else — see `metrics.daily_ic_series`.
+        """
+        return (
+            np.concatenate([np.asarray(f.days, dtype=object) for f in self.folds])
+            if self.folds
+            else np.array([], dtype=object)
+        )
+
 
 # Deliberately small and shallow. This is a first model over a corpus that,
 # as of this build, does not yet have a year of real captured chains behind

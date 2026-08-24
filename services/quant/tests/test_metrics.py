@@ -13,11 +13,14 @@ from sklearn.metrics import log_loss as sk_log_loss
 
 from app.metrics import (
     brier_score,
+    daily_ic_series,
     deflated_sharpe_ratio,
+    ic_summary,
     information_coefficient,
     log_loss,
     mae,
     max_drawdown,
+    rank_information_coefficient,
     rmse,
     sharpe_ratio,
 )
@@ -150,3 +153,110 @@ class TestDeflatedSharpeRatio:
             deflated_sharpe_ratio(1.0, n_trials=1, n_returns=1)
         with pytest.raises(ValueError, match="n_trials"):
             deflated_sharpe_ratio(1.0, n_trials=0, n_returns=100)
+
+
+class TestRankInformationCoefficient:
+    def test_perfect_monotone_but_nonlinear_relationship_scores_one(self) -> None:
+        # Rank IC's whole point: the system buys the top-ranked contract, so
+        # a forecast that orders names perfectly is perfect, even if its
+        # magnitudes are wildly uncalibrated.
+        actual = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        predicted = np.array([0.01, 0.02, 0.5, 0.51, 100.0])
+        assert rank_information_coefficient(actual, predicted) == pytest.approx(1.0)
+        assert information_coefficient(actual, predicted) < 0.8
+
+    def test_one_outlier_can_flip_pearson_but_not_rank(self) -> None:
+        # Five names ranked exactly right, plus one earnings-gap outlier the
+        # model ranked last. Pearson follows the outlier; rank does not.
+        actual = np.array([1.0, 2.0, 3.0, 4.0, 5.0, -50.0])
+        predicted = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        assert information_coefficient(actual, predicted) < 0
+        assert rank_information_coefficient(actual, predicted) > 0
+
+    def test_ties_share_averaged_ranks(self) -> None:
+        actual = np.array([1.0, 1.0, 2.0, 3.0])
+        predicted = np.array([5.0, 5.0, 6.0, 7.0])
+        assert rank_information_coefficient(actual, predicted) == pytest.approx(1.0)
+
+
+class TestDailyIcSeries:
+    def test_pooling_manufactures_skill_that_daily_ic_correctly_reports_as_zero(self) -> None:
+        # The bug this whole change exists to fix, as a fixture. Two days.
+        # Within each day the model's ordering is exactly backwards — real
+        # cross-sectional skill is negative. But day 2 is a market-wide up
+        # day and the model predicted higher numbers that day, so pooling
+        # every symbol-day into one correlation reports strong positive
+        # "skill" that the system could never trade on.
+        days = np.array(["d1"] * 5 + ["d2"] * 5, dtype=object)
+        predicted = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 11.0, 12.0, 13.0, 14.0, 15.0])
+        actual = np.array([0.05, 0.04, 0.03, 0.02, 0.01, 0.95, 0.94, 0.93, 0.92, 0.91])
+
+        pooled = information_coefficient(actual, predicted)
+        _, dailies = daily_ic_series(days, actual, predicted, min_names_per_day=5)
+
+        assert pooled > 0.9  # looks excellent
+        assert all(ic < 0 for ic in dailies)  # every single day is actually backwards
+
+    def test_days_with_too_few_names_are_dropped(self) -> None:
+        days = np.array(["d1"] * 5 + ["d2"] * 2, dtype=object)
+        actual = np.arange(7, dtype=float)
+        predicted = np.arange(7, dtype=float)
+        kept, ics = daily_ic_series(days, actual, predicted, min_names_per_day=5)
+        assert kept == ["d1"]
+        assert len(ics) == 1
+
+    def test_series_is_returned_in_day_order(self) -> None:
+        days = np.array(["d3"] * 5 + ["d1"] * 5 + ["d2"] * 5, dtype=object)
+        actual = np.tile(np.arange(5, dtype=float), 3)
+        predicted = np.tile(np.arange(5, dtype=float), 3)
+        kept, _ = daily_ic_series(days, actual, predicted, min_names_per_day=5)
+        assert kept == ["d1", "d2", "d3"]
+
+
+class TestIcSummary:
+    def _perfect_days(self, n_days: int, n_names: int = 10):
+        days, actual, predicted = [], [], []
+        for d in range(n_days):
+            days.extend([f"d{d:03d}"] * n_names)
+            actual.extend(np.arange(n_names, dtype=float))
+            predicted.extend(np.arange(n_names, dtype=float))
+        return np.array(days, dtype=object), np.array(actual), np.array(predicted)
+
+    def test_effective_sample_divides_by_the_label_horizon(self) -> None:
+        # 50 daily ICs from a 5-day forward label are not 50 independent
+        # observations — consecutive labels overlap. The t-statistic must be
+        # built on the ~10 non-overlapping periods instead.
+        days, actual, predicted = self._perfect_days(50)
+        s = ic_summary(days, actual, predicted, horizon=5)
+        assert s["ic_n_days"] == 50
+        assert s["ic_n_effective"] == 10
+
+    def test_hurdle_rises_with_the_number_of_configurations_tried(self) -> None:
+        days, actual, predicted = self._perfect_days(50)
+        one = ic_summary(days, actual, predicted, horizon=5, n_trials=1)
+        many = ic_summary(days, actual, predicted, horizon=5, n_trials=100)
+        assert many["ic_t_hurdle"] > one["ic_t_hurdle"] * 1.5
+        # A model picked as the best of 100 attempts is held to a real bar.
+        assert many["ic_t_hurdle"] > 5.0
+
+    def test_a_pure_noise_forecast_does_not_clear_the_hurdle(self) -> None:
+        rng = np.random.default_rng(0)
+        n_days, n_names = 120, 30
+        days = np.array([f"d{d:03d}" for d in range(n_days) for _ in range(n_names)], dtype=object)
+        actual = rng.normal(size=n_days * n_names)
+        predicted = rng.normal(size=n_days * n_names)
+        s = ic_summary(days, actual, predicted, horizon=5, n_trials=10)
+        assert abs(s["ic_t_stat"]) < s["ic_t_hurdle"]
+        assert s["ic_clears_hurdle"] is False
+
+    def test_hit_rate_and_dispersion_are_reported(self) -> None:
+        days, actual, predicted = self._perfect_days(20)
+        s = ic_summary(days, actual, predicted, horizon=1)
+        assert s["ic_hit_rate"] == pytest.approx(1.0)
+        assert s["ic_mean"] == pytest.approx(1.0)
+        assert s["ic_std"] == pytest.approx(0.0)
+
+    def test_empty_input_is_zeroed_rather_than_a_crash(self) -> None:
+        s = ic_summary(np.array([], dtype=object), np.array([]), np.array([]))
+        assert s["ic_n_days"] == 0
+        assert s["ic_clears_hurdle"] is False

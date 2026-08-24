@@ -27,14 +27,157 @@ def mae(actual: np.ndarray, predicted: np.ndarray) -> float:
 
 
 def information_coefficient(actual: np.ndarray, predicted: np.ndarray) -> float:
-    """Correlation between predicted and realized — the standard cross-
-    sectional measure of whether a forecast carries any information at all,
-    independent of its scale or calibration.
+    """Pearson correlation between predicted and realized, over whatever rows
+    it is given.
+
+    **Not the headline metric, and not safe to call on a whole panel.** Called
+    on every symbol-day at once it measures the wrong thing: most of the
+    variance in a pooled panel is *time-series* (the whole market up on up
+    days), so a model that only knows "stocks tend to rise" scores well
+    without any ability to tell one stock from another — which is the only
+    ability this system actually uses when it picks a contract to buy. It also
+    destroys the per-day series needed to put a standard error on the result,
+    so a pooled number invites the naive `1/sqrt(n_rows)` reading, which
+    treats 560 same-day symbols as 560 independent observations.
+
+    Retained because it is what `ic_summary` applies *within* a single day,
+    and because the metric under this name is stored on every historical
+    `model_runs` row — redefining it in place would silently corrupt that
+    series. New work should read `ic_summary`.
     """
-    a, p = np.asarray(actual), np.asarray(predicted)
-    if np.std(a) == 0 or np.std(p) == 0:
+    a, p = np.asarray(actual, dtype=float), np.asarray(predicted, dtype=float)
+    if a.size < 2 or np.std(a) == 0 or np.std(p) == 0:
         return 0.0
     return float(np.corrcoef(a, p)[0, 1])
+
+
+def _rankdata(x: np.ndarray) -> np.ndarray:
+    """Average ranks, ties shared — `scipy.stats.rankdata`'s default, done
+    here to keep this module dependency-free like the rest of it."""
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty(len(x), dtype=float)
+    ranks[order] = np.arange(1, len(x) + 1, dtype=float)
+    # Average the ranks within each group of tied values.
+    sorted_x = x[order]
+    start = 0
+    for i in range(1, len(x) + 1):
+        if i == len(x) or sorted_x[i] != sorted_x[start]:
+            if i - start > 1:
+                ranks[order[start:i]] = ranks[order[start:i]].mean()
+            start = i
+    return ranks
+
+
+def rank_information_coefficient(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Spearman correlation — the headline form of IC.
+
+    Preferred over Pearson on raw forward returns because those are
+    fat-tailed: a couple of earnings gaps can set the sign of a Pearson IC
+    outright. Rank correlation also matches how the forecast is used — the
+    system buys the *top-ranked* contract, so monotone ordering is what
+    matters, not whether the predicted magnitude is calibrated.
+    """
+    a, p = np.asarray(actual, dtype=float), np.asarray(predicted, dtype=float)
+    if a.size < 2:
+        return 0.0
+    return information_coefficient(_rankdata(a), _rankdata(p))
+
+
+def daily_ic_series(
+    days: np.ndarray,
+    actual: np.ndarray,
+    predicted: np.ndarray,
+    rank: bool = True,
+    min_names_per_day: int = 5,
+) -> tuple[list[str], np.ndarray]:
+    """One cross-sectional IC per trading day, in day order.
+
+    This is the standard construction: correlate predictions against outcomes
+    *within* each day, across the names available that day, and treat the
+    resulting series as the sample. Days with fewer than `min_names_per_day`
+    names are dropped rather than contributing a correlation over two or
+    three points, which is mostly noise and would inflate the series' own
+    variance.
+    """
+    days_arr = np.asarray(days, dtype=object)
+    a = np.asarray(actual, dtype=float)
+    p = np.asarray(predicted, dtype=float)
+    measure = rank_information_coefficient if rank else information_coefficient
+
+    out_days: list[str] = []
+    out_ics: list[float] = []
+    for day in sorted({str(d) for d in days_arr}):
+        mask = days_arr == day
+        if int(mask.sum()) < min_names_per_day:
+            continue
+        out_days.append(day)
+        out_ics.append(measure(a[mask], p[mask]))
+    return out_days, np.asarray(out_ics, dtype=float)
+
+
+def ic_summary(
+    days: np.ndarray,
+    actual: np.ndarray,
+    predicted: np.ndarray,
+    horizon: int = 1,
+    n_trials: int = 1,
+    min_names_per_day: int = 5,
+) -> dict[str, float | int]:
+    """Everything needed to judge whether an IC is real, in one place.
+
+    Three corrections the pooled number cannot express:
+
+    * **Effective sample size.** With a `horizon`-day forward label,
+      consecutive daily ICs overlap and are not independent observations. The
+      t-statistic here uses `n_days / horizon` — the count of genuinely
+      non-overlapping periods — which for a 5-day label is 5x more
+      conservative than counting days, and vastly more so than counting rows.
+    * **Dispersion.** `ICIR = mean / std` of the daily series. Published
+      cross-sectional IC series routinely have standard deviations several
+      times their mean, so a respectable-looking mean IC can still be
+      indistinguishable from zero.
+    * **Multiple testing.** Every configuration tried is a chance to find
+      noise that looks like signal. `t_hurdle` scales the usual ~2.0 by
+      `sqrt(2 * ln(n_trials))` (the standard order of the expected maximum of
+      `n_trials` draws), so a model chosen after twenty attempts is held to a
+      higher bar than one chosen first try. `n_trials` must count every
+      configuration *considered*, not every run saved.
+    """
+    day_list, ics = daily_ic_series(
+        days, actual, predicted, rank=True, min_names_per_day=min_names_per_day
+    )
+    _, ics_pearson = daily_ic_series(
+        days, actual, predicted, rank=False, min_names_per_day=min_names_per_day
+    )
+    n_days = len(day_list)
+    if n_days == 0:
+        return {
+            "ic_mean": 0.0, "ic_std": 0.0, "icir": 0.0, "ic_t_stat": 0.0,
+            "ic_hit_rate": 0.0, "ic_n_days": 0, "ic_n_effective": 0,
+            "ic_mean_pearson": 0.0, "ic_t_hurdle": 0.0, "ic_clears_hurdle": False,
+        }
+
+    mean = float(np.mean(ics))
+    std = float(np.std(ics, ddof=1)) if n_days > 1 else 0.0
+    icir = mean / std if std > 0 else 0.0
+    n_eff = max(1, n_days // max(1, horizon))
+    t_stat = icir * math.sqrt(n_eff)
+    hurdle = 2.0 * math.sqrt(2.0 * math.log(n_trials)) if n_trials > 1 else 2.0
+
+    return {
+        "ic_mean": mean,
+        "ic_std": std,
+        "icir": icir,
+        "ic_t_stat": t_stat,
+        "ic_hit_rate": float(np.mean(ics > 0)),
+        "ic_n_days": n_days,
+        "ic_n_effective": n_eff,
+        # A large gap against the rank version means the Pearson number is
+        # being driven by a handful of outlier returns.
+        "ic_mean_pearson": float(np.mean(ics_pearson)),
+        "ic_t_hurdle": hurdle,
+        "ic_clears_hurdle": bool(abs(t_stat) >= hurdle),
+    }
 
 
 _EPS = 1e-15
