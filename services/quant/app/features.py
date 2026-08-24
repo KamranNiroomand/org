@@ -313,6 +313,107 @@ def residual_momentum(
     return out.filter(pl.col(mom_col).is_not_null() & pl.col(idio_col).is_not_null())
 
 
+REVERSAL_WINDOW = 21
+TURNOVER_WINDOW = 21
+AMIHUD_WINDOW = 21
+
+
+def reversal_and_liquidity(
+    bars: pl.DataFrame,
+    reversal_window: int = REVERSAL_WINDOW,
+    turnover_window: int = TURNOVER_WINDOW,
+    amihud_window: int = AMIHUD_WINDOW,
+) -> pl.DataFrame:
+    """Short-term reversal, its turnover interaction, and Amihud
+    illiquidity — three features aimed at the same underlying fact.
+
+    The existing panel is almost entirely *momentum*: nine of its seventeen
+    columns are a price change over some window. Momentum and reversal are
+    the same measurement read with opposite sign at different horizons, so
+    piling on more windows of one cannot express the other. These three
+    add the axis the panel does not have — how a move is *funded* and how
+    hard it is to trade against.
+
+    **`reversal_21d`** is the negated trailing return (Jegadeesh, *Journal
+    of Finance* 1990). It is deliberately the sign-flip of `momentum_21d`
+    rather than a new number, which is worth stating plainly: as a lone
+    feature it is exactly collinear with a column already in the panel and
+    a tree model gains nothing from it. It exists to be *interacted*, below.
+
+    **`reversal_x_turnover_21d`** is the feature that actually carries
+    information. Reversal is not a constant effect: it is concentrated in
+    high-turnover names, because turnover proxies for how much of the move
+    was liquidity demand rather than news (Avramov, Chordia & Goyal,
+    *Journal of Finance* 2006). A stock that fell 10% on quiet volume and
+    one that fell 10% on frantic volume have the same momentum and very
+    different expected reversals, and no window of `momentum_Xd` can tell
+    them apart. True turnover needs shares outstanding, which this corpus
+    does not carry, so volume relative to its own trailing average stands
+    in — a within-name measure, which is arguably the better conditioning
+    variable anyway since it does not confound with size.
+
+    **`amihud_illiquidity_21d`** is mean `|return| / dollar volume`
+    (Amihud, *Journal of Financial Markets* 2002) — price impact per dollar
+    traded. It matters twice here. As a return predictor it is the standard
+    illiquidity premium, and as a *filter* it is the honest reading of why
+    an option on an illiquid underlying can look mispriced: the model's
+    forecast edge is largest exactly where the edge cannot be captured.
+    Scaled by 1e6 because raw values on liquid large caps are ~1e-10, and a
+    feature whose entire range sits in the tenth decimal place is a
+    needless invitation to floating-point noise in a tree split.
+    """
+    cols = {
+        f"reversal_{reversal_window}d": pl.Float64,
+        f"reversal_x_turnover_{turnover_window}d": pl.Float64,
+        f"amihud_illiquidity_{amihud_window}d": pl.Float64,
+    }
+    schema = {"symbol": pl.Utf8, "day": pl.Utf8, **cols}
+    if bars.height == 0:
+        return pl.DataFrame(schema=schema)
+
+    rev_col = f"reversal_{reversal_window}d"
+    turn_col = f"reversal_x_turnover_{turnover_window}d"
+    amihud_col = f"amihud_illiquidity_{amihud_window}d"
+
+    df = bars.sort(["symbol", "day"]).with_columns(
+        (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("_ret"),
+        (pl.col("close") * pl.col("volume")).alias("_dollar_volume"),
+    )
+
+    df = df.with_columns(
+        # Negated trailing return: a fall becomes a positive reversal signal.
+        (-(pl.col("close") / pl.col("close").shift(reversal_window).over("symbol") - 1.0)).alias(rev_col),
+        # Volume against its own trailing mean. A zero or missing mean is a
+        # name that did not trade over the window, where the ratio is
+        # undefined rather than 1.0 — claiming "normal turnover" for a
+        # stock that did not trade would be a fabricated conditioning
+        # value, and it would fabricate it for precisely the illiquid names
+        # this function exists to flag.
+        pl.col("volume")
+        .rolling_mean(window_size=turnover_window)
+        .over("symbol")
+        .alias("_avg_volume"),
+        (pl.col("_ret").abs() / pl.col("_dollar_volume"))
+        .rolling_mean(window_size=amihud_window)
+        .over("symbol")
+        .alias("_amihud_raw"),
+    )
+
+    df = df.with_columns(
+        pl.when(pl.col("_avg_volume") > 0)
+        .then(pl.col("volume") / pl.col("_avg_volume"))
+        .otherwise(None)
+        .alias("_turnover_ratio"),
+    )
+
+    df = df.with_columns(
+        (pl.col(rev_col) * pl.col("_turnover_ratio")).alias(turn_col),
+        (pl.col("_amihud_raw") * 1e6).alias(amihud_col),
+    )
+
+    return df.select(["symbol", "day", rev_col, turn_col, amihud_col]).drop_nulls()
+
+
 def build_feature_panel(bars: pl.DataFrame) -> pl.DataFrame:
     """Every bars-only feature above, inner-joined into one panel.
 
@@ -334,6 +435,7 @@ def build_feature_panel(bars: pl.DataFrame) -> pl.DataFrame:
         max_daily_return(bars),
         signed_volume_imbalance(bars),
         residual_momentum(bars),  # needs the full cross-sectional panel — see its own docstring
+        reversal_and_liquidity(bars),
     ):
         features = features.join(extra, on=["symbol", "day"], how="inner")
     return features

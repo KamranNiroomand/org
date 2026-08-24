@@ -21,12 +21,14 @@ import pytest
 
 from app.features import (
     atm_iv_by_expiry,
+    build_feature_panel,
     close_location_value,
     iv_rank,
     max_daily_return,
     overnight_intraday_returns,
     put_call_ratios,
     residual_momentum,
+    reversal_and_liquidity,
     risk_reversal_25d,
     signed_volume_imbalance,
     term_slope,
@@ -525,3 +527,82 @@ class TestResidualMomentum:
         assert out.height == 0
         assert "residual_momentum_63d" in out.columns
         assert "idio_vol_ratio_21d" in out.columns
+
+
+class TestReversalAndLiquidity:
+    """The three features aimed at the axis the panel did not have — how a
+    move was funded, and how hard it is to trade against."""
+
+    def _bars(self, closes: list[float], volumes: list[int], symbol: str = "AAA") -> pl.DataFrame:
+        from datetime import date, timedelta
+
+        d0 = date(2026, 1, 1)
+        return pl.DataFrame(
+            {
+                "symbol": [symbol] * len(closes),
+                "day": [(d0 + timedelta(days=i)).isoformat() for i in range(len(closes))],
+                "open": closes,
+                "high": [c * 1.01 for c in closes],
+                "low": [c * 0.99 for c in closes],
+                "close": closes,
+                "volume": volumes,
+            }
+        )
+
+    def test_reversal_is_the_negated_trailing_return(self) -> None:
+        # Stated explicitly because it is the point: as a lone feature this
+        # is exactly collinear with momentum_21d and adds nothing. It earns
+        # its place only through the turnover interaction.
+        closes = [100.0] * 22 + [80.0]
+        out = reversal_and_liquidity(self._bars(closes, [1_000] * 23))
+        last = out.sort("day").tail(1).to_dicts()[0]
+        assert last["reversal_21d"] == pytest.approx(0.20, rel=1e-9)
+
+    def test_the_interaction_separates_two_identical_price_moves(self) -> None:
+        """The whole reason the interaction exists. Two stocks fall 20% over
+        the same window; one on quiet volume, one on frantic volume. Their
+        momentum is identical and no window of `momentum_Xd` can tell them
+        apart, but their expected reversal is not the same (Avramov,
+        Chordia & Goyal 2006)."""
+        closes = [100.0] * 22 + [80.0]
+        quiet = reversal_and_liquidity(self._bars(closes, [1_000] * 22 + [200]))
+        frantic = reversal_and_liquidity(self._bars(closes, [1_000] * 22 + [9_000]))
+
+        q = quiet.sort("day").tail(1).to_dicts()[0]
+        f = frantic.sort("day").tail(1).to_dicts()[0]
+
+        assert q["reversal_21d"] == pytest.approx(f["reversal_21d"], rel=1e-9)  # identical momentum
+        assert f["reversal_x_turnover_21d"] > q["reversal_x_turnover_21d"] * 4  # very different signal
+
+    def test_a_name_that_did_not_trade_yields_no_row_rather_than_normal_turnover(self) -> None:
+        # Defaulting the ratio to 1.0 would fabricate "normal turnover" for
+        # exactly the illiquid names these features exist to flag.
+        out = reversal_and_liquidity(self._bars([100.0] * 25, [0] * 25))
+        assert out.height == 0
+
+    def test_illiquidity_ranks_a_thin_name_above_a_liquid_one(self) -> None:
+        # Amihud is price impact per dollar traded: the same price path on
+        # a thousandth of the volume is a far less liquid name.
+        closes = [100.0 * (1.0 + 0.01 * (-1) ** i) for i in range(25)]
+        liquid = reversal_and_liquidity(self._bars(closes, [10_000_000] * 25))
+        thin = reversal_and_liquidity(self._bars(closes, [10_000] * 25))
+
+        lo = liquid.sort("day").tail(1).to_dicts()[0]["amihud_illiquidity_21d"]
+        hi = thin.sort("day").tail(1).to_dicts()[0]["amihud_illiquidity_21d"]
+        assert hi > lo
+        assert hi == pytest.approx(lo * 1000, rel=1e-6)
+
+    def test_empty_input_returns_the_declared_schema(self) -> None:
+        out = reversal_and_liquidity(pl.DataFrame(schema={"symbol": pl.Utf8, "day": pl.Utf8}))
+        assert out.height == 0
+        assert "amihud_illiquidity_21d" in out.columns
+
+    def test_the_panel_carries_the_new_columns(self) -> None:
+        # build_feature_panel is the single place train.py and rank.py both
+        # build from; a feature added to one and not the panel is the exact
+        # drift that shipped a ColumnNotFoundError once already.
+        closes = [100.0 + i * 0.5 for i in range(90)]
+        bars = pl.concat([self._bars(closes, [1_000] * 90, s) for s in ("AAA", "BBB")])
+        panel = build_feature_panel(bars)
+        for col in ("reversal_21d", "reversal_x_turnover_21d", "amihud_illiquidity_21d"):
+            assert col in panel.columns
