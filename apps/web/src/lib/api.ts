@@ -64,6 +64,18 @@ export interface Health {
     claude: boolean;
     encryption: boolean;
   };
+  /** What commit the server process is actually running — see
+   * `apps/server/src/lib/version.ts` and `StaleBuildBanner`. Every field is
+   * nullable because outside a git checkout none of it is knowable, and
+   * `drifted: null` must not be read as "no drift". */
+  build: {
+    bootSha: string | null;
+    headSha: string | null;
+    branch: string | null;
+    drifted: boolean | null;
+    dirty: boolean | null;
+    startedAt: string;
+  };
 }
 
 export interface TransactionRow {
