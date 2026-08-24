@@ -139,15 +139,16 @@ def vrp_label(current_iv: float, forward_realized_vol_value: float) -> float:
     occur on trading days. See the module docstring in `vol.py` for why both
     choices are individually correct and not the same choice.
 
-    Subtracting them anyway, rather than reconciling the bases first, is a
-    deliberate simplification: the wedge is on the order of
-    `sqrt(365/252) ≈ 1.20x` and is *roughly* constant, so it should mostly
-    wash out as a level shift a model absorbs into its intercept rather than
-    as noise it has to fight — but that is a claim, not yet a verified one.
-    Verifying it needs real captured implied vol history to check against,
-    which does not exist yet. Until it does, treat comparisons of *absolute*
-    VRP level across horizons with more caution than comparisons of its
-    *sign* or its *rank* within one horizon.
+    Subtracting them directly is correct to first order: under the same
+    trading-time model the two annualizations compose — see `vol.py`'s
+    module docstring for the algebra, and for why "reconciling" them with a
+    `sqrt(365/252) ≈ 1.20x` multiplier (which an earlier version of this
+    comment wrongly said was owed) would *introduce* a 20% error rather
+    than remove one. What remains is second-order: holiday clustering and
+    horizon-boundary effects make the trading-days-per-calendar-day ratio
+    slightly non-constant across horizons, so treat comparisons of
+    *absolute* VRP level across horizons with a little more caution than
+    comparisons of its *sign* or its *rank* within one horizon.
     """
     return current_iv - forward_realized_vol_value
 

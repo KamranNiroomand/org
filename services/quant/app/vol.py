@@ -21,13 +21,20 @@ contributes to calendar time but not, in general, to price variance, so
 annualizing by the count of trading days (252) rather than calendar days (365)
 is the standard, unbiased choice for measuring the return process itself.
 
-The two conventions are therefore not directly comparable, and subtracting one
-from the other — which is exactly what the volatility-risk-premium label does
-— carries a small, day-count-dependent wedge on the order of
-`sqrt(365/252) ≈ 1.20x`. That is flagged rather than "fixed" here, because
-fixing it means picking a specific reconciliation and there is not yet enough
-captured implied-vol history to validate one empirically, the way the
-calendar-day choice above was validated. See `labels.py::vrp_label`.
+The two conventions **compose correctly rather than conflict** — an earlier
+version of this docstring claimed a `sqrt(365/252) ≈ 1.20x` wedge between
+them, and review showed that claim was wrong in a way that had become
+load-bearing (`screens.py` pairs this module's 252-annualized σ with a
+calendar-365 √T, which the old text said was a mismatch). Expand the
+product: `(σ_252)² · T_cal/365 = σ_daily² · 252 · T_cal/365 =
+σ_daily² · E[trading days in T_cal]` — exactly the total variance realized
+over the horizon. The 252 in the numerator and the 365 in the denominator
+are *supposed* to cancel that way; a 252-annualized realized vol and a
+365-calendar implied vol are directly comparable as annualized numbers
+under the same trading-time model, with no correction factor. Do not
+"reconcile" them with a √(365/252) multiplier — that introduces the 20%
+error it claims to remove. See `labels.py::vrp_label` for the one place a
+residual, second-order day-count effect is acknowledged.
 """
 
 from __future__ import annotations

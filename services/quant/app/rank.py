@@ -246,7 +246,22 @@ def _vol_forecast_ratio(
     tradeable view. A ratio of 1.0 (no view) is the safe fallback whenever
     there is no market IV to compare against.
     """
-    ivs = quotes["iv"].drop_nulls()
+    # The median is taken over the fixed 0.8–1.2 ATM band, not the whole
+    # screened chain. The screens' admission band now scales with this
+    # same `realized_vol` (screens.py), so a whole-chain median would put
+    # the forecast on both sides of its own ratio: a lower forecast
+    # narrows the band, drops the smile's high-IV wings, lowers the
+    # median, and pushes the ratio back toward 1 — damping exactly the
+    # signal this function exists to express, symmetrically in both
+    # directions. A fixed-band reference cannot move when the forecast
+    # moves, and it is the same ATM reference the screens themselves
+    # standardize against.
+    atm = quotes.filter(
+        (pl.col("strike") / pl.col("underlying_price")).is_between(0.8, 1.2)
+    )
+    ivs = atm["iv"].drop_nulls()
+    if ivs.len() == 0:
+        ivs = quotes["iv"].drop_nulls()
     if ivs.len() == 0:
         return 1.0
     reference = float(ivs.median())
@@ -623,7 +638,7 @@ def rank_day(
         # vol-forecast ratio is computed on the *screened* chain too: a
         # 447% stale IV distorts the median exactly like it distorts a
         # ranking.
-        screened = screen_quotes(quotes, prior_stats)
+        screened = screen_quotes(quotes, prior_stats, trading_day=trading_day, symbol_vol=vol)
         for reason, n in screened.dropped.items():
             screen_drops[reason] = screen_drops.get(reason, 0) + n
         if not screened.staleness_ran:
@@ -924,7 +939,9 @@ def score_held_contracts(
         # out: a position you hold must always get a verdict, even one
         # whose own quote is stale — that staleness is precisely what its
         # health check should surface.
-        reference = screen_quotes(quotes.filter(pl.col("liquid")), prior_stats).passed
+        reference = screen_quotes(
+            quotes.filter(pl.col("liquid")), prior_stats, trading_day=trading_day, symbol_vol=vol
+        ).passed
         if reference.height > 0:
             vol_ratio = _vol_forecast_ratio(vol, reference)
         else:
