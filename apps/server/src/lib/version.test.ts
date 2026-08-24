@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -89,9 +89,39 @@ describe('versionStatus', () => {
     const git = (...args: string[]) =>
       execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' }).trim();
 
+    const shaBefore = git('rev-parse', 'HEAD');
     expect(git('status', '--porcelain')).toBe('');
+
     writeFileSync(join(dir, 'a.txt'), 'uncommitted edit');
+
     expect(git('status', '--porcelain')).not.toBe('');
-    expect(git('rev-parse', 'HEAD')).toBe(git('rev-parse', 'HEAD')); // sha unchanged
+    // The property being claimed: an edit makes the tree dirty without
+    // moving the commit, so the two signals cannot be conflated. The
+    // earlier version of this line compared a call to itself and would
+    // have passed even if rev-parse were removed entirely.
+    expect(git('rev-parse', 'HEAD')).toBe(shaBefore);
+  });
+
+  it('treats a clean tree and an unanswerable git as different states', () => {
+    // The bug this pins, found in review of this same file: `git status
+    // --porcelain` prints nothing for a clean tree, so folding "failed"
+    // and "empty" into one null made a failed call report a clean tree.
+    // Verified against a real failure: an unreadable index makes `status`
+    // exit 128 while `rev-parse` still succeeds, so bootSha stays non-null
+    // and cannot be used to tell the two apart.
+    const dir = throwawayRepo();
+    const run = (...args: string[]) =>
+      spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+
+    expect(run('status', '--porcelain').status).toBe(0);
+    expect(run('status', '--porcelain').stdout).toBe('');
+
+    chmodSync(join(dir, '.git', 'index'), 0o000);
+    const failed = run('status', '--porcelain');
+    chmodSync(join(dir, '.git', 'index'), 0o644);
+
+    expect(failed.status).not.toBe(0);
+    // rev-parse is unaffected, which is why bootSha proves nothing here.
+    expect(run('rev-parse', 'HEAD').status).toBe(0);
   });
 });

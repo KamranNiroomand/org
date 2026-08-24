@@ -36,7 +36,12 @@ export function StaleBuildBanner() {
   return (
     <div
       role="status"
-      className="border-b border-warning/40 bg-warning/10 px-6 py-2.5 text-[13px] leading-relaxed"
+      // Sticky, not merely first: `<main>` is the scroll container, so a
+      // banner that only sits at the top scrolls away on any long page —
+      // achieving with no click what the non-dismissible choice above was
+      // meant to prevent, and on exactly the deep list views where a stale
+      // server is most likely to matter.
+      className="sticky top-0 z-10 border-b border-warning/40 bg-warning/10 px-6 py-2.5 text-[13px] leading-relaxed backdrop-blur"
     >
       <span className="font-medium">This server is running older code than your checkout.</span>{' '}
       Booted at <code className="tnum">{booted}</code>, but{' '}
