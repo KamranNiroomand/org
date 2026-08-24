@@ -16,7 +16,7 @@ from __future__ import annotations
 import sys
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.classify import SymbolRow, classify_universe
 from app.exit import ExitTarget, compute_initial_exit_target, evaluate_exit
@@ -472,6 +472,11 @@ class SelectEntriesRequest(BaseModel):
     max_new_positions: int = Field(gt=0)
     min_ev_per_risk: float
     min_prob_profit: float = Field(ge=0, le=1)
+    #: Maturity band the forecast can actually speak to — see
+    #: `select_entries` for why a fixed-horizon drift model should not be
+    #: pricing entries at arbitrary DTE in either direction.
+    min_dte: int = Field(gt=0)
+    max_dte: int = Field(gt=0)
     #: Far wider than `/rank`'s 25, deliberately. `rank_day` cuts to the
     #: top N by EV *before* `select_entries` dedups to one contract per
     #: underlying, so a narrow cut on a concentrated board leaves nothing
@@ -482,6 +487,24 @@ class SelectEntriesRequest(BaseModel):
     #: find distinct names.
     top: int = 400
 
+    @model_validator(mode="after")
+    def _dte_band_is_ordered(self) -> SelectEntriesRequest:
+        if self.max_dte < self.min_dte:
+            # An inverted band matches nothing, and the caller would read the
+            # empty result as "the market offered nothing today" — the same
+            # misattribution the missing-horizon 409 below exists to prevent.
+            raise ValueError(f"max_dte ({self.max_dte}) is below min_dte ({self.min_dte})")
+        return self
+
+
+class SelectedEntry(BaseModel):
+    """A chosen contract and the size to take in it — see `select_entries`
+    for why sizing is equal-weight rather than proportional to EV."""
+
+    contract: RankedContractResponse
+    quantity: int
+    cost: float
+
 
 class SelectEntriesResponse(BaseModel):
     model_run_id: str
@@ -489,7 +512,7 @@ class SelectEntriesResponse(BaseModel):
     #: Every selected contract carries a non-null suggested exit plan —
     #: candidates whose plan can't be computed (see exit.py's refusal case)
     #: are excluded before selection rather than opened unmanaged.
-    selected: list[RankedContractResponse]
+    selected: list[SelectedEntry]
 
 
 @app.post("/select-entries", response_model=SelectEntriesResponse)
@@ -533,14 +556,22 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
         max_new_positions=request.max_new_positions,
         min_ev_per_risk=request.min_ev_per_risk,
         min_prob_profit=request.min_prob_profit,
+        min_dte=request.min_dte,
+        max_dte=request.max_dte,
     )
 
     return SelectEntriesResponse(
         model_run_id=manifest["run_id"],
         model_beats_baseline=manifest["metrics"]["beats_baseline"],
         selected=[
-            RankedContractResponse.from_ranked(c, entry_day=request.day, horizon=horizon)
-            for c in selected
+            SelectedEntry(
+                contract=RankedContractResponse.from_ranked(
+                    s.contract, entry_day=request.day, horizon=horizon
+                ),
+                quantity=s.quantity,
+                cost=s.cost,
+            )
+            for s in selected
         ],
     )
 

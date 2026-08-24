@@ -405,6 +405,8 @@ _SELECT_BODY = {
     "max_new_positions": 5,
     "min_ev_per_risk": 0.05,
     "min_prob_profit": 0.5,
+    "min_dte": 14,
+    "max_dte": 60,
 }
 
 
@@ -424,10 +426,10 @@ class TestSelectEntries:
         r = client.post("/select-entries", json=_SELECT_BODY)
         assert r.status_code == 200
         body = r.json()
-        assert [c["occ_symbol"] for c in body["selected"]] == [_FAKE_CONTRACT.occ_symbol]
+        assert [s["contract"]["occ_symbol"] for s in body["selected"]] == [_FAKE_CONTRACT.occ_symbol]
         # A selected contract always carries a full exit plan — that is the
         # invariant autoEntry.ts relies on when it persists targets.
-        picked = body["selected"][0]
+        picked = body["selected"][0]["contract"]
         assert picked["suggested_target_exit_price"] is not None
         assert picked["suggested_stop_loss_price"] is not None
         assert picked["suggested_target_exit_date"] is not None
@@ -459,7 +461,7 @@ class TestSelectEntries:
         # it must be dropped before allocation, not silently eat the slot.
         r = client.post("/select-entries", json={**_SELECT_BODY, "max_new_positions": 1})
         assert r.status_code == 200
-        assert [c["occ_symbol"] for c in r.json()["selected"]] == ["MSFT260116C00150000"]
+        assert [s["contract"]["occ_symbol"] for s in r.json()["selected"]] == ["MSFT260116C00150000"]
 
     def test_a_manifest_without_a_horizon_refuses_loudly(self, tmp_path, monkeypatch) -> None:
         # Without a horizon no exit plan is computable for anything, so
@@ -484,3 +486,36 @@ class TestSelectEntries:
         r = client.post("/select-entries", json={**_SELECT_BODY, "held_underlyings": ["AAPL"]})
         assert r.status_code == 200
         assert r.json()["selected"] == []
+
+    def test_each_selection_carries_a_quantity_and_a_cost(self, tmp_path, monkeypatch) -> None:
+        # $100,000 over 5 slots is $20,000 each; the fixture costs $500 a
+        # contract, so 40 units. The caller writes this quantity straight
+        # onto the order — it used to hard-code 1 regardless of price.
+        run_dir = tmp_path / "sized"
+        _write_model_with_horizon(run_dir)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [_FAKE_CONTRACT])
+
+        r = client.post("/select-entries", json=_SELECT_BODY)
+        assert r.status_code == 200
+        picked = r.json()["selected"][0]
+        assert picked["quantity"] == 40
+        assert picked["cost"] == 20_000.0
+
+    def test_a_maturity_outside_the_band_is_not_selected(self, tmp_path, monkeypatch) -> None:
+        leap = replace(_FAKE_CONTRACT, expiry="2027-01-16", dte=400)
+        run_dir = tmp_path / "leap"
+        _write_model_with_horizon(run_dir)
+        monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
+        monkeypatch.setattr("app.main.rank_day", lambda *a, **k: [leap])
+
+        r = client.post("/select-entries", json=_SELECT_BODY)
+        assert r.status_code == 200
+        assert r.json()["selected"] == []
+
+    def test_an_inverted_dte_band_is_rejected_rather_than_matching_nothing(self) -> None:
+        # A band with max below min silently selects nothing every single
+        # day, which the caller reports as "the market offered nothing" —
+        # the same misattribution the missing-horizon 409 above prevents.
+        r = client.post("/select-entries", json={**_SELECT_BODY, "min_dte": 60, "max_dte": 14})
+        assert r.status_code == 422

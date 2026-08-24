@@ -115,6 +115,14 @@ const schema = z.object({
   AUTO_ENTRY_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().positive().default(10),
   AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY: z.coerce.number().int().positive().default(5),
   AUTO_ENTRY_CAPITAL_RESERVE_PCT: z.coerce.number().min(0).max(1).default(0.2),
+  // The maturity band an entry may be opened in. The forecast is a single
+  // fixed horizon (5 trading days) annualized into a constant drift, so a
+  // long-dated contract's expected value is mostly extrapolation past
+  // anything the model measured, and a very short-dated one cannot be held
+  // through the forecast window at all. First-pass bounds, not a tuned
+  // optimum — see select_entries' docstring.
+  AUTO_ENTRY_MIN_DTE: z.coerce.number().int().positive().default(14),
+  AUTO_ENTRY_MAX_DTE: z.coerce.number().int().positive().default(60),
   // The adaptive exit engine — see exitEngine.ts and exit.py's own module
   // docstring. Market hours only, matching TEXT_SYNC_CRON's cadence
   // reasoning: nothing changes about a position's exit outside trading
@@ -132,6 +140,12 @@ const schema = z.object({
 
   DEFAULT_CALENDAR: z.enum(['miladi', 'shamsi']).default('miladi'),
   BASE_CURRENCY: z.string().default('CAD'),
+}).refine((e) => e.AUTO_ENTRY_MAX_DTE >= e.AUTO_ENTRY_MIN_DTE, {
+  // An inverted band matches no contract, and auto-entry would report
+  // "nothing cleared the bar today" every day — blaming the market for a
+  // misconfiguration. Fail at boot instead, where it's visible.
+  path: ['AUTO_ENTRY_MAX_DTE'],
+  error: 'AUTO_ENTRY_MAX_DTE must be greater than or equal to AUTO_ENTRY_MIN_DTE',
 });
 
 const parsed = schema.safeParse(process.env);
@@ -304,6 +318,8 @@ export const config = {
       maxConcurrentPositions: env.AUTO_ENTRY_MAX_CONCURRENT_POSITIONS,
       maxNewPositionsPerDay: env.AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY,
       capitalReservePct: env.AUTO_ENTRY_CAPITAL_RESERVE_PCT,
+      minDte: env.AUTO_ENTRY_MIN_DTE,
+      maxDte: env.AUTO_ENTRY_MAX_DTE,
     },
     /** See EXIT_RECHECK_CRON/EXIT_RECHECK_MAX_CALLS_PER_RUN above and exitEngine.ts. */
     exitRecheck: {

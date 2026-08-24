@@ -1,6 +1,6 @@
 import { config } from '../../config.js';
-import { accountCapacity, openOrder, PaperError } from '../paper.js';
-import { selectEntries, QuantRefusal, QuantUnavailable, type RankedContract } from '../quant.js';
+import { accountCapacity, contractMultiplier, openOrder, PaperError } from '../paper.js';
+import { selectEntries, QuantRefusal, QuantUnavailable, type SelectedEntry } from '../quant.js';
 
 /**
  * Once/day, alongside the existing rank refresh: opens every contract the
@@ -18,11 +18,18 @@ import { selectEntries, QuantRefusal, QuantUnavailable, type RankedContract } fr
  * itself lives in Python with the rest of the decision math — see
  * `select_entries`, including the real $122,440-per-contract candidate
  * that proved an explicit capital constraint was not optional.
+ *
+ * **Size is the sidecar's answer too, not a constant here.** This used to
+ * open `quantity: 1` of whatever came back, which made the position's real
+ * size an accident of the contract's price — one unit of a $12 contract and
+ * one unit of a $1,200 contract are not the same bet. `select_entries` now
+ * returns a quantity per pick, sized equal-weight across the day's
+ * available slots.
  */
 
 export interface AutoEntryResult {
   day: string;
-  opened: Array<{ occSymbol: string; orderId: string }>;
+  opened: Array<{ occSymbol: string; orderId: string; quantity: number }>;
   /** Why nothing was opened. Null whenever at least one position opened —
    * a per-contract problem during a partly-successful run goes in
    * `failures`, so a non-null value here always means "no positions". */
@@ -46,7 +53,7 @@ export async function runAutoEntry(
   const availableCapital =
     (capacity.freeCashE4 / 10_000) * (1 - config.market.autoEntry.capitalReservePct);
 
-  let selected: RankedContract[];
+  let selected: SelectedEntry[];
   try {
     selected = (
       await selectEntriesFn({
@@ -58,6 +65,8 @@ export async function runAutoEntry(
         maxNewPositions: config.market.autoEntry.maxNewPositionsPerDay,
         minEvPerRisk: config.market.autoEntry.minEvPerRisk,
         minProbProfit: config.market.autoEntry.minProbProfit,
+        minDte: config.market.autoEntry.minDte,
+        maxDte: config.market.autoEntry.maxDte,
       })
     ).selected;
   } catch (err) {
@@ -80,10 +89,21 @@ export async function runAutoEntry(
     };
   }
 
-  const opened: Array<{ occSymbol: string; orderId: string }> = [];
+  const opened: Array<{ occSymbol: string; orderId: string; quantity: number }> = [];
   const failures: string[] = [];
-  for (const candidate of selected) {
+  // Depleted as positions open, so the cap below is against cash actually
+  // left rather than the whole day's budget for every pick in turn.
+  let remainingE4 = Math.round(availableCapital * 10_000);
+  for (const { contract: candidate, quantity } of selected) {
     try {
+      // The sidecar sizes every selection at one contract or more; a
+      // non-positive quantity would open a zero-cost, zero-payoff row the
+      // exit engine would then manage forever. Cheaper to refuse it than
+      // to explain it later.
+      if (!Number.isInteger(quantity) || quantity < 1) {
+        failures.push(`${candidate.occ_symbol}: selected with a non-positive quantity (${quantity}) — not opened`);
+        continue;
+      }
       // The sidecar excludes candidates with no computable exit plan before
       // it allocates, so this should never fire — but a null slipping
       // through would not throw here: `null * 10_000` is 0 in JavaScript,
@@ -99,14 +119,40 @@ export async function runAutoEntry(
         failures.push(`${candidate.occ_symbol}: selected without a complete exit plan — not opened`);
         continue;
       }
+      // The sidecar sizes against the standard 100x multiplier because a
+      // ranked contract carries no multiplier of its own; the real one
+      // lives here, in the contracts table, and a split-adjusted contract
+      // can carry something else. Sizing used to be one unit, so a wrong
+      // multiplier was a one-contract error; at 40 units it is a 40x one,
+      // and `openOrder` has no cash guard of its own to catch it. So the
+      // quantity is re-checked against real free cash at the real
+      // multiplier, and trimmed rather than trusted.
+      const entryPriceE4 = Math.round(candidate.market_price * 10_000);
+      const { multiplier } = contractMultiplier(candidate.occ_symbol);
+      const perContractE4 = entryPriceE4 * multiplier;
+      const affordable = Math.floor(remainingE4 / perContractE4);
+      const size = Math.min(quantity, affordable);
+      if (size < 1) {
+        failures.push(
+          `${candidate.occ_symbol}: costs $${(perContractE4 / 10_000).toFixed(2)}/contract at a ${multiplier}x ` +
+            `multiplier, more than the $${(remainingE4 / 10_000).toFixed(2)} left — not opened`,
+        );
+        continue;
+      }
+      if (size < quantity) {
+        failures.push(
+          `${candidate.occ_symbol}: trimmed from ${quantity} to ${size} contracts — at a ${multiplier}x multiplier ` +
+            `the sidecar's size costs more than the $${(remainingE4 / 10_000).toFixed(2)} of free cash left`,
+        );
+      }
       // Order and exit plan land in one insert — see `OpenOrderInput.exitPlan`
       // for why this must not be an insert followed by an update.
       const orderId = openOrder({
         occSymbol: candidate.occ_symbol,
-        quantity: 1,
-        entryPriceE4: Math.round(candidate.market_price * 10_000),
+        quantity: size,
+        entryPriceE4,
         source: 'model',
-        notes: `Auto-opened: EV ${candidate.ev.toFixed(2)}, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%.`,
+        notes: `Auto-opened ${size}x: EV ${candidate.ev.toFixed(2)}/contract, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%, ${candidate.dte}d to expiry.`,
         entryEv: candidate.ev,
         exitPlan: {
           targetExitPriceE4: Math.round(candidate.suggested_target_exit_price * 10_000),
@@ -114,7 +160,8 @@ export async function runAutoEntry(
           targetExitDate: candidate.suggested_target_exit_date,
         },
       });
-      opened.push({ occSymbol: candidate.occ_symbol, orderId });
+      remainingE4 -= perContractE4 * size;
+      opened.push({ occSymbol: candidate.occ_symbol, orderId, quantity: size });
     } catch (err) {
       // One contract failing to open must not cost the rest of the day's
       // selection — same per-item isolation as capture.ts's own loop.

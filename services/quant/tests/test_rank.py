@@ -556,6 +556,11 @@ class TestSelectEntries:
             max_new_positions=5,
             min_ev_per_risk=0.05,
             min_prob_profit=0.5,
+            # The shipped band, and `_candidate`'s 30-day fixture sits
+            # inside it — so every test below runs against the real
+            # maturity filter rather than one widened out of its way.
+            min_dte=14,
+            max_dte=60,
         )
         defaults.update(overrides)
         return select_entries(candidates, **defaults)
@@ -566,7 +571,7 @@ class TestSelectEntries:
             for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
         ]
         selected = self._select(candidates)
-        assert [c.underlying for c in selected] == ["AAA", "BBB", "CCC"]
+        assert [s.contract.underlying for s in selected] == ["AAA", "BBB", "CCC"]
 
     def test_stops_at_max_new_positions(self) -> None:
         candidates = [
@@ -574,7 +579,7 @@ class TestSelectEntries:
             for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
         ]
         selected = self._select(candidates, max_new_positions=2)
-        assert [c.underlying for c in selected] == ["AAA", "BBB"]
+        assert [s.contract.underlying for s in selected] == ["AAA", "BBB"]
 
     def test_concurrent_position_room_binds_before_the_daily_cap(self) -> None:
         candidates = [
@@ -592,7 +597,7 @@ class TestSelectEntries:
         whale = _candidate(underlying="WHL", occ_symbol="WHL   260918P02270000", market_price=1224.4, ev=999.0)
         modest = _candidate(underlying="MOD", occ_symbol="MOD   260918C00100000", ev=10.0)
         selected = self._select([whale, modest], available_capital=10_000.0)
-        assert [c.underlying for c in selected] == ["MOD"]
+        assert [s.contract.underlying for s in selected] == ["MOD"]
 
     def test_capital_depletes_across_acceptances(self) -> None:
         # $500 available; each contract costs $200 — only two fit.
@@ -601,7 +606,7 @@ class TestSelectEntries:
             for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
         ]
         selected = self._select(candidates, available_capital=500.0)
-        assert [c.underlying for c in selected] == ["AAA", "BBB"]
+        assert [s.contract.underlying for s in selected] == ["AAA", "BBB"]
 
     def test_never_selects_a_held_underlying_or_two_contracts_on_one_name(self) -> None:
         candidates = [
@@ -610,7 +615,7 @@ class TestSelectEntries:
             _candidate(underlying="DUP", occ_symbol="DUP   260918C00110000", ev=45.0),
         ]
         selected = self._select(candidates, held_underlyings={"HELD"})
-        assert [c.occ_symbol for c in selected] == ["DUP   260918C00100000"]
+        assert [s.contract.occ_symbol for s in selected] == ["DUP   260918C00100000"]
 
     def test_bars_filter_out_weak_candidates(self) -> None:
         weak_ev = _candidate(underlying="AAA", ev_per_risk=0.01)
@@ -619,3 +624,148 @@ class TestSelectEntries:
 
     def test_zero_available_capital_selects_nothing(self) -> None:
         assert self._select([_candidate()], available_capital=0.0) == []
+
+    def test_no_room_for_new_positions_selects_nothing(self) -> None:
+        # At the concurrent ceiling. Without the early return this divided
+        # available capital by zero slots to compute the equal weight.
+        assert self._select([_candidate()], open_position_count=10, max_concurrent_positions=10) == []
+
+
+class TestSelectEntriesSizing:
+    """Equal-weight position sizing. Before this, the caller hard-coded one
+    contract per pick, so a position's real size was whatever the contract
+    happened to cost — one unit of a $12 contract and one of a $1,200
+    contract were treated as the same bet.
+    """
+
+    def _select(self, candidates, **overrides):
+        defaults = dict(
+            held_underlyings=set(),
+            available_capital=10_000.0,
+            open_position_count=0,
+            max_concurrent_positions=10,
+            max_new_positions=5,
+            min_ev_per_risk=0.05,
+            min_prob_profit=0.5,
+            min_dte=14,
+            max_dte=60,
+        )
+        defaults.update(overrides)
+        return select_entries(candidates, **defaults)
+
+    def test_two_differently_priced_contracts_get_near_equal_dollar_weight(self) -> None:
+        # $10,000 over 5 slots is a $2,000 budget each. A $200 contract
+        # takes 10 units and a $1,000 contract 2 — the point of sizing:
+        # equal *money*, not equal contract count.
+        cheap = _candidate(underlying="CHP", occ_symbol="CHP   260918C00100000", market_price=2.0, ev=50.0)
+        dear = _candidate(underlying="DER", occ_symbol="DER   260918C00100000", market_price=10.0, ev=40.0)
+
+        selected = self._select([cheap, dear])
+
+        assert [s.quantity for s in selected] == [10, 2]
+        assert [s.cost for s in selected] == [2_000.0, 2_000.0]
+
+    def test_sizing_never_commits_more_than_the_capital_available(self) -> None:
+        candidates = [
+            _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u, ev=ev)
+            for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
+        ]
+        selected = self._select(candidates, available_capital=10_000.0)
+        assert sum(s.cost for s in selected) <= 10_000.0
+
+    def test_a_contract_costing_more_than_its_slot_still_gets_one_unit(self) -> None:
+        # $2,000 per slot, but the contract costs $3,000. Rounding the
+        # equal-weight quantity down would give zero and silently drop a
+        # candidate that the account can genuinely afford.
+        chunky = _candidate(underlying="BIG", occ_symbol="BIG   260918C00100000", market_price=30.0)
+
+        selected = self._select([chunky])
+
+        assert [s.quantity for s in selected] == [1]
+        assert [s.cost for s in selected] == [3_000.0]
+
+    def test_quantity_is_capped_by_cash_left_not_just_by_the_slot_budget(self) -> None:
+        # One slot, so the slot budget is the whole $10,000 — but only
+        # $700 is actually available, which is 3 contracts at $200, not 50.
+        c = _candidate(underlying="AAA")
+
+        selected = self._select([c], available_capital=700.0, max_new_positions=1)
+
+        assert [s.quantity for s in selected] == [3]
+        assert selected[0].cost == 600.0
+
+    def test_a_thin_day_deploys_one_slot_rather_than_concentrating(self) -> None:
+        # Only one candidate clears the bar out of five slots. It gets one
+        # slot's worth, not the whole book — the concentration the
+        # equal-weight rule exists to prevent. Stated as a test because it
+        # is a deliberate choice that looks like under-investment.
+        lonely = _candidate(underlying="AAA")
+
+        selected = self._select([lonely], available_capital=10_000.0, max_new_positions=5)
+
+        assert selected[0].cost == 2_000.0
+
+    def test_a_zero_priced_contract_is_refused_rather_than_sized_infinitely(self) -> None:
+        # A stale or bad print at 0 would divide by zero computing quantity.
+        free = _candidate(underlying="AAA", market_price=0.0)
+        assert self._select([free]) == []
+
+
+class TestSelectEntriesDteBand:
+    """Entries are confined to maturities the forecast can speak to. The
+    direction model predicts one fixed horizon and `_annualize_horizon_return`
+    stretches it into a constant drift, so EV at a far-dated contract is
+    mostly extrapolation past anything the model measured.
+    """
+
+    def _select(self, candidates, **overrides):
+        defaults = dict(
+            held_underlyings=set(),
+            available_capital=10_000.0,
+            open_position_count=0,
+            max_concurrent_positions=10,
+            max_new_positions=5,
+            min_ev_per_risk=0.05,
+            min_prob_profit=0.5,
+            min_dte=14,
+            max_dte=60,
+        )
+        defaults.update(overrides)
+        return select_entries(candidates, **defaults)
+
+    def test_a_far_dated_contract_is_excluded_however_good_its_ev_looks(self) -> None:
+        # 400 DTE with the board's best EV. That EV is the fixed-horizon
+        # drift compounded out more than a year — precisely the number the
+        # band exists to distrust.
+        leap = _candidate(underlying="LEP", occ_symbol="LEP   270918C00100000", dte=400, ev=999.0)
+        near = _candidate(underlying="NER", occ_symbol="NER   260918C00100000", dte=30, ev=10.0)
+
+        selected = self._select([leap, near])
+
+        assert [s.contract.underlying for s in selected] == ["NER"]
+
+    def test_a_contract_expiring_inside_the_forecast_window_is_excluded(self) -> None:
+        # 5 DTE cannot be held through a 5-trading-day forecast and still
+        # exited above exit.py's DTE floor — it would be closed on the
+        # calendar, never on the signal.
+        weekly = _candidate(underlying="WKL", occ_symbol="WKL   260828C00100000", dte=5, ev=99.0)
+        assert self._select([weekly]) == []
+
+    def test_the_band_is_inclusive_at_both_ends(self) -> None:
+        low = _candidate(underlying="LOW", occ_symbol="LOW   260918C00100000", dte=14, ev=50.0)
+        high = _candidate(underlying="HIG", occ_symbol="HIG   260918C00100000", dte=60, ev=40.0)
+
+        selected = self._select([low, high])
+
+        assert [s.contract.underlying for s in selected] == ["LOW", "HIG"]
+
+    def test_an_excluded_maturity_does_not_consume_a_selection_slot(self) -> None:
+        # Filtering by maturity in the caller instead of here would let a
+        # rejected candidate eat a slot and silently shrink the day's book.
+        leap = _candidate(underlying="LEP", occ_symbol="LEP   270918C00100000", dte=400, ev=999.0)
+        a = _candidate(underlying="AAA", occ_symbol="AAA   260918C00100000", ev=50.0)
+        b = _candidate(underlying="BBB", occ_symbol="BBB   260918C00100000", ev=40.0)
+
+        selected = self._select([leap, a, b], max_new_positions=2)
+
+        assert [s.contract.underlying for s in selected] == ["AAA", "BBB"]
