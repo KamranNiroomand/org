@@ -75,8 +75,38 @@ def _git_sha() -> str | None:
         return None  # a missing git sha should not fail a training run
 
 
-def _config_hash(target: str, horizon: int, feature_cols: list[str]) -> str:
-    payload = json.dumps({"target": target, "horizon": horizon, "features": feature_cols}, sort_keys=True)
+def _config_hash(
+    target: str,
+    horizon: int,
+    feature_cols: list[str],
+    early_stopping_rounds: int | None = None,
+) -> str:
+    """Identifies a training configuration. Anything that changes the
+    fitted model must be in here.
+
+    `early_stopping_rounds` is included because leaving it out collided
+    immediately: the three runs measuring it — off, patience 50, patience
+    10 — all produced run_id `2026-08-24-dir-h5-f47646104951` and wrote
+    into the same artifact directory, so the last one left the registry's
+    champion pointing at the *worst* of the three. Restoring it took a
+    retrain, a re-register, a re-snapshot and a re-pull on both machines.
+
+    `models:pull` compounds a collision rather than correcting it: a reader
+    already holding the directory keeps whichever version arrived first.
+
+    Still not covered, and worth knowing: feature *implementations*. Two
+    different definitions of the same column name hash identically, which
+    has also happened. A source hash over features.py would close that.
+    """
+    payload = json.dumps(
+        {
+            "target": target,
+            "horizon": horizon,
+            "features": feature_cols,
+            "early_stopping_rounds": early_stopping_rounds,
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
@@ -193,7 +223,8 @@ def train(
     final_model = lgb.LGBMRegressor(**final_params)
     final_model.fit(panel[FEATURE_COLS].to_numpy(), panel["label"].to_numpy())
 
-    run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{_config_hash(target, horizon, FEATURE_COLS)}"
+    config_hash = _config_hash(target, horizon, FEATURE_COLS, early_stopping_rounds)
+    run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{config_hash}"
     base_dir = output_dir or (Path.home() / ".org" / "market" / "models")
     run_dir = base_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -208,7 +239,7 @@ def train(
         json.dumps({str(fold): curves for fold, curves in model_result.history.items()}, indent=2)
     )
     (run_dir / "features.json").write_text(
-        json.dumps({"feature_cols": FEATURE_COLS, "target": "label", "config_hash": _config_hash(target, horizon, FEATURE_COLS)}, indent=2)
+        json.dumps({"feature_cols": FEATURE_COLS, "target": "label", "config_hash": config_hash}, indent=2)
     )
     (run_dir / "manifest.json").write_text(
         json.dumps(

@@ -282,6 +282,19 @@ class TestEarlyStopping:
 
         assert result.best_rounds == {}
 
+    def test_refuses_to_run_unpurged(self) -> None:
+        # The defaults would carve an inner tail with a zero-day gap, so
+        # every forward-looking label in the last `horizon` days of
+        # inner-train lands inside inner-validation and early stopping
+        # selects against data it has already seen. Refused rather than
+        # defaulted, because the failure is invisible: the run completes,
+        # the numbers look plausible, only the round counts are wrong.
+        panel = TestLossHistory()._panel()
+        splits = TestLossHistory()._splits(panel)
+
+        with pytest.raises(ValueError, match="requires a positive `horizon`"):
+            train_lgbm_regressor(panel, ["f1", "f2"], "label", splits, early_stopping_rounds=5)
+
     def test_records_the_round_count_it_chose_per_fold(self) -> None:
         panel = TestLossHistory()._panel()
         splits = TestLossHistory()._splits(panel)

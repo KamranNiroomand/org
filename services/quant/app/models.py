@@ -243,6 +243,20 @@ def train_lgbm_regressor(
     round count. The machinery is kept, correct and off, so that this
     experiment does not get run a third time.
     """
+    if early_stopping_rounds is not None and horizon < 1:
+        # The defaults would carve an inner tail with a zero-day gap, and
+        # every forward-looking label in the last `horizon` days of
+        # inner-train would then be realized inside inner-validation —
+        # early stopping selecting against data it had already seen, which
+        # is precisely the leak `inner_validation_split` exists to prevent.
+        # Refused rather than defaulted, because the failure is invisible:
+        # the run completes, the numbers look plausible, and only the round
+        # counts are quietly wrong.
+        raise ValueError(
+            "early_stopping_rounds requires a positive `horizon` so the inner "
+            f"validation split can be purged; got horizon={horizon}."
+        )
+
     result = TrainingResult(target=label_col, feature_cols=feature_cols)
     model_params = {**DEFAULT_LGBM_PARAMS, **(params or {})}
 
