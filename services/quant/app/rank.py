@@ -246,7 +246,22 @@ def _vol_forecast_ratio(
     tradeable view. A ratio of 1.0 (no view) is the safe fallback whenever
     there is no market IV to compare against.
     """
-    ivs = quotes["iv"].drop_nulls()
+    # The median is taken over the fixed 0.8–1.2 ATM band, not the whole
+    # screened chain. The screens' admission band now scales with this
+    # same `realized_vol` (screens.py), so a whole-chain median would put
+    # the forecast on both sides of its own ratio: a lower forecast
+    # narrows the band, drops the smile's high-IV wings, lowers the
+    # median, and pushes the ratio back toward 1 — damping exactly the
+    # signal this function exists to express, symmetrically in both
+    # directions. A fixed-band reference cannot move when the forecast
+    # moves, and it is the same ATM reference the screens themselves
+    # standardize against.
+    atm = quotes.filter(
+        (pl.col("strike") / pl.col("underlying_price")).is_between(0.8, 1.2)
+    )
+    ivs = atm["iv"].drop_nulls()
+    if ivs.len() == 0:
+        ivs = quotes["iv"].drop_nulls()
     if ivs.len() == 0:
         return 1.0
     reference = float(ivs.median())

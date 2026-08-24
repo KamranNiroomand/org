@@ -51,11 +51,19 @@ import polars as pl
 #: strikes at K/S ≈ 1.3 sit *inside* 1.7σ but were hard-dropped by the raw
 #: band, silently emptying the underlying from the board; IEF at 4% vol
 #: listed 20σ+ strikes with no economic content that the raw band happily
-#: admitted. So the band is standardized at 2.0σ, with a raw [0.5, 2.0]
-#: sanity rail retained for rows whose σ reference is itself junk.
+#: admitted. So the band is standardized at 2.0σ.
+#:
+#: The σ reference is max(caller's HAR realized-vol forecast, the chain's
+#: own ATM implied vol) — see `screen_quotes` for why the max of the two
+#: and why the ATM sample is guarded. When neither exists — or the caller
+#: passed no `trading_day`, so time-to-expiry cannot be computed — the
+#: screen degrades to the literature's flat 0.8–1.2 band rather than to
+#: nothing: review of the first version found the degraded path admitted
+#: the exact $122,440 incident print, because degrading meant "skip the
+#: screen" instead of "fall back to the conservative one".
 STANDARDIZED_MONEYNESS_MAX = 2.0
-RAW_MONEYNESS_MIN = 0.5
-RAW_MONEYNESS_MAX = 2.0
+LITERATURE_MONEYNESS_MIN = 0.8
+LITERATURE_MONEYNESS_MAX = 1.2
 MIN_PRICE = 0.125  # the literature's $1/8 minimum, against our close
 #: The unbelievable-IV ceiling, in **total volatility** σ√T rather than
 #: annualized σ. A flat annualized ceiling bites hardest at the short end,
@@ -63,9 +71,25 @@ MIN_PRICE = 0.125  # the literature's $1/8 minimum, against our close
 #: weeks before earnings is a real market (σ√T ≈ 0.49), while the SNDK
 #: stale print's 447% at 28 days is σ√T ≈ 1.24 — no listed equity option
 #: prices a ±124% one-sigma move over a month. 0.75 separates the two
-#: populations the flat ceiling conflated. An absolute σ ≤ 5.0 insanity
-#: rail backstops rows whose expiry parse fails.
+#: populations the flat ceiling conflated.
+#:
+#: The scaled ceiling is **floored at the flat `MAX_IV_FLAT`** it
+#: replaced: σ√T ≤ 0.75 alone crosses below the old 2.0 ceiling at ~51
+#: DTE (1.85 at 60 days), which would have silently *tightened* the long
+#: end of the universe while the change was only ever argued as a
+#: short-end loosening. So a row passes when either its total vol is
+#: believable or its annualized vol was believable under the old regime.
+#: The deliberate residual: between roughly 14 and 51 DTE the effective
+#: ceiling sits above the old flat 2.0 (3.83 at 14 days, 2.71 at 28), so
+#: a stale print solving just under it clears this screen — the staleness
+#: screen, not this one, is the defense there, which is why rank_day
+#: audits `stale_screen_unavailable_symbols` so loudly.
 MAX_TOTAL_VOL = 0.75
+MAX_IV_FLAT = 2.0
+#: Absolute insanity rail, applied even where the scaled ceiling is
+#: generous (it reaches 8.27 at 3 DTE, where score_held_contracts — which
+#: has no DTE floor — still prices held positions). No listed equity
+#: option prices a 500% annualized vol as anything but noise.
 MAX_IV_ABSOLUTE = 5.0
 
 
@@ -84,13 +108,17 @@ class ScreenResult:
     "could not screen" (no prior day for this chain), which the counts
     alone cannot express: review of the first version found the screen
     silently no-oping for exactly the symbols with the patchiest capture
-    history, while the audit line looked normal.
+    history, while the audit line looked normal. `vol_screens_ran` makes
+    the same distinction for the vol-aware screens: False means no
+    `trading_day` was supplied, so moneyness and the IV ceiling ran in
+    their flat, pre-standardization form rather than the σ-scaled one.
     """
 
     passed: pl.DataFrame
     dropped: dict[str, int] = field(default_factory=dict)
     dropped_rows: dict[str, list[str]] = field(default_factory=dict)
     staleness_ran: bool = False
+    vol_screens_ran: bool = False
 
 
 def screen_quotes(
@@ -101,6 +129,7 @@ def screen_quotes(
     standardized_max: float = STANDARDIZED_MONEYNESS_MAX,
     min_price: float = MIN_PRICE,
     max_total_vol: float = MAX_TOTAL_VOL,
+    max_iv_absolute: float = MAX_IV_ABSOLUTE,
 ) -> ScreenResult:
     """Apply the literature's screens to one underlying's chain for one day.
 
@@ -114,6 +143,13 @@ def screen_quotes(
     prior day exists; the staleness screen is then skipped, and
     `staleness_ran=False` says so rather than hiding it.
 
+    `trading_day` gates the σ-scaled forms of the moneyness and IV-ceiling
+    screens (√T is uncomputable without it). Omitting it does **not** skip
+    them — they degrade to the literature's flat band and the flat ceiling,
+    the exact protections that predate standardization — and
+    `vol_screens_ran=False` reports the degradation. Production callers
+    should always pass it.
+
     Screens run in a fixed order and each row is attributed to the *first*
     screen that rejects it, so the audit counts sum to the rows dropped.
     """
@@ -121,7 +157,7 @@ def screen_quotes(
     if quotes.height == 0:
         # An empty chain filtered on named columns raises if the frame also
         # has no schema — and there is nothing to screen anyway.
-        return ScreenResult(passed=quotes, dropped=dropped)
+        return ScreenResult(passed=quotes, dropped=dropped, vol_screens_ran=trading_day is not None)
     df = quotes
 
     dropped_rows: dict[str, list[str]] = {}
@@ -144,46 +180,92 @@ def screen_quotes(
     # when the truth is "the underlying had no price".
     apply("no_spot", pl.col("underlying_price").is_not_null() & (pl.col("underlying_price") > 0))
 
-    # Years to expiry, calendar-day convention matching pricing.py. Needed
-    # by both vol-aware screens; without a trading_day they degrade to
-    # their raw fallbacks rather than guessing.
+    # Years to expiry, calendar-day convention (the same 365 denominator
+    # pricing.py uses; the clip to one day exists only here, to keep √T
+    # nonzero for a same-day expiry). Parsed non-strictly: `expiry` is
+    # vendor text, and a strict parse would abort the *entire* ranking
+    # run on one malformed string — review found exactly that, an
+    # InvalidOperationError raising out of rank_day's symbol loop. A row
+    # whose expiry does not parse is instead dropped under its own name,
+    # for the same reason no_spot exists: a null threaded silently into
+    # the moneyness arithmetic would attribute the drop to "moneyness"
+    # when the truth is "the contract had no usable expiry".
     years = None
     if trading_day is not None:
+        expiry_date = pl.col("expiry").str.to_date(strict=False)
+        apply("bad_expiry", expiry_date.is_not_null())
         years = (
-            (pl.col("expiry").str.to_date() - pl.lit(trading_day).str.to_date())
-            .dt.total_days()
-            .clip(lower_bound=1)
+            (expiry_date - pl.lit(trading_day).str.to_date()).dt.total_days().clip(lower_bound=1)
             / 365.0
         )
 
-    # Moneyness, standardized — distance from ATM in the underlying's own
-    # volatility units. See the constants block for why the raw literature
-    # band gets a mixed-vol universe backwards at both ends. σ comes from
-    # the caller (the HAR forecast, per underlying) when available; the
-    # chain's own median IV otherwise — never the row's own IV, which
-    # would let a corrupt print widen its own admission band.
-    apply(
-        "raw_moneyness",
-        (pl.col("strike") / pl.col("underlying_price")).is_between(RAW_MONEYNESS_MIN, RAW_MONEYNESS_MAX),
-    )
+    # Moneyness — distance from ATM, standardized to the underlying's own
+    # volatility units when σ√T is computable, the literature's flat
+    # 0.8–1.2 band otherwise. See the constants block for why a fixed
+    # band gets a mixed-vol universe backwards at both ends, and why the
+    # degraded path is the conservative flat band rather than nothing.
+    #
+    # σ is max(caller's HAR forecast, the chain's ATM implied vol):
+    #
+    # - The HAR forecast alone is a *realized*-vol floor, and under the
+    #   variance risk premium RV runs below IV in the normal state — a
+    #   55%-IV biotech with 32% trailing RV would see the band the
+    #   constants block promises it at ≈1.3σ instead applied at ≈3σ,
+    #   tightest exactly when a name is quiet before an event. The
+    #   market's own ATM vol is the standard reference for standardized
+    #   moneyness in the literature; the HAR floor guards the mirror case
+    #   where the chain's IVs are junk-low.
+    # - The ATM sample is the fixed 0.8–1.2 band with IVs above
+    #   MAX_IV_FLAT excluded — never the row's own IV, and never a median
+    #   over the whole chain: review showed three stale 400%+ prints
+    #   moving a whole-chain median from 0.60 to 4.40, widening the band
+    #   until an economically empty 7.7σ strike passed. A frozen 447%
+    #   print cannot enter this reference at all.
     if years is not None:
-        sigma = symbol_vol
-        if sigma is None or sigma <= 0:
-            chain_iv = df["iv"].drop_nulls()
-            sigma = float(chain_iv.median()) if chain_iv.len() > 0 else None
-        if sigma is not None and sigma > 0:
+        atm = df.filter(
+            (pl.col("strike") / pl.col("underlying_price")).is_between(
+                LITERATURE_MONEYNESS_MIN, LITERATURE_MONEYNESS_MAX
+            )
+            & (pl.col("iv") <= MAX_IV_FLAT)
+        )
+        atm_iv = float(atm["iv"].median()) if atm.height > 0 else 0.0
+        sigma = max(symbol_vol or 0.0, atm_iv)
+        if sigma > 0:
             std_moneyness = (pl.col("strike") / pl.col("underlying_price")).log().abs() / (
                 sigma * years.sqrt()
             )
             apply("moneyness", std_moneyness <= standardized_max)
+        else:
+            apply(
+                "moneyness",
+                (pl.col("strike") / pl.col("underlying_price")).is_between(
+                    LITERATURE_MONEYNESS_MIN, LITERATURE_MONEYNESS_MAX
+                ),
+            )
+    else:
+        apply(
+            "moneyness",
+            (pl.col("strike") / pl.col("underlying_price")).is_between(
+                LITERATURE_MONEYNESS_MIN, LITERATURE_MONEYNESS_MAX
+            ),
+        )
 
     apply("min_price", pl.col("price") >= min_price)
     apply("zero_volume", pl.col("volume") > 0)
 
-    # Unbelievable IV, in total-vol terms — see MAX_TOTAL_VOL's comment.
-    apply("extreme_iv", pl.col("iv") <= MAX_IV_ABSOLUTE)
+    # Unbelievable IV. With a computable √T: the absolute insanity rail,
+    # then the total-vol ceiling floored at the flat ceiling it replaced —
+    # see MAX_TOTAL_VOL's comment for both regimes. Without one, the flat
+    # pre-standardization ceiling, so the degraded path never admits what
+    # the old code rejected.
     if years is not None:
-        apply("extreme_total_vol", pl.col("iv") * years.sqrt() <= max_total_vol)
+        apply("extreme_iv", pl.col("iv") <= max_iv_absolute)
+        apply(
+            "extreme_total_vol",
+            (pl.col("iv") * years.sqrt() <= max_total_vol) | (pl.col("iv") <= MAX_IV_FLAT),
+        )
+    else:
+        apply("extreme_iv", pl.col("iv") <= MAX_IV_FLAT)
 
     # No-arbitrage bounds. Kept even though the incident price passed them:
     # they are nearly free, and a hard violation is certainly bad data.
@@ -252,5 +334,9 @@ def screen_quotes(
         df = df.drop(["_prior_close", "_prior_volume", "_prior_oi"])
 
     return ScreenResult(
-        passed=df, dropped=dropped, dropped_rows=dropped_rows, staleness_ran=staleness_ran
+        passed=df,
+        dropped=dropped,
+        dropped_rows=dropped_rows,
+        staleness_ran=staleness_ran,
+        vol_screens_ran=trading_day is not None,
     )
