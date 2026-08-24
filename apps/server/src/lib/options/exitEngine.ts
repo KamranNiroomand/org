@@ -21,6 +21,7 @@ import {
 import { readDocumentsSince } from '../text/news.js';
 import { nowIso, todayKey } from '../util.js';
 import { PolygonProvider } from './polygon.js';
+import { operatingTradingDay } from './positionHealth.js';
 import type { OptionsProvider } from './provider.js';
 
 /**
@@ -117,7 +118,7 @@ async function adoptUnmanagedOrders(
     .filter((o) => o.targetExitPriceE4 === null || o.stopLossPriceE4 === null || o.targetExitDate === null);
   if (orphans.length === 0) return;
 
-  const today = todayKey();
+  const today = operatingTradingDay();
   const adopted: DecisionRow[] = [];
   for (const order of orphans) {
     try {
@@ -159,7 +160,7 @@ async function adoptUnmanagedOrders(
         .run();
       summary.adopted += 1;
       adopted.push({
-        day: todayKey(),
+        day: today,
         occSymbol: order.occSymbol,
         underlying: order.underlying,
         decision: 'adopted',
@@ -183,7 +184,9 @@ async function adoptUnmanagedOrders(
       );
     }
   }
-  logDecisions(adopted);
+  if (!logDecisions(adopted)) {
+    summary.errors.push(`Decision log write failed for ${adopted.length} adoption(s) — they are lost.`);
+  }
 }
 
 function managedOpenOrders() {
@@ -230,7 +233,10 @@ export async function runExitEngine(
 
   // Declared out here so the `finally` below can flush whatever was
   // collected even when the run throws partway.
-  const day = todayKey();
+  // Not `todayKey()` — see `operatingTradingDay`. The two writers used
+  // different notions of "day" and split one session's decisions across
+  // two of them.
+  const day = operatingTradingDay();
   const decisions: DecisionRow[] = [];
 
   try {
@@ -513,7 +519,14 @@ export async function runExitEngine(
     // flushing inside the try would discard everything collected before
     // the failure. `logDecisions` never throws, so this cannot mask the
     // original error.
-    logDecisions(decisions);
+    // The return is checked, not discarded. A logger that fails silently
+    // rebuilds — inside the logging code — the exact blind spot this table
+    // was added to end: the run looks normal, reports success, and wrote
+    // nothing, and the absence later reads as "the system did nothing".
+    if (!logDecisions(decisions)) {
+      summary.errors.push(`Decision log write failed for ${decisions.length} decision(s) — they are lost.`);
+      log.warn('Exit engine could not write its decision log');
+    }
     exitRechecking = false;
   }
 

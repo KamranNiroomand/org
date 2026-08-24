@@ -10,8 +10,9 @@ import { runPaperMigrations } from '../../db/paper/migrate.js';
 import { paperDecisionLog, paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
 import { decisionsForDay, openOrder } from '../paper.js';
 import { QuantRefusal } from '../quant.js';
-import { nowIso, todayKey } from '../util.js';
+import { nowIso } from '../util.js';
 import type { ChainQuote, ChainRequest, DailyBar, OptionsProvider } from './provider.js';
+import { operatingTradingDay } from './positionHealth.js';
 import { runExitEngine, revisionsByOrder, type ExitEngineDeps } from './exitEngine.js';
 
 /**
@@ -152,7 +153,7 @@ describe('runExitEngine', () => {
 
     await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), NEVER_REVIEW_DEPS);
 
-    const rows = decisionsForDay(todayKey());
+    const rows = decisionsForDay(operatingTradingDay());
     const held = rows.find((r) => r.occSymbol === OCC && r.decision === 'held');
     expect(held).toBeDefined();
     expect(held?.reason).toBe('unchanged');
@@ -174,7 +175,7 @@ describe('runExitEngine', () => {
       }),
     });
 
-    const exited = decisionsForDay(todayKey()).find((r) => r.decision === 'exited');
+    const exited = decisionsForDay(operatingTradingDay()).find((r) => r.decision === 'exited');
     expect(exited?.reason).toBe('stop_loss');
     expect((exited?.detail as Record<string, unknown>).orderId).toBe(id);
     expect((exited?.detail as Record<string, unknown>).exitPriceE4).toBe(toE4(0.4));
@@ -193,7 +194,7 @@ describe('runExitEngine', () => {
       }),
     });
 
-    const adopted = decisionsForDay(todayKey()).find((r) => r.decision === 'adopted');
+    const adopted = decisionsForDay(operatingTradingDay()).find((r) => r.decision === 'adopted');
     expect(adopted?.reason).toBe('had_no_exit_plan');
     expect((adopted?.detail as Record<string, unknown>).stopLossPriceE4).toBe(toE4(0.5));
   });
@@ -213,7 +214,7 @@ describe('runExitEngine', () => {
       }),
     });
 
-    const moved = decisionsForDay(todayKey()).find((r) => r.decision === 'target_moved');
+    const moved = decisionsForDay(operatingTradingDay()).find((r) => r.decision === 'target_moved');
     expect(moved?.reason).toBe('trailing_stop_raised');
     expect((moved?.detail as Record<string, unknown>).newStopLossPriceE4).toBe(toE4(2.1));
   });

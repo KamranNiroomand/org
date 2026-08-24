@@ -7,7 +7,7 @@ import { runMarketMigrations } from '../db/market/migrate.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { paperDb } from '../db/paper/index.js';
 import { runPaperMigrations } from '../db/paper/migrate.js';
-import { paperEquity, paperExitRevisions, paperMarks, paperOrders } from '../db/paper/schema.js';
+import { paperDecisionLog, paperEquity, paperExitRevisions, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { nowIso } from './util.js';
 import {
   accountCapacity,
@@ -81,6 +81,11 @@ beforeEach(() => {
   paperDb.delete(paperMarks).run();
   paperDb.delete(paperEquity).run();
   paperDb.delete(paperExitRevisions).run();
+  // Cleared like every other paper table. Without this the decision log
+  // accumulates across files sharing one on-disk database — see the note
+  // in vitest.config.ts — and a row this file wrote surfaces in another
+  // file's assertions.
+  paperDb.delete(paperDecisionLog).run();
   paperDb.delete(paperOrders).run();
   marketDb.delete(optionQuotes).run();
   marketDb.delete(optionContracts).run();
@@ -303,6 +308,25 @@ describe('logDecisions', () => {
 
   it('is a no-op for an empty batch rather than an empty insert', () => {
     expect(logDecisions([])).toBe(true);
+  });
+
+  it('writes a batch far larger than SQLite’s parameter ceiling', () => {
+    // 8 bound columns against a 32,766-parameter cap means a single
+    // INSERT throws at 4,096 rows — and the catch would then lose the
+    // *whole* run's decisions rather than some of them, hardest to notice
+    // on exactly the biggest day. Chunked, so the size stops mattering.
+    // A day no other test uses. `operatingTradingDay()` can resolve to
+    // today's real date, so writing 5,000 rows onto it would surface in
+    // the exit-engine file's assertions.
+    const rows = Array.from({ length: 5_000 }, (_, i) => ({
+      day: '1999-01-01',
+      occSymbol: `S${i}`,
+      decision: 'rejected' as const,
+      reason: 'ev_below_bar',
+    }));
+
+    expect(logDecisions(rows)).toBe(true);
+    expect(decisionsForDay('1999-01-01')).toHaveLength(5_000);
   });
 
   it('round-trips a decision with its detail intact', () => {

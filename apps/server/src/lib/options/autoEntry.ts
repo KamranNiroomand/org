@@ -101,13 +101,13 @@ export async function runAutoEntry(
   // nothing", "the book was full" and "everything was too expensive" are
   // three different situations that look identical from the outside.
   if (selected.length === 0) {
-    logDecisions(decisions);
+    const logged = logDecisions(decisions);
     return {
       day,
       opened: [],
       skippedReason:
         'No contract cleared the auto-entry bar today, or none fit the account’s remaining capital and position limits.',
-      failures: [],
+      failures: logged ? [] : [`Decision log write failed for ${decisions.length} decision(s) — they are lost.`],
     };
   }
 
@@ -213,7 +213,11 @@ export async function runAutoEntry(
     }
   }
 
-  logDecisions(decisions);
+  // Checked rather than discarded — a silently failed log is the blind
+  // spot this table exists to end, rebuilt one level down.
+  if (!logDecisions(decisions)) {
+    failures.push(`Decision log write failed for ${decisions.length} decision(s) — they are lost.`);
+  }
 
   return {
     day,

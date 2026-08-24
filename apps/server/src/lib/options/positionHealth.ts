@@ -130,6 +130,28 @@ export function latestPositionHealth(): Map<string, typeof paperPositionHealth.$
  * nightly call still passes literal today deliberately, since it always
  * runs immediately after that day's own capture completes.
  */
+/**
+ * The trading day this system is operating on — the one definition every
+ * writer should use.
+ *
+ * It exists because two of them disagreed. `runAutoEntry` was called with
+ * `latestCapturedTradingDay() ?? UTC today` while the exit engine stamped
+ * its decisions with `todayKey()`, the *local* civil date. Those differed
+ * in practice, not in theory: on 2026-08-24 the newest captured day was
+ * 2026-08-21, so one session's entry decisions landed under Friday and its
+ * exit decisions under Monday. A table built to answer "what did the
+ * system do today, and why" then returned half the story to either query.
+ *
+ * Resolving to the corpus's own newest day is the right anchor: every
+ * decision is made against that data, and on a reader whose pull is stale
+ * that is genuinely the day being reasoned about. The fallback is UTC to
+ * match the scheduler's own, since a local-vs-UTC split is the second way
+ * these drift apart — in the evening they name different days.
+ */
+export function operatingTradingDay(): string {
+  return latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
+}
+
 export function latestCapturedTradingDay(): string | null {
   const row = marketDb
     .select({ lastDay: sql<string | null>`max(${optionQuotes.tradingDay})` })

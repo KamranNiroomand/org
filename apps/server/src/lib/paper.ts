@@ -439,14 +439,31 @@ export function computeDailyEquity(day: string): void {
  */
 export function logDecisions(rows: Array<Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>>): boolean {
   if (rows.length === 0) return true;
-  try {
-    const createdAt = nowIso();
-    paperDb.insert(paperDecisionLog).values(rows.map((r) => ({ ...r, createdAt }))).run();
-    return true;
-  } catch {
-    return false;
+  const createdAt = nowIso();
+  let ok = true;
+  // Chunked, because a multi-row INSERT binds 8 parameters per row and
+  // SQLite caps a statement at 32,766 of them — 4,096 rows throws `too
+  // many SQL variables` (verified against this project's SQLite 3.53.4).
+  // Auto-entry logs at most `top` candidates, currently 400, so today it
+  // is nowhere near; but `top` is a tunable request field and the universe
+  // is meant to grow, and crossing the limit with a single statement would
+  // lose the *whole* run's decisions rather than some of them — hardest to
+  // notice on exactly the biggest and most interesting day.
+  for (let i = 0; i < rows.length; i += DECISION_BATCH_SIZE) {
+    const chunk = rows.slice(i, i + DECISION_BATCH_SIZE);
+    try {
+      paperDb.insert(paperDecisionLog).values(chunk.map((r) => ({ ...r, createdAt }))).run();
+    } catch {
+      // One bad chunk must not cost the rest: a partial log beats none.
+      ok = false;
+    }
   }
+  return ok;
 }
+
+/** Rows per INSERT. 8 bound columns against SQLite's 32,766-parameter
+ * ceiling leaves 4,095; 1,000 keeps a wide margin and still batches. */
+const DECISION_BATCH_SIZE = 1_000;
 
 /** Decisions for one trading day, newest first — what the UI and any
  * "why didn't it buy X" question read. */
