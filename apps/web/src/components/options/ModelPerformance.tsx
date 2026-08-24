@@ -46,6 +46,11 @@ interface Metrics {
 interface Performance {
   target: string;
   runs: Array<{ run_id: string; registered_at: string; status: string; metrics: Metrics }>;
+  /** The run the page should lead with — the champion when one exists.
+   * Not the same question as "what was registered last", and conflating
+   * them would headline a model the system is not serving. */
+  featured_run_id: string | null;
+  featured_is_champion: boolean;
   latest_run_id: string | null;
   loss_curve: Record<string, { train?: number[]; validation?: number[] }>;
 }
@@ -219,8 +224,9 @@ export function ModelPerformance() {
     return <div className="p-6 text-sm text-muted">No training runs are registered yet.</div>;
   }
 
-  const latest = data.runs.find((r) => r.run_id === data.latest_run_id) ?? data.runs[data.runs.length - 1]!;
-  const m = latest.metrics;
+  const featured =
+    data.runs.find((r) => r.run_id === data.featured_run_id) ?? data.runs[data.runs.length - 1]!;
+  const m = featured.metrics;
   const t = num(m.ic_t_stat);
   const hurdle = num(m.ic_t_hurdle);
   const ic = num(m.ic_mean);
@@ -242,6 +248,13 @@ export function ModelPerformance() {
             <>This run recorded no t-statistic, so its significance cannot be assessed at all.</>
           )}{' '}
           Numbers below describe a plausible edge, not an established one.
+        </div>
+      )}
+
+      {!data.featured_is_champion && (
+        <div className="rounded-lg border border-border bg-bg-subtle px-4 py-3 text-[13px] leading-relaxed text-muted">
+          No run is promoted for this target, so the figures below describe the most recently
+          registered run — which is not necessarily what the ranker serves.
         </div>
       )}
 
@@ -275,7 +288,10 @@ export function ModelPerformance() {
       </section>
 
       <section>
-        <h3 className="mb-1 text-sm font-medium">Loss curve — {latest.run_id}</h3>
+        <h3 className="mb-1 text-sm font-medium">
+          Loss curve — {featured.run_id}{' '}
+          <span className="font-normal text-muted">({data.featured_is_champion ? 'champion' : 'latest registered'})</span>
+        </h3>
         <p className="mb-2 text-xs text-muted">
           Train and validation RMSE per boosting round, fold 0. Validation turning up while train
           keeps falling is overfitting.

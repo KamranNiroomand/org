@@ -118,13 +118,29 @@ def read_loss_curve(run_id: str, base_dir: Path | None = None) -> dict[str, dict
 def model_performance(target: str = "dir", base_dir: Path | None = None) -> dict:
     """The whole dashboard payload for one target.
 
-    The loss curve is attached only for the most recent run. Every run's
-    curve would be several hundred floats per fold per run, and the
-    question a loss curve answers — did *this* fit overfit — is asked of
-    the model in front of you, not of one from three weeks ago.
+    **Headlines the champion, not the newest run.** Those are usually the
+    same and must not be assumed to be: the system serves whatever the
+    registry names champion (`rank.py::resolve_model`), so a page whose
+    stat tiles and pass/fail banner came from the most recently registered
+    run would confidently describe a model that is not running the moment a
+    challenger is registered after a promotion. This codebase has now hit
+    that shape three separate times — a server on week-old code, positions
+    the exit engine could not see, a champion the ranker ignored — and each
+    time the system held the right answer and surfaced a different one.
+
+    `featured_run_id` is what the page should lead with, and
+    `featured_is_champion` says whether it is genuinely the live model or
+    a fallback to the newest run because nothing is promoted. The caller
+    must not infer that from status strings itself; that inference is the
+    bug.
+
+    The loss curve is attached for the featured run only. Every run's curve
+    would be hundreds of floats per fold, and the question it answers — did
+    *this* fit overfit — is asked of the model in front of you.
     """
     runs = read_run_history(target)
-    latest = runs[-1] if runs else None
+    champion = next((r for r in runs if r.status == "champion"), None)
+    featured = champion or (runs[-1] if runs else None)
     return {
         "target": target,
         "runs": [
@@ -136,6 +152,11 @@ def model_performance(target: str = "dir", base_dir: Path | None = None) -> dict
             }
             for r in runs
         ],
-        "latest_run_id": latest.run_id if latest else None,
-        "loss_curve": read_loss_curve(latest.run_id, base_dir) if latest else {},
+        "featured_run_id": featured.run_id if featured else None,
+        "featured_is_champion": champion is not None,
+        # Retained under its old name so nothing that reads it breaks; it
+        # answers "what was registered last", which is a different question
+        # from "what is running" and should not be used for the latter.
+        "latest_run_id": runs[-1].run_id if runs else None,
+        "loss_curve": read_loss_curve(featured.run_id, base_dir) if featured else {},
     }

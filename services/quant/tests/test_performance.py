@@ -143,8 +143,53 @@ class TestPayload:
 
         payload = perf.model_performance("dir", tmp_path)
 
+        # Nothing is promoted here, so the newest run is featured.
+        assert payload["featured_run_id"] == "latest"
+        assert payload["featured_is_champion"] is False
         assert payload["latest_run_id"] == "latest"
         assert len(payload["runs"]) == 2
+        assert payload["loss_curve"]["0"]["train"] == [1.0]
+
+    def test_headlines_the_champion_not_the_newest_registration(self, registry, tmp_path) -> None:
+        """The defect this prevents: the page's stat tiles and pass/fail
+        banner describing a model the system is not serving. Model
+        selection resolves the registry champion, so registering a
+        challenger after a promotion would otherwise re-headline the page
+        with a run that never scores anything."""
+        _insert(registry, "champ", "2026-08-20T00:00:00Z", {"ic_mean": 0.04}, status="champion")
+        _insert(registry, "newer", "2026-08-24T00:00:00Z", {"ic_mean": 0.01}, status="challenger")
+
+        payload = perf.model_performance("dir", tmp_path)
+
+        assert payload["featured_run_id"] == "champ"
+        assert payload["featured_is_champion"] is True
+        # Still reported, because "what was registered last" is a real and
+        # separate question — it just must not drive the headline.
+        assert payload["latest_run_id"] == "newer"
+
+    def test_falls_back_to_the_newest_run_and_says_so_when_nothing_is_promoted(
+        self, registry, tmp_path
+    ) -> None:
+        _insert(registry, "a", "2026-08-20T00:00:00Z", {}, status="challenger")
+        _insert(registry, "b", "2026-08-24T00:00:00Z", {}, status="challenger")
+
+        payload = perf.model_performance("dir", tmp_path)
+
+        assert payload["featured_run_id"] == "b"
+        assert payload["featured_is_champion"] is False
+
+    def test_the_curve_follows_the_featured_run(self, registry, tmp_path) -> None:
+        # A champion's curve, not the newest run's — otherwise the page
+        # would show one model's overfitting under another model's name.
+        _insert(registry, "champ", "2026-08-20T00:00:00Z", {}, status="champion")
+        _insert(registry, "newer", "2026-08-24T00:00:00Z", {}, status="challenger")
+        for name, val in (("champ", 1.0), ("newer", 9.0)):
+            d = tmp_path / name
+            d.mkdir()
+            (d / "history.json").write_text(json.dumps({"0": {"train": [val], "validation": [val]}}))
+
+        payload = perf.model_performance("dir", tmp_path)
+
         assert payload["loss_curve"]["0"]["train"] == [1.0]
 
     def test_an_empty_registry_is_a_valid_payload(self, registry, tmp_path) -> None:

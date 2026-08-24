@@ -325,6 +325,12 @@ export interface ModelPerformance {
     status: string;
     metrics: Record<string, number | boolean | null | undefined>;
   }>;
+  /** The run the dashboard should lead with — the champion when one
+   * exists. Distinct from `latest_run_id` on purpose: the system serves
+   * the champion, so headlining the newest registration would describe a
+   * model that is not running. */
+  featured_run_id: string | null;
+  featured_is_champion: boolean;
   latest_run_id: string | null;
   /** `{fold: {train: number[], validation: number[]}}`, empty when the run
    * predates loss-history recording. */
