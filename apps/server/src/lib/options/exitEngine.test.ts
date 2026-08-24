@@ -102,6 +102,7 @@ const NEVER_REVIEW_DEPS: ExitEngineDeps = {
     action: 'hold',
     newTargetExitPriceE4: toE4(1.5),
     newTargetExitDate: '2026-09-01',
+    newStopLossPriceE4: null,
     reason: 'no trigger',
     triggeredBy: 'unchanged',
   }),
@@ -141,6 +142,57 @@ describe('runExitEngine', () => {
     expect(summary.checked).toBe(0);
   });
 
+  it('persists a ratcheted stop so the trail actually survives to the next pass', async () => {
+    // The failure this pins is silent: if the raised stop is not written,
+    // it resets every pass and the position trails nothing — the rule
+    // looks implemented and does nothing at all.
+    const id = openManagedPosition();
+
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(3.0))), {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async () => ({
+        action: 'hold',
+        newTargetExitPriceE4: toE4(1.5),
+        newTargetExitDate: '2026-09-01',
+        newStopLossPriceE4: toE4(2.1),
+        reason: 'letting it run with the stop raised',
+        triggeredBy: 'trail_raised',
+      }),
+    });
+
+    expect(summary.revised).toBe(1);
+    const [order] = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).all();
+    expect(order?.stopLossPriceE4).toBe(toE4(2.1));
+    expect(order?.status).toBe('open'); // still running — that is the point
+    const revisions = revisionsByOrder().get(id) ?? [];
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]?.oldStopLossPriceE4).toBe(toE4(0.5));
+    expect(revisions[0]?.newStopLossPriceE4).toBe(toE4(2.1));
+    expect(revisions[0]?.triggeredBy).toBe('rule');
+  });
+
+  it('never lowers a stop, even if asked to', async () => {
+    // A stop that can move down is not a stop. `evaluate_exit` already
+    // guarantees the ratchet is monotone; this is the second lock.
+    const id = openManagedPosition();
+
+    await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async () => ({
+        action: 'hold',
+        newTargetExitPriceE4: toE4(1.5),
+        newTargetExitDate: '2026-09-01',
+        newStopLossPriceE4: toE4(0.1), // below the 0.5 already in force
+        reason: 'should be ignored',
+        triggeredBy: 'trail_raised',
+      }),
+    });
+
+    const [order] = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).all();
+    expect(order?.stopLossPriceE4).toBe(toE4(0.5));
+    expect(revisionsByOrder().get(id) ?? []).toHaveLength(0);
+  });
+
   it('adopts a model-opened position that has no exit plan, then manages it', async () => {
     // This used to assert `checked: 0` — "ignores a model-opened position
     // with no exit target recorded yet". That was the bug, not the spec:
@@ -161,7 +213,8 @@ describe('runExitEngine', () => {
 
     expect(summary.adopted).toBe(1);
     expect(summary.checked).toBe(1); // adopted first, so it is visible in the same run
-    const order = paperDb.select().from(paperOrders).all()[0];
+    const [order] = paperDb.select().from(paperOrders).all();
+    if (!order) throw new Error('expected an order');
     expect(order.targetExitPriceE4).toBe(toE4(1.5));
     expect(order.stopLossPriceE4).toBe(toE4(0.5));
     expect(order.targetExitDate).toBe('2026-09-01');
@@ -186,7 +239,8 @@ describe('runExitEngine', () => {
     expect(summary.adopted).toBe(0);
     expect(summary.checked).toBe(0);
     expect(summary.errors.join(' ')).toContain('no exit plan is computable');
-    const order = paperDb.select().from(paperOrders).all()[0];
+    const [order] = paperDb.select().from(paperOrders).all();
+    if (!order) throw new Error('expected an order');
     expect(order.targetExitPriceE4).toBeNull();
   });
 
@@ -232,6 +286,7 @@ describe('runExitEngine', () => {
         action: 'exit_now',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'hit stop-loss',
         triggeredBy: 'stop_loss',
       }),
@@ -260,6 +315,7 @@ describe('runExitEngine', () => {
         action: 'needs_review',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'EV flipped sign',
         triggeredBy: 'ev_sign_flip',
       }),
@@ -280,6 +336,7 @@ describe('runExitEngine', () => {
         action: 'needs_review',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'new documents',
         triggeredBy: 'new_news',
       }),
@@ -311,6 +368,7 @@ describe('runExitEngine', () => {
         action: 'needs_review',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'EV flipped sign',
         triggeredBy: 'ev_sign_flip',
       }),
@@ -318,6 +376,7 @@ describe('runExitEngine', () => {
         action: 'exit_now',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reasoning: 'The flip reflects a real, durable change.',
         citedInputs: ['currentEv'],
       }),
@@ -337,6 +396,7 @@ describe('runExitEngine', () => {
         action: 'needs_review',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'new documents',
         triggeredBy: 'new_news',
       }),
@@ -382,6 +442,7 @@ describe('runExitEngine', () => {
         action: 'exit_now',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'hit stop-loss',
         triggeredBy: 'stop_loss',
       }),
@@ -400,6 +461,7 @@ describe('runExitEngine', () => {
         action: 'needs_review',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'new documents',
         triggeredBy: 'new_news',
       }),
@@ -427,6 +489,7 @@ describe('runExitEngine', () => {
         action: 'needs_review',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'new documents',
         triggeredBy: 'new_news',
       }),
@@ -434,6 +497,7 @@ describe('runExitEngine', () => {
         action: 'hold',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reasoning: 'One ambiguous headline is not grounds to exit.',
         citedInputs: [],
       }),
@@ -453,6 +517,7 @@ describe('runExitEngine revision atomicity', () => {
         action: 'needs_review',
         newTargetExitPriceE4: null,
         newTargetExitDate: null,
+        newStopLossPriceE4: null,
         reason: 'new documents',
         triggeredBy: 'new_news',
       }),
