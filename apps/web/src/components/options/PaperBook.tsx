@@ -119,9 +119,17 @@ function DailyPnl({ points, startingBalanceE4 }: { points: PaperEquityPoint[]; s
         ...p,
         changeE4: p.totalEquityE4 - prevEquity,
         realizedTodayE4: p.realizedPlToDateE4 - (prev?.realizedPlToDateE4 ?? 0),
-        // Marked-to-market gain on positions still open: what they are
-        // marked at now, less what was paid for them.
-        unrealizedE4: p.totalEquityE4 - startingBalanceE4 - p.realizedPlToDateE4,
+        // Both columns are *daily*, which is worth stating because the
+        // first version was not: realized was a delta and unrealized was
+        // a to-date figure, so two columns of one row silently meant
+        // different periods on a table whose whole premise is that those
+        // two claims must not be conflated.
+        //
+        // Daily also buys an invariant worth having: Change = Realized +
+        // Unrealized, exactly. A row where those stop adding up is a bug
+        // in the marking job, and now it is visible on the page.
+        unrealizedTodayE4:
+          p.totalEquityE4 - startingBalanceE4 - p.realizedPlToDateE4 - unrealizedToDate(prev, startingBalanceE4),
       };
     })
     .reverse();
@@ -153,7 +161,9 @@ function DailyPnl({ points, startingBalanceE4 }: { points: PaperEquityPoint[]; s
               <td className={cn('px-3 py-2 text-right', toneFor(r.realizedTodayE4))}>
                 {r.realizedTodayE4 === 0 ? '—' : signed(r.realizedTodayE4)}
               </td>
-              <td className={cn('px-3 py-2 text-right', toneFor(r.unrealizedE4))}>{signed(r.unrealizedE4)}</td>
+              <td className={cn('px-3 py-2 text-right', toneFor(r.unrealizedTodayE4))}>
+                {r.unrealizedTodayE4 === 0 ? '—' : signed(r.unrealizedTodayE4)}
+              </td>
               <td className="px-3 py-2 text-right">{usd(r.cashE4)}</td>
               <td className={cn('px-3 py-2 text-right', toneFor(r.cumulativeReturnPct))}>
                 {pct(r.cumulativeReturnPct, 3)}
@@ -165,15 +175,25 @@ function DailyPnl({ points, startingBalanceE4 }: { points: PaperEquityPoint[]; s
       <p className="px-3 py-2 text-xs text-muted">
         Realized is banked on close. Unrealized is a mark — with no quote entitlement on this data
         plan it is the contract’s close, not a bid, so it has never been tested against a price
-        anyone would fill at. A day with no row is a day the marking job did not run.
+        anyone would fill at. Both are daily, so Change = Realized + Unrealized on every row. A
+        day with no row is a day the marking job did not run.
       </p>
     </div>
   );
 }
 
+/** Unrealized P&L carried into a row, so the next row can express its own
+ * as a daily change. Zero before the first stored row. */
+function unrealizedToDate(prev: PaperEquityPoint | undefined, startingBalanceE4: number): number {
+  if (!prev) return 0;
+  return prev.totalEquityE4 - startingBalanceE4 - prev.realizedPlToDateE4;
+}
+
 /** Reuses the file's own `usd`, so every dollar figure on this tab is
- * formatted one way; only the leading sign is added here. */
-const signed = (e4: number) => `${e4 >= 0 ? '+' : '−'}${usd(Math.abs(e4))}`;
+ * formatted one way — including the minus. An earlier version prefixed
+ * U+2212 while `usd` emits U+002D for negatives, which put two different
+ * minus characters two columns apart in the same row. */
+const signed = (e4: number) => (e4 >= 0 ? `+${usd(e4)}` : usd(e4));
 const toneFor = (v: number) => (v > 0 ? 'text-positive' : v < 0 ? 'text-negative' : 'text-muted');
 
 function OpenOrderForm({ onOpened }: { onOpened: () => void }) {
