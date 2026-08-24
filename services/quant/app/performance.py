@@ -129,7 +129,11 @@ def read_loss_curve(run_id: str, base_dir: Path | None = None) -> dict[str, dict
     return loaded
 
 
-def model_performance(target: str = "dir", base_dir: Path | None = None) -> dict:
+def model_performance(
+    target: str = "dir",
+    base_dir: Path | None = None,
+    run_id: str | None = None,
+) -> dict:
     """The whole dashboard payload for one target.
 
     **Headlines the champion, not the newest run.** Those are usually the
@@ -148,13 +152,21 @@ def model_performance(target: str = "dir", base_dir: Path | None = None) -> dict
     must not infer that from status strings itself; that inference is the
     bug.
 
-    The loss curve is attached for the featured run only. Every run's curve
-    would be hundreds of floats per fold, and the question it answers — did
-    *this* fit overfit — is asked of the model in front of you.
+    One run's loss curve is attached per request — the champion by default,
+    or `run_id` when the caller wants another. Every run's curve inlined
+    would be hundreds of floats per fold per run, so the payload would grow
+    without bound as runs accumulate while a reader looks at one at a time.
+    `has_loss_curve` on each run is what lets a caller offer the choice
+    without paying for all of them.
     """
     runs = read_run_history(target)
     champion = next((r for r in runs if r.status == "champion"), None)
-    featured = champion or (runs[-1] if runs else None)
+    default = champion or (runs[-1] if runs else None)
+    requested = next((r for r in runs if r.run_id == run_id), None) if run_id else None
+    # An unknown run_id falls back rather than erroring: a stale link or a
+    # run pruned since the page loaded should show the champion's curve,
+    # not a blank page.
+    featured = requested or default
     return {
         "target": target,
         "runs": [
@@ -163,11 +175,17 @@ def model_performance(target: str = "dir", base_dir: Path | None = None) -> dict
                 "registered_at": r.registered_at,
                 "status": r.status,
                 "metrics": r.metrics,
+                # Whether a curve exists *without* shipping it, so the UI
+                # can offer only the runs that have one.
+                "has_loss_curve": bool(r.history) or bool(read_loss_curve(r.run_id, base_dir)),
             }
             for r in runs
         ],
         "featured_run_id": featured.run_id if featured else None,
-        "featured_is_champion": champion is not None,
+        # True only when the run being *shown* is the champion — not merely
+        # when one exists, which would mislabel a deliberately selected
+        # challenger as the live model.
+        "featured_is_champion": featured is not None and featured.status == "champion",
         # Retained under its old name so nothing that reads it breaks; it
         # answers "what was registered last", which is a different question
         # from "what is running" and should not be used for the latter.

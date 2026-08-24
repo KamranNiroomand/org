@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
 import {
   CartesianGrid,
   Line,
@@ -45,7 +46,13 @@ interface Metrics {
 
 interface Performance {
   target: string;
-  runs: Array<{ run_id: string; registered_at: string; status: string; metrics: Metrics }>;
+  runs: Array<{
+    run_id: string;
+    registered_at: string;
+    status: string;
+    metrics: Metrics;
+    has_loss_curve: boolean;
+  }>;
   /** The run the page should lead with — the champion when one exists.
    * Not the same question as "what was registered last", and conflating
    * them would headline a model the system is not serving. */
@@ -133,34 +140,28 @@ function SkillChart({ runs }: { runs: Performance['runs'] }) {
 }
 
 /**
- * Train vs validation RMSE per boosting round, for the most recent run.
+ * Train vs validation RMSE per boosting round — **every fold of one
+ * training run**, side by side.
  *
- * The one question the out-of-fold summary metrics cannot answer: a
- * validation curve that turns upward while training keeps falling is
- * overfitting, and a single end-of-run number has already absorbed that
- * into itself.
+ * The question a loss curve answers is "did this fit overfit", and the
+ * out-of-fold summary metrics cannot answer it: they report where the fit
+ * ended up, having already absorbed whatever happened on the way. Only the
+ * curve shows a validation line turning upward while training keeps
+ * falling.
  *
- * Fold 0 only. Each fold trains on a different span of an expanding
- * window, so overlaying them compares curves of different lengths on
- * different data — visually busy and not actually a comparison.
+ * All folds rather than just the first, because they disagree and the
+ * disagreement is the information. On this corpus validation bottoms at
+ * rounds 1, 6, 7 and 65 across the four folds — a single fold would have
+ * suggested a clean answer that the others contradict.
+ *
+ * The best round is marked on each chart. That is a *diagnostic*, never a
+ * setting: choosing a round count against these curves would be selecting
+ * on the very block the reported metrics are computed from, turning every
+ * out-of-fold number on this page into an in-sample one.
  */
-function LossCurve({ curve }: { curve: Performance['loss_curve'] }) {
-  const folds = Object.keys(curve).sort((a, b) => Number(a) - Number(b));
-  const first = folds[0];
-  const series = first ? curve[first] : undefined;
-  const train = series?.train ?? [];
-  const validation = series?.validation ?? [];
-
-  if (train.length === 0 && validation.length === 0) {
-    return (
-      <Empty>
-        Not recorded for this run. Loss history is written from the next training run onward — an
-        absent curve is shown as absent rather than as a flat line, which is the shape a perfectly
-        fit model would have.
-      </Empty>
-    );
-  }
-
+function FoldCurve({ fold, series }: { fold: string; series: { train?: number[]; validation?: number[] } }) {
+  const train = series.train ?? [];
+  const validation = series.validation ?? [];
   const rounds = Math.max(train.length, validation.length);
   const points = Array.from({ length: rounds }, (_, i) => ({
     round: i + 1,
@@ -168,48 +169,101 @@ function LossCurve({ curve }: { curve: Performance['loss_curve'] }) {
     validation: validation[i] ?? null,
   }));
 
+  const best = validation.length
+    ? validation.indexOf(Math.min(...validation.filter((v) => Number.isFinite(v)))) + 1
+    : null;
+  const overfits = best !== null && best < validation.length;
+
   return (
-    <div className="h-56 px-2 pt-3">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={points} margin={{ left: 4, right: 12, top: 4, bottom: 0 }}>
-          <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 3" />
-          <XAxis dataKey="round" tick={{ fontSize: 11, fill: 'var(--color-muted)' }} tickLine={false} axisLine={false} />
-          <YAxis
-            tick={{ fontSize: 11, fill: 'var(--color-muted)' }}
-            tickLine={false}
-            axisLine={false}
-            domain={['auto', 'auto']}
-            tickFormatter={(v: number) => v.toFixed(4)}
-          />
-          <Tooltip
-            contentStyle={{
-              background: 'var(--color-bg)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 8,
-              fontSize: 12,
-            }}
-            formatter={(v) => (typeof v === 'number' ? v.toFixed(5) : String(v))}
-            labelFormatter={(r) => `Round ${r}`}
-          />
-          <Line type="monotone" dataKey="train" name="train" stroke="var(--color-accent)" strokeWidth={2} dot={false} />
-          <Line
-            type="monotone"
-            dataKey="validation"
-            name="validation"
-            stroke="var(--color-warning)"
-            strokeWidth={2}
-            dot={false}
-          />
-        </LineChart>
-      </ResponsiveContainer>
+    <div className="rounded-lg border border-border">
+      <div className="flex items-baseline justify-between border-b border-border px-3 py-2">
+        <span className="text-xs font-medium">Fold {fold}</span>
+        <span className="text-xs text-muted">
+          {best === null ? (
+            'no validation curve'
+          ) : (
+            <>
+              best round {best} of {rounds}
+              {overfits ? <span className="text-warning"> · {rounds - best} spent overfitting</span> : null}
+            </>
+          )}
+        </span>
+      </div>
+      <div className="h-44 px-1 pt-2">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={points} margin={{ left: 4, right: 10, top: 4, bottom: 0 }}>
+            <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 3" />
+            <XAxis dataKey="round" tick={{ fontSize: 10, fill: 'var(--color-muted)' }} tickLine={false} axisLine={false} />
+            <YAxis
+              tick={{ fontSize: 10, fill: 'var(--color-muted)' }}
+              tickLine={false}
+              axisLine={false}
+              width={52}
+              domain={['auto', 'auto']}
+              tickFormatter={(v: number) => v.toFixed(4)}
+            />
+            <Tooltip
+              contentStyle={{
+                background: 'var(--color-bg)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 8,
+                fontSize: 12,
+              }}
+              formatter={(v) => (typeof v === 'number' ? v.toFixed(5) : String(v))}
+              labelFormatter={(r) => `Round ${r}`}
+            />
+            {best !== null && (
+              <ReferenceLine x={best} stroke="var(--color-muted)" strokeDasharray="3 3" />
+            )}
+            <Line type="monotone" dataKey="train" name="train" stroke="var(--color-accent)" strokeWidth={1.75} dot={false} />
+            <Line
+              type="monotone"
+              dataKey="validation"
+              name="validation"
+              stroke="var(--color-warning)"
+              strokeWidth={1.75}
+              dot={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+function LossCurves({ curve }: { curve: Performance['loss_curve'] }) {
+  const folds = Object.keys(curve).sort((a, b) => Number(a) - Number(b));
+  const withData = folds.filter((f) => (curve[f]?.train?.length ?? 0) > 0 || (curve[f]?.validation?.length ?? 0) > 0);
+
+  if (withData.length === 0) {
+    return (
+      <Empty>
+        Not recorded for this run. Loss history is written from each training run that followed it —
+        an absent curve is shown as absent rather than as a flat line, which is the shape a
+        perfectly fit model would have.
+      </Empty>
+    );
+  }
+
+  return (
+    <div className="grid gap-3 md:grid-cols-2">
+      {withData.map((f) => (
+        <FoldCurve key={f} fold={f} series={curve[f]!} />
+      ))}
     </div>
   );
 }
 
 export function ModelPerformance() {
+  // Which run's curves to show. Null means "whatever the server features",
+  // which is the champion — the model actually being served.
+  const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data, isLoading, error } = useQuery({
-    queryKey: ['quant', 'performance'],
-    queryFn: () => api.get<Performance>('/api/quant/performance'),
+    queryKey: ['quant', 'performance', selectedRun],
+    queryFn: () =>
+      api.get<Performance>(
+        selectedRun ? `/api/quant/performance?run=${encodeURIComponent(selectedRun)}` : '/api/quant/performance',
+      ),
   });
 
   if (isLoading) return <div className="p-6 text-sm text-muted">Loading model performance…</div>;
@@ -288,17 +342,36 @@ export function ModelPerformance() {
       </section>
 
       <section>
-        <h3 className="mb-1 text-sm font-medium">
-          Loss curve — {featured.run_id}{' '}
-          <span className="font-normal text-muted">({data.featured_is_champion ? 'champion' : 'latest registered'})</span>
-        </h3>
-        <p className="mb-2 text-xs text-muted">
-          Train and validation RMSE per boosting round, fold 0. Validation turning up while train
-          keeps falling is overfitting.
-        </p>
-        <div className="rounded-lg border border-border">
-          <LossCurve curve={data.loss_curve} />
+        <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+          <h3 className="text-sm font-medium">
+            Loss curves — {featured.run_id}{' '}
+            <span className="font-normal text-muted">
+              ({data.featured_is_champion ? 'champion' : featured.status})
+            </span>
+          </h3>
+          <label className="flex items-center gap-2 text-xs text-muted">
+            Training run
+            <select
+              className="rounded border border-border bg-bg px-2 py-1 text-xs"
+              value={featured.run_id}
+              onChange={(e) => setSelectedRun(e.target.value)}
+            >
+              {data.runs.map((r) => (
+                <option key={r.run_id} value={r.run_id} disabled={!r.has_loss_curve}>
+                  {r.registered_at.slice(0, 10)} · {r.status}
+                  {r.has_loss_curve ? '' : ' · no curve'}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
+        <p className="mb-2 text-xs text-muted">
+          Train and validation RMSE per boosting round, every fold of this run. Validation turning
+          up while train keeps falling is overfitting; the dashed line marks where validation
+          bottomed. That mark is a diagnostic, never a setting — choosing a round count against
+          these curves would select on the same block the metrics above are computed from.
+        </p>
+        <LossCurves curve={data.loss_curve} />
       </section>
 
       <section>

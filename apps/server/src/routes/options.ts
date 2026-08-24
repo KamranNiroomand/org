@@ -345,11 +345,11 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    * here.
    */
   app.get('/api/quant/performance', async (req, reply) => {
-    const target = typeof (req.query as { target?: string })?.target === 'string'
-      ? (req.query as { target: string }).target
-      : 'dir';
+    const query = req.query as { target?: string; run?: string };
+    const target = typeof query?.target === 'string' ? query.target : 'dir';
+    const run = typeof query?.run === 'string' ? query.run : undefined;
     try {
-      return await modelPerformance(target);
+      return await modelPerformance(target, run);
     } catch (err) {
       if (err instanceof QuantUnavailable) {
         return reply.code(503).send({ error: `Quant service unavailable: ${err.message}` });

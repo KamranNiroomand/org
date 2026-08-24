@@ -326,14 +326,14 @@ class RankResponse(BaseModel):
 
 
 @app.get("/stock/performance")
-def stock_performance(target: str = "dir") -> dict:
+def stock_performance(target: str = "dir", run: str | None = None) -> dict:
     """The model-performance dashboard's data, computed in Python.
 
     A pass-through on the Node side by design — see performance.py's module
     docstring on why model-quality statistics must have exactly one
     definition, and why trading P&L is deliberately not in this payload.
     """
-    return model_performance(target)
+    return model_performance(target, run_id=run)
 
 
 @app.post("/rank", response_model=RankResponse)
