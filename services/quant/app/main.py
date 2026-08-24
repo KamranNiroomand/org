@@ -520,7 +520,19 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
     try:
         model_dir = latest_model_dir()
         _, manifest = load_model(model_dir)
-        ranked = rank_day(request.day, model_dir, top=request.top, force=True)
+        # The band goes into `rank_day`, not just into `select_entries`:
+        # the top-`top` cut is by absolute EV, which grows with maturity,
+        # so filtering afterwards can leave nothing in band on a board
+        # whose long-dated contracts alone fill the cut. See rank_day's
+        # docstring. `select_entries` re-applies it as a cheap invariant.
+        ranked = rank_day(
+            request.day,
+            model_dir,
+            top=request.top,
+            force=True,
+            min_dte=request.min_dte,
+            max_dte=request.max_dte,
+        )
     except SystemExit as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 

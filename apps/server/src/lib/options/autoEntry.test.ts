@@ -223,6 +223,20 @@ describe('runAutoEntry', () => {
     expect(paperDb.select().from(paperOrders).all()).toHaveLength(0);
   });
 
+  it('refuses a price too small to survive E4 rounding rather than dividing by zero', async () => {
+    // $0.00001 rounds to 0 in E4, so cost-per-contract is 0. `Infinity`
+    // (or `NaN`, with no cash left) then walks straight past a `size < 1`
+    // check, because `NaN < 1` is false.
+    const c = ranked({ occ_symbol: 'DUST  260919C00100000', underlying: 'DUST', market_price: 0.00001 });
+    contract(c.occ_symbol, 'DUST');
+
+    const result = await runAutoEntry('2026-08-18', selectFn([pick(c, 40)]));
+
+    expect(result.opened).toEqual([]);
+    expect(result.skippedReason).toContain('too small to price in E4');
+    expect(paperDb.select().from(paperOrders).all()).toHaveLength(0);
+  });
+
   it('passes the configured DTE band through to the allocator', async () => {
     const captured: { input?: SelectEntriesInput } = {};
     await runAutoEntry('2026-08-18', selectFn([], captured));

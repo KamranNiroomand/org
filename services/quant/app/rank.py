@@ -445,12 +445,27 @@ def rank_day(
     round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
     force: bool = False,
     max_capital: float | None = None,
+    min_dte: int | None = None,
+    max_dte: int | None = None,
 ) -> list[RankedContract]:
     """The full pipeline: load a model, forecast every underlying, price
     every underlying's gate-passing chain against that forecast, and return
     the top `top` contracts by expected value. See `rank_underlying`'s own
     docstring for why `max_capital` has to be applied per-contract here,
     before ranking, rather than by the caller filtering the result after.
+
+    `min_dte`/`max_dte` are applied here for the same reason, and it
+    matters more than it looks. `ev` is an absolute dollar figure, and
+    `forecast_value` compounds a constant drift over the contract's whole
+    life — so on one underlying the longer-dated contract carries the
+    larger EV almost mechanically, and the top-`top` slice skews long.
+    Leaving the maturity filter to the caller therefore does not just cost
+    a few candidates: on a board with enough long-dated contracts to fill
+    `top` on their own, every in-band candidate is cut before the caller
+    ever sees one, and an empty selection reads as "the market offered
+    nothing today" when it was really the truncation. Both bounds are
+    inclusive; `None` disables that end (the Signal Board wants the whole
+    board, unfiltered).
     """
     drift_by_symbol, vol_by_symbol, rate_curve, _manifest = _forecast_inputs(
         trading_day, model_dir, vol_window, force
@@ -489,6 +504,12 @@ def rank_day(
                 max_capital=max_capital,
             )
         )
+
+    # Before the sort and the cut, per the docstring above.
+    if min_dte is not None:
+        ranked = [c for c in ranked if c.dte >= min_dte]
+    if max_dte is not None:
+        ranked = [c for c in ranked if c.dte <= max_dte]
 
     ranked.sort(key=lambda c: c.ev, reverse=True)
     return ranked[:top]
@@ -551,14 +572,15 @@ def select_entries(
     (DeMiguel, Garlappi & Uppal 2009), and it is the honest choice for a
     model that has not yet cleared its own significance hurdle.
 
-    A consequence worth stating rather than hiding: slots are budgeted, not
-    filled opportunistically, so a day offering one qualifying candidate
-    deploys roughly `1/max_new_positions` of available capital and leaves
-    the rest in cash. That is intentional. Pouring a full day's budget into
-    the single name that happened to clear the bar is exactly the
-    concentration the equal-weight rule exists to prevent — a thin day is
-    evidence for less exposure, not for a bigger bet on what little there
-    is.
+    The weight is one share of the *book*, not of the day: available
+    capital is divided by the concurrent-position room, not by the
+    per-day cap. Two consequences, both intentional and both easy to
+    mistake for bugs. A day offering one qualifying candidate deploys
+    roughly one slot's worth and leaves the rest in cash — a thin day is
+    evidence for less exposure, not for a bigger bet on what little
+    cleared the bar. And a day that fills its per-day cap still leaves
+    room for later days at comparable size, instead of spending the whole
+    account on whichever names happened to qualify first.
 
     One accepted contract per underlying per day, and never an underlying
     already held — the same one-position-per-underlying rule autoEntry.ts
@@ -584,10 +606,16 @@ def select_entries(
     if budget_slots <= 0 or remaining <= 0:
         return []
 
-    # Equal weight across every slot the account could fill today, not
-    # across the ones that happen to qualify — see the docstring on why a
-    # thin day deploys less rather than concentrating.
-    per_slot_budget = available_capital / budget_slots
+    # Equal weight across every position the *book* can hold, not across
+    # the ones this one day may open. Dividing by the daily cap instead
+    # sizes each of today's picks as though today were the only day the
+    # book will ever fill: at the shipped 10-concurrent/5-per-day defaults
+    # that puts 100% of deployable capital into day one's five names, and
+    # day two's five then arrive at a fifth the size — a 5:1 overweight
+    # decided by which name happened to clear the bar first. Chronological
+    # accident is not conviction, and concentrating on it is exactly what
+    # the equal-weight rule above exists to prevent.
+    per_slot_budget = available_capital / room
 
     taken_underlyings: set[str] = set()
     selected: list[EntrySelection] = []

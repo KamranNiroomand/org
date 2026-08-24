@@ -488,9 +488,10 @@ class TestSelectEntries:
         assert r.json()["selected"] == []
 
     def test_each_selection_carries_a_quantity_and_a_cost(self, tmp_path, monkeypatch) -> None:
-        # $100,000 over 5 slots is $20,000 each; the fixture costs $500 a
-        # contract, so 40 units. The caller writes this quantity straight
-        # onto the order — it used to hard-code 1 regardless of price.
+        # $100,000 over the 10 concurrent slots is $10,000 each; the
+        # fixture costs $500 a contract, so 20 units. The caller writes
+        # this straight onto the order — it used to hard-code 1
+        # regardless of what the contract cost.
         run_dir = tmp_path / "sized"
         _write_model_with_horizon(run_dir)
         monkeypatch.setattr("app.main.latest_model_dir", lambda: run_dir)
@@ -499,8 +500,8 @@ class TestSelectEntries:
         r = client.post("/select-entries", json=_SELECT_BODY)
         assert r.status_code == 200
         picked = r.json()["selected"][0]
-        assert picked["quantity"] == 40
-        assert picked["cost"] == 20_000.0
+        assert picked["quantity"] == 20
+        assert picked["cost"] == 10_000.0
 
     def test_a_maturity_outside_the_band_is_not_selected(self, tmp_path, monkeypatch) -> None:
         leap = replace(_FAKE_CONTRACT, expiry="2027-01-16", dte=400)

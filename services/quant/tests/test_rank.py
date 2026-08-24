@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import lightgbm as lgb
 import polars as pl
@@ -395,6 +396,60 @@ def _latest_priced_liquid_day() -> str | None:
     return row["day"] if row and row["day"] else None
 
 
+class TestRankDayDteBand:
+    """`rank_day` applies the maturity band before its top-N cut, and the
+    ordering is the whole point — see the docstring for why filtering
+    afterwards can leave nothing in band at all.
+    """
+
+    def _patch_pipeline(self, monkeypatch, contracts) -> None:
+        monkeypatch.setattr(
+            "app.rank._forecast_inputs",
+            lambda *a, **k: ({"TEST": 0.05}, {"TEST": 0.3}, [(30, 0.04)], {"horizon": 5}),
+        )
+        monkeypatch.setattr("app.rank.read_quotes", lambda *a, **k: pl.DataFrame({"x": [1]}))
+        monkeypatch.setattr("app.rank._vol_forecast_ratio", lambda *a, **k: 1.0)
+        monkeypatch.setattr("app.rank.rank_underlying", lambda *a, **k: contracts)
+
+    def test_a_far_dated_contract_is_dropped(self, monkeypatch) -> None:
+        near = _candidate(underlying="TEST", occ_symbol="TEST  260918C00100000", dte=30, ev=10.0)
+        leap = _candidate(underlying="TEST", occ_symbol="TEST  270918C00100000", dte=400, ev=99.0)
+        self._patch_pipeline(monkeypatch, [near, leap])
+
+        ranked = rank_day("2026-01-01", Path("unused"), top=10, min_dte=14, max_dte=60)
+
+        assert [c.dte for c in ranked] == [30]
+
+    def test_the_band_filters_before_the_top_n_cut_not_after(self, monkeypatch) -> None:
+        # The real defect. `ev` is an absolute dollar figure and
+        # `forecast_value` compounds drift over the contract's whole life,
+        # so long-dated contracts carry larger EV almost mechanically and
+        # crowd out the top of the list. With the filter applied after the
+        # cut, `top=2` here would keep the two LEAPs and then discard both,
+        # returning nothing — an empty board that reads as "the market
+        # offered nothing today" when it was really the truncation.
+        leaps = [
+            _candidate(underlying="TEST", occ_symbol=f"TEST  2709{i:02d}C00100000", dte=400, ev=999.0 - i)
+            for i in range(2)
+        ]
+        near = _candidate(underlying="TEST", occ_symbol="TEST  260918C00100000", dte=30, ev=1.0)
+        self._patch_pipeline(monkeypatch, [*leaps, near])
+
+        ranked = rank_day("2026-01-01", Path("unused"), top=2, min_dte=14, max_dte=60)
+
+        assert [c.dte for c in ranked] == [30]
+
+    def test_no_band_leaves_the_board_untouched(self, monkeypatch) -> None:
+        # The Signal Board wants everything; only auto-entry passes a band.
+        near = _candidate(underlying="TEST", occ_symbol="TEST  260918C00100000", dte=30, ev=10.0)
+        leap = _candidate(underlying="TEST", occ_symbol="TEST  270918C00100000", dte=400, ev=99.0)
+        self._patch_pipeline(monkeypatch, [near, leap])
+
+        ranked = rank_day("2026-01-01", Path("unused"), top=10)
+
+        assert sorted(c.dte for c in ranked) == [30, 400]
+
+
 class TestRankDayEndToEnd:
     def test_produces_a_sane_ranked_list_against_the_real_corpus(self, tmp_path) -> None:
         from app.db import read_bars
@@ -654,16 +709,16 @@ class TestSelectEntriesSizing:
         return select_entries(candidates, **defaults)
 
     def test_two_differently_priced_contracts_get_near_equal_dollar_weight(self) -> None:
-        # $10,000 over 5 slots is a $2,000 budget each. A $200 contract
-        # takes 10 units and a $1,000 contract 2 — the point of sizing:
-        # equal *money*, not equal contract count.
+        # $10,000 over 10 concurrent slots is a $1,000 budget each. A $200
+        # contract takes 5 units and a $1,000 contract 1 — the point of
+        # sizing: equal *money*, not equal contract count.
         cheap = _candidate(underlying="CHP", occ_symbol="CHP   260918C00100000", market_price=2.0, ev=50.0)
         dear = _candidate(underlying="DER", occ_symbol="DER   260918C00100000", market_price=10.0, ev=40.0)
 
         selected = self._select([cheap, dear])
 
-        assert [s.quantity for s in selected] == [10, 2]
-        assert [s.cost for s in selected] == [2_000.0, 2_000.0]
+        assert [s.quantity for s in selected] == [5, 1]
+        assert [s.cost for s in selected] == [1_000.0, 1_000.0]
 
     def test_sizing_never_commits_more_than_the_capital_available(self) -> None:
         candidates = [
@@ -674,7 +729,7 @@ class TestSelectEntriesSizing:
         assert sum(s.cost for s in selected) <= 10_000.0
 
     def test_a_contract_costing_more_than_its_slot_still_gets_one_unit(self) -> None:
-        # $2,000 per slot, but the contract costs $3,000. Rounding the
+        # $1,000 per slot, but the contract costs $3,000. Rounding the
         # equal-weight quantity down would give zero and silently drop a
         # candidate that the account can genuinely afford.
         chunky = _candidate(underlying="BIG", occ_symbol="BIG   260918C00100000", market_price=30.0)
@@ -685,25 +740,56 @@ class TestSelectEntriesSizing:
         assert [s.cost for s in selected] == [3_000.0]
 
     def test_quantity_is_capped_by_cash_left_not_just_by_the_slot_budget(self) -> None:
-        # One slot, so the slot budget is the whole $10,000 — but only
-        # $700 is actually available, which is 3 contracts at $200, not 50.
+        # One concurrent slot, so the slot budget is the whole $10,000 —
+        # but only $700 is available, which is 3 contracts at $200, not 50.
         c = _candidate(underlying="AAA")
 
-        selected = self._select([c], available_capital=700.0, max_new_positions=1)
+        selected = self._select(
+            [c], available_capital=700.0, max_new_positions=1, max_concurrent_positions=1
+        )
 
         assert [s.quantity for s in selected] == [3]
         assert selected[0].cost == 600.0
 
     def test_a_thin_day_deploys_one_slot_rather_than_concentrating(self) -> None:
-        # Only one candidate clears the bar out of five slots. It gets one
-        # slot's worth, not the whole book — the concentration the
-        # equal-weight rule exists to prevent. Stated as a test because it
-        # is a deliberate choice that looks like under-investment.
+        # Only one candidate clears the bar. It gets one slot's worth, not
+        # the whole book — the concentration the equal-weight rule exists
+        # to prevent. Stated as a test because it is a deliberate choice
+        # that looks like under-investment.
         lonely = _candidate(underlying="AAA")
 
         selected = self._select([lonely], available_capital=10_000.0, max_new_positions=5)
 
-        assert selected[0].cost == 2_000.0
+        assert selected[0].cost == 1_000.0
+
+    def test_a_full_day_leaves_room_for_later_days_at_comparable_size(self) -> None:
+        # The real defect this replaced: dividing by the per-day cap sized
+        # each of today's picks as though today were the only day the book
+        # would ever fill. At 10 concurrent / 5 per day that put 100% of
+        # deployable capital into day one, and day two's names then arrived
+        # at a fifth the size — a 5:1 overweight decided by which name
+        # cleared the bar first.
+        names = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+        day_one = self._select(
+            [
+                _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u, ev=50.0 - i)
+                for i, u in enumerate(names)
+            ],
+            available_capital=80_000.0,
+        )
+        assert sum(s.cost for s in day_one) == 40_000.0  # half, not all
+
+        # Day two, against the cash day one actually left.
+        later = ["FFF", "GGG", "HHH", "III", "JJJ"]
+        day_two = self._select(
+            [
+                _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u, ev=50.0 - i)
+                for i, u in enumerate(later)
+            ],
+            available_capital=48_000.0,
+            open_position_count=5,
+        )
+        assert day_one[0].cost / day_two[0].cost < 1.5
 
     def test_a_zero_priced_contract_is_refused_rather_than_sized_infinitely(self) -> None:
         # A stale or bad print at 0 would divide by zero computing quantity.

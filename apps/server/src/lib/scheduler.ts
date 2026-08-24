@@ -209,6 +209,13 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
           if (entry.opened.length > 0) {
             log.info(`Auto-entry opened ${entry.opened.map((o) => o.occSymbol).join(', ')}`);
           }
+          // Not only rejections: a position can open at a smaller size
+          // than the model asked for (see autoEntry.ts's multiplier
+          // trim), and that has no other signal anywhere — the trimmed
+          // order looks identical to one the model sized that way.
+          if (entry.failures.length > 0) {
+            log.warn(`Auto-entry: ${entry.failures.join('; ')}`);
+          }
         } catch (err) {
           result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -617,6 +624,11 @@ export async function runOptionsCapture(
         result.autoEntrySkippedReason = entry.skippedReason;
         if (entry.opened.length > 0) {
           log.info(`Auto-entry opened ${result.autoEntryOpened.join(', ')}`);
+        }
+        // See the same block in runMarketSync: `failures` now also carries
+        // size trims on orders that did open, which nothing else reports.
+        if (entry.failures.length > 0) {
+          log.warn(`Auto-entry: ${entry.failures.join('; ')}`);
         }
       } catch (err) {
         result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);

@@ -130,6 +130,17 @@ export async function runAutoEntry(
       const entryPriceE4 = Math.round(candidate.market_price * 10_000);
       const { multiplier } = contractMultiplier(candidate.occ_symbol);
       const perContractE4 = entryPriceE4 * multiplier;
+      if (perContractE4 <= 0) {
+        // A price under $0.00005 rounds to 0 in E4. Dividing by it gives
+        // Infinity, or NaN when no cash is left — and `NaN < 1` is false,
+        // so the size check below would wave it straight through. Only
+        // `openOrder`'s own positive-price guard catches it today, in
+        // another module, reporting a cause this block did not diagnose.
+        failures.push(
+          `${candidate.occ_symbol}: quoted at $${candidate.market_price} — too small to price in E4, not opened`,
+        );
+        continue;
+      }
       const affordable = Math.floor(remainingE4 / perContractE4);
       const size = Math.min(quantity, affordable);
       if (size < 1) {
