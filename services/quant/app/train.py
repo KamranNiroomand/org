@@ -44,26 +44,23 @@ from .metrics import ic_summary, information_coefficient, rmse
 from .models import beats_baseline, mean_baseline, train_lgbm_regressor
 
 FEATURE_COLS = [
-    "momentum_1d",
-    "momentum_5d",
-    "momentum_10d",
     "momentum_21d",
     "momentum_63d",
     "volume_zscore_21d",
     # Second-generation features — see the module docstring above
     # features.py's residual_momentum for why the original six sit at
     # IC ~0.01: raw momentum on a 566-name panel is mostly a beta loading.
-    "overnight_ret_5d",
     "overnight_ret_21d",
-    "intraday_ret_5d",
     "intraday_ret_21d",
-    "close_location_value_1d",
     "close_location_value_5d",
-    "max_daily_return_21d",
-    "signed_volume_imbalance_10d",
     "signed_volume_imbalance_21d",
     "residual_momentum_63d",
     "idio_vol_ratio_21d",
+    # Third generation — the axis the panel did not have. Nine of the
+    # columns above are a price change over some window; these describe how
+    # a move was funded and how hard it is to trade against. See
+    # features.py::reversal_and_liquidity.
+    "amihud_illiquidity_21d",
 ]
 
 
