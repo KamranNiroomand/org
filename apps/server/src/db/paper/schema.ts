@@ -159,6 +159,58 @@ export const paperExitRevisions = sqliteTable(
 );
 
 /**
+ * Why the system did what it did, for every candidate it looked at — not
+ * just the ones it acted on.
+ *
+ * Auto-entry ranks a few hundred contracts a day, opens a handful, and
+ * until this table existed discarded the reasoning for every other one the
+ * instant the function returned. So "why didn't it buy X?" had no answer,
+ * ever. On 2026-08-24 reconstructing a single decision — a $122,440
+ * position that turned out to rest on a bad price print — took an
+ * afternoon of reading code and querying raw quotes by hand. That should
+ * be one query.
+ *
+ * The same run also trimmed a position's size against a non-standard
+ * multiplier and reported it only into an in-memory array neither
+ * scheduler call site read, so a position opened at a fifth of its
+ * intended size left no trace anywhere at all.
+ *
+ * `detail` is a JSON blob rather than columns because the two
+ * decision-makers this table is designed to compare — the quant rules and
+ * the eventual agentic path — reason in genuinely different shapes, and
+ * forcing one schema onto both would flatten exactly the difference the
+ * comparison exists to measure.
+ */
+export const paperDecisionLog = sqliteTable(
+  'paper_decision_log',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Trading day the decision was made for, not when the row was written. */
+    day: text('day').notNull(),
+    source: text('source', { enum: ['quant', 'agentic'] })
+      .notNull()
+      .default('quant'),
+    occSymbol: text('occ_symbol').notNull(),
+    underlying: text('underlying'),
+    decision: text('decision', {
+      enum: ['opened', 'rejected', 'trimmed', 'failed', 'held', 'exited', 'target_moved', 'adopted'],
+    }).notNull(),
+    /** The fixed-vocabulary rule behind it — `ev_below_bar`, `dte_outside_band`,
+     * `stop_loss`, and so on. A vocabulary rather than prose because the
+     * point is to be able to *count* these: which constraint actually
+     * shapes the book is a question only a GROUP BY can answer. */
+    reason: text('reason').notNull(),
+    detail: text('detail', { mode: 'json' }).$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    index('paper_decision_log_day_idx').on(t.day),
+    index('paper_decision_log_symbol_idx').on(t.occSymbol),
+    index('paper_decision_log_reason_idx').on(t.day, t.reason),
+  ],
+);
+
+/**
  * Nightly mark-to-market for every open order.
  *
  * Marked at the **conservative** side — bid for a long, ask for a short —

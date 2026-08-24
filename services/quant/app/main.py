@@ -614,6 +614,19 @@ class SelectedEntry(BaseModel):
     cost: float
 
 
+class RejectedEntry(BaseModel):
+    """A candidate that was considered and not taken.
+
+    Returned so the caller can persist it: the reasoning behind every
+    contract the board *didn't* buy used to be discarded the moment
+    selection returned, which made "why didn't it buy X?" unanswerable.
+    """
+
+    contract: RankedContractResponse
+    reason: str
+    detail: dict
+
+
 class SelectEntriesResponse(BaseModel):
     model_run_id: str
     model_beats_baseline: bool
@@ -621,6 +634,10 @@ class SelectEntriesResponse(BaseModel):
     #: candidates whose plan can't be computed (see exit.py's refusal case)
     #: are excluded before selection rather than opened unmanaged.
     selected: list[SelectedEntry]
+    #: Every candidate that reached selection and was not taken, with the
+    #: rule that stopped it. Ordered as they were considered — by EV
+    #: descending — so the first few are the near-misses.
+    rejected: list[RejectedEntry]
 
 
 @app.post("/select-entries", response_model=SelectEntriesResponse)
@@ -667,7 +684,7 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
         if _try_compute_exit_target(c.market_price, c.expiry, request.day, horizon) is not None
     ]
 
-    selected = select_entries(
+    selected, rejected = select_entries(
         plannable,
         held_underlyings=set(request.held_underlyings),
         available_capital=request.available_capital,
@@ -683,6 +700,16 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
     return SelectEntriesResponse(
         model_run_id=manifest["run_id"],
         model_beats_baseline=manifest["metrics"]["beats_baseline"],
+        rejected=[
+            RejectedEntry(
+                contract=RankedContractResponse.from_ranked(
+                    r.contract, entry_day=request.day, horizon=horizon
+                ),
+                reason=r.reason,
+                detail=r.detail,
+            )
+            for r in rejected
+        ],
         selected=[
             SelectedEntry(
                 contract=RankedContractResponse.from_ranked(

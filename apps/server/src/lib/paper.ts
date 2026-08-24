@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { paperDb } from '../db/paper/index.js';
-import { paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
+import { paperDecisionLog, paperEquity, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { newId, nowIso } from './util.js';
 
 /**
@@ -421,4 +421,40 @@ export function computeDailyEquity(day: string): void {
       },
     })
     .run();
+}
+
+
+/**
+ * Append decisions to `paper_decision_log`.
+ *
+ * Batched in one statement because auto-entry produces one row per
+ * candidate considered — a few hundred a day — and a per-row insert on a
+ * cron path is a needless few hundred round trips.
+ *
+ * Deliberately never throws. A decision log that can take down the run it
+ * is describing is worse than no decision log: the whole point is to make
+ * a failed or surprising run explicable, and a logger that turns a partial
+ * failure into a total one destroys exactly the evidence it exists to
+ * keep. Callers get `false` and carry on.
+ */
+export function logDecisions(rows: Array<Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>>): boolean {
+  if (rows.length === 0) return true;
+  try {
+    const createdAt = nowIso();
+    paperDb.insert(paperDecisionLog).values(rows.map((r) => ({ ...r, createdAt }))).run();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Decisions for one trading day, newest first — what the UI and any
+ * "why didn't it buy X" question read. */
+export function decisionsForDay(day: string): Array<typeof paperDecisionLog.$inferSelect> {
+  return paperDb
+    .select()
+    .from(paperDecisionLog)
+    .where(eq(paperDecisionLog.day, day))
+    .orderBy(desc(paperDecisionLog.id))
+    .all();
 }

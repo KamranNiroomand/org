@@ -1,6 +1,9 @@
 import { config } from '../../config.js';
-import { accountCapacity, contractMultiplier, openOrder, PaperError } from '../paper.js';
-import { selectEntries, QuantRefusal, QuantUnavailable, type SelectedEntry } from '../quant.js';
+import { accountCapacity, contractMultiplier, logDecisions, openOrder, PaperError } from '../paper.js';
+import type { paperDecisionLog } from '../../db/paper/schema.js';
+
+type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
+import { selectEntries, QuantRefusal, QuantUnavailable, type RejectedEntry, type SelectedEntry } from '../quant.js';
 
 /**
  * Once/day, alongside the existing rank refresh: opens every contract the
@@ -54,9 +57,9 @@ export async function runAutoEntry(
     (capacity.freeCashE4 / 10_000) * (1 - config.market.autoEntry.capitalReservePct);
 
   let selected: SelectedEntry[];
+  let rejected: RejectedEntry[];
   try {
-    selected = (
-      await selectEntriesFn({
+    const result = await selectEntriesFn({
         day,
         heldUnderlyings: capacity.heldUnderlyings,
         availableCapital,
@@ -67,8 +70,9 @@ export async function runAutoEntry(
         minProbProfit: config.market.autoEntry.minProbProfit,
         minDte: config.market.autoEntry.minDte,
         maxDte: config.market.autoEntry.maxDte,
-      })
-    ).selected;
+      });
+    selected = result.selected;
+    rejected = result.rejected;
   } catch (err) {
     const reason =
       err instanceof QuantRefusal || err instanceof QuantUnavailable
@@ -79,7 +83,25 @@ export async function runAutoEntry(
     return { day, opened: [], skippedReason: reason, failures: [] };
   }
 
+  // Every candidate the allocator looked at, whether or not it was taken.
+  // Written once at the end rather than per-candidate: a few hundred
+  // single-row inserts on a cron path is a few hundred needless round
+  // trips, and a partial log is harder to reason about than a whole one.
+  const decisions: DecisionRow[] = rejected.map((r) => ({
+    day,
+    occSymbol: r.contract.occ_symbol,
+    underlying: r.contract.underlying,
+    decision: 'rejected' as const,
+    reason: r.reason,
+    detail: { ...r.detail, ev: r.contract.ev, ev_per_risk: r.contract.ev_per_risk, prob_profit: r.contract.prob_profit, dte: r.contract.dte },
+  }));
+
+  // Before the early return, not after it. A day that opened nothing is
+  // the day whose reasoning is most worth having — "the market offered
+  // nothing", "the book was full" and "everything was too expensive" are
+  // three different situations that look identical from the outside.
   if (selected.length === 0) {
+    logDecisions(decisions);
     return {
       day,
       opened: [],
@@ -102,6 +124,7 @@ export async function runAutoEntry(
       // to explain it later.
       if (!Number.isInteger(quantity) || quantity < 1) {
         failures.push(`${candidate.occ_symbol}: selected with a non-positive quantity (${quantity}) — not opened`);
+        decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'failed', reason: 'non_positive_quantity', detail: { quantity } });
         continue;
       }
       // The sidecar excludes candidates with no computable exit plan before
@@ -117,6 +140,7 @@ export async function runAutoEntry(
         candidate.suggested_target_exit_date === null
       ) {
         failures.push(`${candidate.occ_symbol}: selected without a complete exit plan — not opened`);
+        decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'failed', reason: 'no_exit_plan', detail: {} });
         continue;
       }
       // The sidecar sizes against the standard 100x multiplier because a
@@ -139,6 +163,7 @@ export async function runAutoEntry(
         failures.push(
           `${candidate.occ_symbol}: quoted at $${candidate.market_price} — too small to price in E4, not opened`,
         );
+        decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'failed', reason: 'price_below_e4_resolution', detail: { market_price: candidate.market_price } });
         continue;
       }
       const affordable = Math.floor(remainingE4 / perContractE4);
@@ -148,6 +173,7 @@ export async function runAutoEntry(
           `${candidate.occ_symbol}: costs $${(perContractE4 / 10_000).toFixed(2)}/contract at a ${multiplier}x ` +
             `multiplier, more than the $${(remainingE4 / 10_000).toFixed(2)} left — not opened`,
         );
+        decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'failed', reason: 'unaffordable_at_real_multiplier', detail: { perContractE4, multiplier, remainingE4 } });
         continue;
       }
       if (size < quantity) {
@@ -155,6 +181,10 @@ export async function runAutoEntry(
           `${candidate.occ_symbol}: trimmed from ${quantity} to ${size} contracts — at a ${multiplier}x multiplier ` +
             `the sidecar's size costs more than the $${(remainingE4 / 10_000).toFixed(2)} of free cash left`,
         );
+        // The case that previously left no trace anywhere: the position
+        // opens, just smaller than the model asked for, and looked
+        // identical afterwards to one sized that way on purpose.
+        decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'trimmed', reason: 'trimmed_to_free_cash', detail: { requested: quantity, opened: size, multiplier, remainingE4 } });
       }
       // Order and exit plan land in one insert — see `OpenOrderInput.exitPlan`
       // for why this must not be an insert followed by an update.
@@ -173,13 +203,17 @@ export async function runAutoEntry(
       });
       remainingE4 -= perContractE4 * size;
       opened.push({ occSymbol: candidate.occ_symbol, orderId, quantity: size });
+      decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'opened', reason: 'cleared_all_bars', detail: { orderId, quantity: size, entryPriceE4, ev: candidate.ev, ev_per_risk: candidate.ev_per_risk, prob_profit: candidate.prob_profit, dte: candidate.dte } });
     } catch (err) {
       // One contract failing to open must not cost the rest of the day's
       // selection — same per-item isolation as capture.ts's own loop.
       const message = err instanceof PaperError ? err.message : err instanceof Error ? err.message : 'Failed to open order';
       failures.push(`${candidate.occ_symbol}: ${message}`);
+      decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'failed', reason: 'open_threw', detail: { message } });
     }
   }
+
+  logDecisions(decisions);
 
   return {
     day,

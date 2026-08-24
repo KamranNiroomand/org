@@ -11,6 +11,8 @@ import { paperEquity, paperExitRevisions, paperMarks, paperOrders } from '../db/
 import { nowIso } from './util.js';
 import {
   accountCapacity,
+  decisionsForDay,
+  logDecisions,
   closeOrder,
   computeDailyEquity,
   markOpenPositions,
@@ -282,6 +284,37 @@ describe('computeDailyEquity', () => {
     computeDailyEquity(today);
     const rows = paperDb.select().from(paperEquity).all().filter((e) => e.day === today);
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('logDecisions', () => {
+  it('never throws, so a broken log cannot take down the run it describes', () => {
+    // A decision log exists to make a failed or surprising run explicable.
+    // A logger that turns a partial failure into a total one destroys
+    // exactly the evidence it was added to keep, so it reports failure by
+    // return value and the caller carries on.
+    const bad = [{ day: null, occSymbol: 'X', decision: 'opened', reason: 'r' }] as unknown as Parameters<
+      typeof logDecisions
+    >[0];
+
+    expect(() => logDecisions(bad)).not.toThrow();
+    expect(logDecisions(bad)).toBe(false);
+  });
+
+  it('is a no-op for an empty batch rather than an empty insert', () => {
+    expect(logDecisions([])).toBe(true);
+  });
+
+  it('round-trips a decision with its detail intact', () => {
+    logDecisions([
+      { day: '2026-08-24', occSymbol: OCC, underlying: 'NVDA', decision: 'rejected', reason: 'ev_below_bar', detail: { ev_per_risk: 0.01, bar: 0.05 } },
+    ]);
+
+    const [row] = decisionsForDay('2026-08-24');
+    expect(row?.reason).toBe('ev_below_bar');
+    expect((row?.detail as Record<string, unknown>).bar).toBe(0.05);
+    // Another day's decisions are not returned — the log is read per day.
+    expect(decisionsForDay('2026-08-25')).toEqual([]);
   });
 });
 

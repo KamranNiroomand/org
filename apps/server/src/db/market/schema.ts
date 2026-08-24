@@ -302,6 +302,24 @@ export const modelRuns = sqliteTable(
     metrics: text('metrics', { mode: 'json' }).$type<Record<string, unknown>>().notNull(),
     /** Directory name under modelsDir, e.g. the run_id itself. */
     artifactDir: text('artifact_dir').notNull(),
+    /**
+     * Per-boosting-round train and validation RMSE, `{fold: {train: [],
+     * validation: []}}`. Null for any run trained before it was recorded.
+     *
+     * In the database rather than only in the artifact's `history.json`
+     * because the question worth asking spans runs — "is this fit
+     * overfitting worse than the last one?" — and answering it from files
+     * means reading one JSON per run. Every other signal in this system
+     * became queryable; a curve that can only be grepped is the remaining
+     * blind spot, and it is the one that says *how* a model got its
+     * number rather than what the number was.
+     *
+     * Small enough to store inline: ~800 floats per run, about 22KB. The
+     * artifact keeps its own copy so a model directory stays
+     * self-describing away from this database.
+     */
+    history: text('history', { mode: 'json' })
+      .$type<Record<string, { train?: number[]; validation?: number[] }>>(),
     registeredAt: text('registered_at').notNull(),
     /**
      * A run starts as a challenger. Promotion to champion is manual — see

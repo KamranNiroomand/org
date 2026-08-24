@@ -1,0 +1,1 @@
+ALTER TABLE `model_runs` ADD `history` text;

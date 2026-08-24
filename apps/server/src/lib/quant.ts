@@ -259,10 +259,20 @@ export interface SelectedEntry {
   cost: number;
 }
 
+/** A candidate the allocator considered and did not take, with the rule
+ * that stopped it. Persisted to `paper_decision_log` — see that table on
+ * why the reasoning behind a *rejection* is worth as much as the pick. */
+export interface RejectedEntry {
+  contract: RankedContract;
+  reason: string;
+  detail: Record<string, unknown>;
+}
+
 export interface SelectEntriesResult {
   model_run_id: string;
   model_beats_baseline: boolean;
   selected: SelectedEntry[];
+  rejected: RejectedEntry[];
 }
 
 /**

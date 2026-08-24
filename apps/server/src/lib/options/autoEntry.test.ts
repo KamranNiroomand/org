@@ -6,11 +6,12 @@ import { runMarketMigrations } from '../../db/market/migrate.js';
 import { optionContracts } from '../../db/market/schema.js';
 import { paperDb } from '../../db/paper/index.js';
 import { runPaperMigrations } from '../../db/paper/migrate.js';
-import { paperOrders } from '../../db/paper/schema.js';
-import { openOrder } from '../paper.js';
+import { paperDecisionLog, paperOrders } from '../../db/paper/schema.js';
+import { decisionsForDay, openOrder } from '../paper.js';
 import { nowIso } from '../util.js';
 import type {
   RankedContract,
+  RejectedEntry,
   SelectedEntry,
   SelectEntriesInput,
   SelectEntriesResult,
@@ -73,10 +74,14 @@ function pick(contract: RankedContract, quantity = 1): SelectedEntry {
 
 /** Captures what autoEntry passed to the allocator, so the account-state
  * wiring (free cash, reserve, held underlyings) can be asserted directly. */
-function selectFn(selected: SelectedEntry[], captured?: { input?: SelectEntriesInput }) {
+function selectFn(
+  selected: SelectedEntry[],
+  captured?: { input?: SelectEntriesInput },
+  rejected: RejectedEntry[] = [],
+) {
   return async (input: SelectEntriesInput): Promise<SelectEntriesResult> => {
     if (captured) captured.input = input;
-    return { model_run_id: 'test', model_beats_baseline: false, selected };
+    return { model_run_id: 'test', model_beats_baseline: false, selected, rejected };
   };
 }
 
@@ -84,6 +89,9 @@ beforeEach(() => {
   runMarketMigrations();
   runPaperMigrations();
   paperDb.delete(paperOrders).run();
+  // The decision log accumulates across runs by design, so a test that
+  // asserts on a day's decisions needs it cleared like everything else.
+  paperDb.delete(paperDecisionLog).run();
   marketDb.delete(optionContracts).run();
 });
 
@@ -210,6 +218,15 @@ describe('runAutoEntry', () => {
     // (100_000 - 95_000) * 0.8 reserve = $4,000 available; $2,000 a unit.
     expect(order!.quantity).toBe(2);
     expect(result.failures.join('; ')).toContain('trimmed from 40 to 2');
+    // ...and it is recorded, which is the part that previously left no
+    // trace anywhere: the position opens, just smaller than the model
+    // asked for, and afterwards looked identical to one sized that way on
+    // purpose. `failures` was in-memory only and neither scheduler call
+    // site read it.
+    const trim = decisionsForDay('2026-08-18').find((r) => r.decision === 'trimmed');
+    expect(trim?.reason).toBe('trimmed_to_free_cash');
+    expect((trim?.detail as Record<string, unknown>).requested).toBe(40);
+    expect((trim?.detail as Record<string, unknown>).opened).toBe(2);
   });
 
   it('refuses a selection whose real cost exceeds every dollar available', async () => {
@@ -221,6 +238,50 @@ describe('runAutoEntry', () => {
     expect(result.opened).toEqual([]);
     expect(result.skippedReason).toContain('more than the');
     expect(paperDb.select().from(paperOrders).all()).toHaveLength(0);
+  });
+
+  it('records why every rejected candidate was rejected', async () => {
+    // The hole this closes: the board considers a few hundred contracts a
+    // day, opens a handful, and used to discard the reasoning for all the
+    // rest the moment the function returned — so "why didn't it buy X?"
+    // had no answer at all. Reconstructing one such decision by hand cost
+    // an afternoon.
+    const taken = ranked({ occ_symbol: 'AAA   260919C00100000', underlying: 'AAA' });
+    contract(taken.occ_symbol, 'AAA');
+    const missed = ranked({ occ_symbol: 'BBB   260919C00100000', underlying: 'BBB', prob_profit: 0.2 });
+
+    await runAutoEntry(
+      '2026-08-18',
+      selectFn([pick(taken, 1)], undefined, [
+        { contract: missed, reason: 'prob_below_bar', detail: { prob_profit: 0.2, bar: 0.5 } },
+      ]),
+    );
+
+    const rows = decisionsForDay('2026-08-18');
+    const rejection = rows.find((r) => r.occSymbol === missed.occ_symbol);
+    expect(rejection?.decision).toBe('rejected');
+    expect(rejection?.reason).toBe('prob_below_bar');
+    expect((rejection?.detail as Record<string, unknown>).bar).toBe(0.5);
+    // ...and the one that was taken is recorded too, so a day's decisions
+    // are complete rather than only its disappointments.
+    expect(rows.find((r) => r.occSymbol === taken.occ_symbol)?.decision).toBe('opened');
+  });
+
+  it('records the reasoning on a day that opened nothing', async () => {
+    // The day whose explanation is worth most. "The market offered
+    // nothing", "the book was full" and "everything was too expensive" are
+    // three different situations that look identical from outside.
+    const missed = ranked({ occ_symbol: 'CCC   260919C00100000', underlying: 'CCC' });
+
+    const summary = await runAutoEntry(
+      '2026-08-18',
+      selectFn([], undefined, [{ contract: missed, reason: 'day_full', detail: { slots: 0 } }]),
+    );
+
+    expect(summary.opened).toEqual([]);
+    const rows = decisionsForDay('2026-08-18');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.reason).toBe('day_full');
   });
 
   it('refuses a price too small to survive E4 rounding rather than dividing by zero', async () => {

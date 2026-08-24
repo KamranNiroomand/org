@@ -6,8 +6,11 @@ import { marketDb } from '../../db/market/index.js';
 import { optionContracts } from '../../db/market/schema.js';
 import { paperDb } from '../../db/paper/index.js';
 import { paperExitRevisions, paperOrders } from '../../db/paper/schema.js';
+import type { paperDecisionLog } from '../../db/paper/schema.js';
+
+type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
 import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
-import { closeOrder } from '../paper.js';
+import { closeOrder, logDecisions } from '../paper.js';
 import {
   computeExitTarget,
   evaluateExit,
@@ -115,6 +118,7 @@ async function adoptUnmanagedOrders(
   if (orphans.length === 0) return;
 
   const today = todayKey();
+  const adopted: DecisionRow[] = [];
   for (const order of orphans) {
     try {
       const contract = marketDb
@@ -154,6 +158,19 @@ async function adoptUnmanagedOrders(
         .where(eq(paperOrders.id, order.id))
         .run();
       summary.adopted += 1;
+      adopted.push({
+        day: todayKey(),
+        occSymbol: order.occSymbol,
+        underlying: order.underlying,
+        decision: 'adopted',
+        reason: 'had_no_exit_plan',
+        detail: {
+          orderId: order.id,
+          targetExitPriceE4: plan.targetE4.targetExitPriceE4,
+          stopLossPriceE4: plan.targetE4.stopLossPriceE4,
+          targetExitDate: plan.targetE4.targetExitDate,
+        },
+      });
       log.info(
         `Exit engine adopted ${order.occSymbol}: target ${plan.targetE4.targetExitPriceE4 / 10_000}, ` +
           `stop ${plan.targetE4.stopLossPriceE4 / 10_000}, by ${plan.targetE4.targetExitDate}`,
@@ -166,6 +183,7 @@ async function adoptUnmanagedOrders(
       );
     }
   }
+  logDecisions(adopted);
 }
 
 function managedOpenOrders() {
@@ -209,6 +227,11 @@ export async function runExitEngine(
     return summary;
   }
   exitRechecking = true;
+
+  // Declared out here so the `finally` below can flush whatever was
+  // collected even when the run throws partway.
+  const day = todayKey();
+  const decisions: DecisionRow[] = [];
 
   try {
     // Before anything else: a position with no plan is invisible to the
@@ -257,9 +280,36 @@ export async function runExitEngine(
       }
     }
 
-    const closeAndTally = (orderId: string, exitPriceE4: number) => {
-      closeOrder({ orderId, exitPriceE4 });
+    // Every recheck outcome, not just the ones that changed something.
+    // A position that was looked at and left alone is a decision too, and
+    // it is the one that makes "was this being watched at all?" answerable
+    // — the question that went unanswered for five days when three open
+    // positions were invisible to this engine.
+    const record = (
+      order: { id: string; occSymbol: string; underlying: string | null },
+      decision: DecisionRow['decision'],
+      reason: string,
+      detail: Record<string, unknown> = {},
+    ) => {
+      decisions.push({
+        day,
+        occSymbol: order.occSymbol,
+        underlying: order.underlying,
+        decision,
+        reason,
+        detail: { orderId: order.id, ...detail },
+      });
+    };
+
+    const closeAndTally = (
+      order: { id: string; occSymbol: string; underlying: string | null },
+      exitPriceE4: number,
+      reason: string,
+      detail: Record<string, unknown> = {},
+    ) => {
+      closeOrder({ orderId: order.id, exitPriceE4 });
       summary.closed += 1;
+      record(order, 'exited', reason, { exitPriceE4, ...detail });
     };
 
     for (const order of orders) {
@@ -297,7 +347,7 @@ export async function runExitEngine(
         });
 
         if (decision.action === 'exit_now') {
-          closeAndTally(order.id, quote.bidE4);
+          closeAndTally(order, quote.bidE4, decision.triggeredBy, { reasonText: decision.reason });
           continue;
         }
 
@@ -320,6 +370,11 @@ export async function runExitEngine(
         // buried unreviewed news permanently, silently, every 15 minutes.
         if (decision.newStopLossPriceE4 !== null && decision.newStopLossPriceE4 > order.stopLossPriceE4!) {
           summary.revised += 1;
+          record(order, 'target_moved', 'trailing_stop_raised', {
+            oldStopLossPriceE4: order.stopLossPriceE4,
+            newStopLossPriceE4: decision.newStopLossPriceE4,
+            reasonText: decision.reason,
+          });
           paperDb.transaction((tx) => {
             tx.insert(paperExitRevisions)
               .values({
@@ -343,6 +398,7 @@ export async function runExitEngine(
         }
 
         if (decision.action === 'hold') {
+          record(order, 'held', decision.triggeredBy, { currentPriceE4: quote.bidE4, dte });
           continue;
         }
 
@@ -401,6 +457,18 @@ export async function runExitEngine(
         // back would suppress the re-review *and* leave no trace of the
         // attempt. Same idiom as routes/options.ts's promote.
         const revised = advice.action === 'move_target';
+        record(
+          order,
+          revised ? 'target_moved' : 'held',
+          revised ? 'advisor_moved_target' : 'advisor_hold',
+          {
+            escalation: decision.reason,
+            reasoning: advice.reasoning,
+            ...(revised
+              ? { newTargetExitPriceE4: advice.newTargetExitPriceE4, newTargetExitDate: advice.newTargetExitDate }
+              : {}),
+          },
+        );
         paperDb.transaction((tx) => {
           if (revised) {
             tx.insert(paperExitRevisions)
@@ -429,7 +497,7 @@ export async function runExitEngine(
         if (revised) summary.revised += 1;
 
         if (advice.action === 'exit_now') {
-          closeAndTally(order.id, quote.bidE4);
+          closeAndTally(order, quote.bidE4, 'advisor_exit_now', { reasoning: advice.reasoning });
           continue;
         }
         // advice.action === 'hold': the cutoff moved, the target stands.
@@ -440,6 +508,12 @@ export async function runExitEngine(
       }
     }
   } finally {
+    // In `finally`, not at the end of the try: a run that throws partway
+    // is exactly the run whose decisions are most worth having, and
+    // flushing inside the try would discard everything collected before
+    // the failure. `logDecisions` never throws, so this cannot mask the
+    // original error.
+    logDecisions(decisions);
     exitRechecking = false;
   }
 
