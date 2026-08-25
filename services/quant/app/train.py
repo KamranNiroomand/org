@@ -38,7 +38,7 @@ import polars as pl
 
 from .cv import purged_walk_forward_splits
 from .db import read_bars
-from .features import build_feature_panel
+from .features import build_feature_panel, option_feature_panel
 from .labels import direction_bucket, forward_return
 from .metrics import ic_summary, information_coefficient, rmse
 from .models import beats_baseline, mean_baseline, train_lgbm_regressor
@@ -115,7 +115,11 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
     if bars.height == 0:
         raise SystemExit("No bars in market.db — run bars:backfill first.")
 
-    features = build_feature_panel(bars)
+    # The option-derived columns ride along in the panel from day one so
+    # their history accrues with the corpus, but they are NOT in
+    # FEATURE_COLS yet — see OPTION_FEATURE_COLS in features.py for the
+    # coverage threshold and the trial-count cost of flipping them on.
+    features = build_feature_panel(bars, option_panel=option_feature_panel())
 
     if target == "dir":
         labels = forward_return(bars, horizon)

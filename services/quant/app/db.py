@@ -259,6 +259,94 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
     )
 
 
+def read_all_quotes() -> pl.DataFrame:
+    """Every captured contract-day in one scan — `read_quotes`' columns plus
+    `trading_day`, deduped to the latest `as_of` per (contract, day).
+
+    Exists for `option_feature_panel`, which needs the whole corpus
+    partitioned by (underlying, trading_day): calling `read_quotes` once
+    per pair turned a single sequential scan into thousands of round
+    trips, and the training suite paid for it in the tens of minutes.
+    """
+    schema = {
+        "occ_symbol": pl.Utf8,
+        "underlying": pl.Utf8,
+        "trading_day": pl.Utf8,
+        "expiry": pl.Utf8,
+        "type": pl.Utf8,
+        "strike": pl.Float64,
+        "bid": pl.Float64,
+        "ask": pl.Float64,
+        "mid": pl.Float64,
+        "close": pl.Float64,
+        "price": pl.Float64,
+        "volume": pl.Int64,
+        "open_interest": pl.Int64,
+        "underlying_price": pl.Float64,
+        "underlying_asof_day": pl.Utf8,
+        "iv": pl.Float64,
+        "delta": pl.Float64,
+        "gamma": pl.Float64,
+        "vega": pl.Float64,
+        "theta": pl.Float64,
+        "liquid": pl.Boolean,
+    }
+    query = """
+        WITH ranked AS (
+            SELECT c.underlying, c.expiry, c.type, c.strike_e4,
+                   q.occ_symbol, q.trading_day, q.bid_e4, q.ask_e4, q.close_e4,
+                   q.volume, q.open_interest,
+                   q.underlying_e4, q.underlying_asof_day,
+                   q.iv_bps, q.delta, q.gamma, q.vega, q.theta, q.liquid,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY q.occ_symbol, q.trading_day ORDER BY q.as_of DESC
+                   ) AS rn
+            FROM option_quotes q
+            JOIN option_contracts c ON c.occ_symbol = q.occ_symbol
+        )
+        SELECT * FROM ranked WHERE rn = 1
+    """
+    with reading() as conn:
+        rows = conn.execute(query).fetchall()
+    if not rows:
+        return pl.DataFrame(schema=schema)
+
+    def mid(bid_e4: int | None, ask_e4: int | None) -> float | None:
+        if bid_e4 is None or ask_e4 is None or bid_e4 <= 0:
+            return None
+        return (bid_e4 + ask_e4) / (2 * _E4)
+
+    mids = [mid(r["bid_e4"], r["ask_e4"]) for r in rows]
+    closes = [(r["close_e4"] / _E4) if r["close_e4"] is not None else None for r in rows]
+    prices = [m if m is not None else c for m, c in zip(mids, closes)]
+    return pl.DataFrame(
+        {
+            "occ_symbol": [r["occ_symbol"] for r in rows],
+            "underlying": [r["underlying"] for r in rows],
+            "trading_day": [r["trading_day"] for r in rows],
+            "expiry": [r["expiry"] for r in rows],
+            "type": [r["type"] for r in rows],
+            "strike": [r["strike_e4"] / _E4 for r in rows],
+            "bid": [(r["bid_e4"] / _E4) if r["bid_e4"] is not None else None for r in rows],
+            "ask": [(r["ask_e4"] / _E4) if r["ask_e4"] is not None else None for r in rows],
+            "mid": mids,
+            "close": closes,
+            "price": prices,
+            "volume": [r["volume"] for r in rows],
+            "open_interest": [r["open_interest"] for r in rows],
+            "underlying_price": [r["underlying_e4"] / _E4 for r in rows],
+            "underlying_asof_day": [r["underlying_asof_day"] for r in rows],
+            "iv": [(r["iv_bps"] / 10_000.0) if r["iv_bps"] is not None else None for r in rows],
+            "delta": [r["delta"] for r in rows],
+            "gamma": [r["gamma"] for r in rows],
+            "vega": [r["vega"] for r in rows],
+            "theta": [r["theta"] for r in rows],
+            "liquid": [bool(r["liquid"]) for r in rows],
+        },
+        schema=schema,
+    )
+
+
 def read_risk_free_curve(day: str) -> list[tuple[int, float]]:
     """The published curve on or before `day`, as (tenor_days, rate) pairs.
 

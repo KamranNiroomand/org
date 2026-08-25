@@ -469,7 +469,9 @@ def reversal_and_liquidity(
     return df.select(["symbol", "day", rev_col, turn_col, amihud_col]).drop_nulls()
 
 
-def build_feature_panel(bars: pl.DataFrame) -> pl.DataFrame:
+def build_feature_panel(
+    bars: pl.DataFrame, option_panel: pl.DataFrame | None = None
+) -> pl.DataFrame:
     """Every bars-only feature above, inner-joined into one panel.
 
     The single place `train.py` and `rank.py` both build their feature
@@ -493,6 +495,14 @@ def build_feature_panel(bars: pl.DataFrame) -> pl.DataFrame:
         reversal_and_liquidity(bars),
     ):
         features = features.join(extra, on=["symbol", "day"], how="inner")
+    if option_panel is not None and option_panel.height > 0:
+        # Left, not inner: the chain corpus is days old against two years
+        # of bars, and an inner join here would silently shrink the whole
+        # training panel to the handful of days options exist for. Rows
+        # without a chain carry nulls, which LightGBM treats as their own
+        # branch — the columns only earn a place in FEATURE_COLS once
+        # coverage justifies the trial (see OPTION_FEATURE_COLS).
+        features = features.join(option_panel, on=["symbol", "day"], how="left")
     return features
 
 
@@ -606,3 +616,149 @@ def iv_rank(current_iv: float, trailing_iv_history: list[float]) -> float | None
         return None
     below = sum(1 for v in trailing_iv_history if v <= current_iv)
     return below / len(trailing_iv_history)
+
+
+def cpiv_spread(chain: pl.DataFrame) -> float | None:
+    """Call-put implied vol spread across matched (expiry, strike) pairs,
+    open-interest weighted — Cremers & Weinbaum (JFQA 2010).
+
+    Under put-call parity a call and put on the same strike and expiry
+    must carry the same implied vol; a persistent gap is deviation the
+    literature reads as informed-trading pressure, and its sign predicts
+    the underlying's return over the following weeks (positive spread —
+    calls rich — precedes outperformance). Weighted by the *pair's*
+    smaller open interest so a gap only counts in proportion to the
+    positioning actually behind both legs; a one-sided strike where only
+    the call ever trades is parity evidence about nothing.
+
+    Null when no strike has both legs with solved IVs — a spread needs
+    pairs, and averaging unpaired IVs would rediscover the skew that
+    `risk_reversal_25d` already measures on purpose.
+    """
+    both = chain.filter(pl.col("iv").is_not_null())
+    calls = both.filter(pl.col("type") == "call").select(
+        "expiry", "strike", pl.col("iv").alias("_call_iv"), pl.col("open_interest").alias("_call_oi")
+    )
+    puts = both.filter(pl.col("type") == "put").select(
+        "expiry", "strike", pl.col("iv").alias("_put_iv"), pl.col("open_interest").alias("_put_oi")
+    )
+    pairs = calls.join(puts, on=["expiry", "strike"], how="inner").with_columns(
+        pl.min_horizontal("_call_oi", "_put_oi").alias("_w")
+    )
+    if pairs.height == 0:
+        return None
+    weights = pairs["_w"].sum()
+    if weights <= 0:
+        # Every pair exists but nobody holds either leg — equal-weight is
+        # the honest fallback for a chain that is quoted but unowned.
+        return float((pairs["_call_iv"] - pairs["_put_iv"]).mean())
+    weighted = ((pairs["_call_iv"] - pairs["_put_iv"]) * pairs["_w"]).sum() / weights
+    return float(weighted)
+
+
+#: The option-derived feature columns `option_feature_panel` produces.
+#: **Deliberately absent from train.py's FEATURE_COLS today.** The chain
+#: corpus is days old while the bars panel spans two years; a column that
+#: is null for 99% of training rows adds a trial's worth of multiple-
+#: testing cost for no realistic gain. The plumbing ships now so history
+#: needs no backfill and the switch later is one reviewed line: add these
+#: to FEATURE_COLS once the corpus holds ~60 trading days of chains, and
+#: count that configuration change against the trial hurdle like any
+#: other.
+OPTION_FEATURE_COLS = [
+    "cpiv_spread",
+    "iv_term_slope",
+    "risk_reversal_25d",
+    "put_call_oi_ratio",
+    "put_call_volume_ratio",
+]
+
+
+#: (corpus fingerprint) -> built panel. One nightly training pays the
+#: build once; a process that trains repeatedly (the test suite, a
+#: multi-target retrain) reuses it as long as the corpus is unchanged.
+#: Keyed on (row count, latest as_of) because option_quotes is
+#: append-only: any write moves at least one of the two.
+_option_panel_cache: dict[tuple[int, str | None], pl.DataFrame] = {}
+
+
+def option_feature_panel() -> pl.DataFrame:
+    """Per-(symbol, day) option-derived features from the captured corpus.
+
+    IV-based features (CPIV, term slope, risk reversal) are computed on the
+    **screened** chain — the same `screen_quotes` hygiene the ranking uses,
+    because a frozen 447% print distorts a parity spread exactly like it
+    distorts an EV. The put/call ratios are computed on the **whole** chain
+    on purpose — see `put_call_ratios`' own docstring: thin strikes still
+    reflect real positioning.
+
+    Reads the corpus directly (the one features function that does),
+    because these features are *derived retroactively* — no nightly
+    accrual job, no persistence: the chain history already stored is the
+    single source, so a fixed bug re-derives corrected history for free.
+    """
+    from .db import prior_trading_day, read_all_quotes, read_day_stats
+    from .screens import screen_quotes
+
+    # One bulk read for the whole corpus, partitioned in polars — not a
+    # read_quotes call per (symbol, day). The first version did exactly
+    # that, and 1,300 pairs x two queries each turned every training run
+    # (and so the whole test suite) into a half-hour of SQL round-trips
+    # for data one scan returns.
+    from .db import reading
+
+    with reading() as conn:
+        row = conn.execute("SELECT COUNT(*) n, MAX(as_of) m FROM option_quotes").fetchone()
+    fingerprint = (row["n"], row["m"])
+    cached = _option_panel_cache.get(fingerprint)
+    if cached is not None:
+        return cached
+
+    all_quotes = read_all_quotes()
+    if all_quotes.height == 0:
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.Utf8,
+                "day": pl.Utf8,
+                **{c: pl.Float64 for c in OPTION_FEATURE_COLS},
+            }
+        )
+
+    stats_by_day: dict[str, pl.DataFrame | None] = {}
+    rows: list[dict] = []
+    for (symbol, day), chain in sorted(
+        all_quotes.partition_by(["underlying", "trading_day"], as_dict=True).items()
+    ):
+        if day not in stats_by_day:
+            prior = prior_trading_day(day)
+            stats_by_day[day] = read_day_stats(prior) if prior else None
+
+        ratios = put_call_ratios(chain)
+
+        screened = screen_quotes(chain, stats_by_day[day], trading_day=day).passed
+        front_expiry = (
+            screened["expiry"].min() if screened.height > 0 else None
+        )
+        rows.append(
+            {
+                "symbol": symbol,
+                "day": day,
+                "cpiv_spread": cpiv_spread(screened) if screened.height else None,
+                "iv_term_slope": term_slope(screened) if screened.height else None,
+                "risk_reversal_25d": (
+                    risk_reversal_25d(screened, front_expiry) if front_expiry else None
+                ),
+                "put_call_oi_ratio": ratios["put_call_oi_ratio"],
+                "put_call_volume_ratio": ratios["put_call_volume_ratio"],
+            }
+        )
+
+    schema = {
+        "symbol": pl.Utf8,
+        "day": pl.Utf8,
+        **{c: pl.Float64 for c in OPTION_FEATURE_COLS},
+    }
+    panel = pl.DataFrame(rows, schema=schema)
+    _option_panel_cache.clear()  # one corpus, one entry — never a leak
+    _option_panel_cache[fingerprint] = panel
+    return panel
