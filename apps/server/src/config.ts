@@ -22,6 +22,12 @@ const schema = z.object({
   PLAID_CLIENT_ID: z.string().optional(),
   PLAID_SECRET: z.string().optional(),
   PLAID_COUNTRY_CODES: z.string().default('CA,US'),
+  // How much transaction history to request at Link time. Plaid defaults to
+  // ~90 days when this is unset, which silently caps how far back the ledger
+  // can ever reach — the window is fixed when the bank is linked, so re-syncing
+  // cannot recover older months. 730 is Plaid's maximum; each institution
+  // returns as much of it as it actually keeps.
+  PLAID_TRANSACTIONS_DAYS: z.coerce.number().int().min(1).max(730).default(730),
   SYNC_CRON: z.string().default('0 6 * * *'),
   // The heuristic radar (score.ts/run.ts) — org.db only, no MARKET_ROLE
   // gate, so it runs on a reader just as well as a runner. Right after the
@@ -198,6 +204,7 @@ export const config = {
     clientId: env.PLAID_CLIENT_ID ?? null,
     secret: env.PLAID_SECRET ?? null,
     countryCodes: env.PLAID_COUNTRY_CODES.split(',').map((c) => c.trim()).filter(Boolean),
+    transactionDays: env.PLAID_TRANSACTIONS_DAYS,
     configured: Boolean(env.PLAID_CLIENT_ID && env.PLAID_SECRET),
   },
 

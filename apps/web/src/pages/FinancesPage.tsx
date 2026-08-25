@@ -3,6 +3,7 @@ import { CreditCard, Eye, EyeOff, Landmark, RefreshCw, Wallet } from 'lucide-rea
 import { useState } from 'react';
 import { formatMoney, money, todayCivil, civilKey } from '@org/shared';
 import { BankSync } from '../components/BankSync';
+import { FinanceChat } from '../components/FinanceChat';
 import { CashflowChart, CategoryBars, StatTile } from '../components/charts';
 import { DualDate } from '../components/DualDate';
 import { Page, PageHeader } from '../components/PageHeader';
@@ -125,6 +126,17 @@ export function FinancesPage() {
 
       <Page>
         <BankSync />
+
+        {/*
+          Claude chat over the ledger — only when a key is configured, mirroring
+          how the Ideas tab gates its own assist. The panel carries the
+          conversation; the server grounds each answer in the real transactions.
+        */}
+        {health?.features.claude && (
+          <div className="mb-5 h-96">
+            <FinanceChat month={month} />
+          </div>
+        )}
 
         {/*
           Each incoming-money tile is rendered only when the summary actually
