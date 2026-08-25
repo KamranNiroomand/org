@@ -372,3 +372,24 @@ def test_calendar_day_time_basis_is_the_one_the_chain_agrees_with() -> None:
     assert best < 0.05  # under 5 vol points summed over six strikes
     for alternative in (1.5, 2.5, 3.0):
         assert total_gap(alternative) > 3 * best
+
+
+class TestAmericanIntrinsicFloor:
+    """The COST incident, at the solver level: a put closing 1.5% under
+    end-of-day intrinsic (the ordinary non-synchronous-close artifact)
+    'solved' to sigma = 3bps because the CRR tree degenerates at near-zero
+    vol with a positive rate and prices the American put below intrinsic.
+    The EV model read sigma = 0 as certainty and sized a real paper
+    position 4x at 'P(profit) 100%'."""
+
+    def test_a_price_at_or_below_intrinsic_determines_no_volatility(self) -> None:
+        # S=947.74, K=965: intrinsic 17.26. The real close was 17.00.
+        assert implied_vol(17.00, 947.74, 965.0, 25 / 365, 0.0379, 0.0, is_call=False) is None
+        exactly_intrinsic = 965.0 - 947.74
+        assert implied_vol(exactly_intrinsic, 947.74, 965.0, 25 / 365, 0.0379, 0.0, is_call=False) is None
+        # Deep-ITM call below intrinsic, same failure shape.
+        assert implied_vol(45.0, 250.0, 200.0, 30 / 365, 0.04, 0.0, is_call=True) is None
+
+    def test_a_price_above_intrinsic_still_solves(self) -> None:
+        iv = implied_vol(20.0, 947.74, 965.0, 25 / 365, 0.0379, 0.0, is_call=False)
+        assert iv is not None and 0.05 < iv < 0.5
