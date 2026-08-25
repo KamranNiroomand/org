@@ -37,6 +37,18 @@ export interface ChainQuote {
   readonly volume: number;
   readonly openInterest: number;
   readonly underlyingE4: number;
+  /**
+   * The trading day the spot's bar actually belongs to — null when the
+   * provider cannot say. `underlyingE4` is fetched as "the most recent
+   * daily bar in a trailing window", which silently returns a *prior*
+   * day's close whenever today's aggregate is not yet published. That
+   * carried-forward spot shifts every spot-dependent judgment — moneyness,
+   * intrinsic bounds, the liquidity gate's below-intrinsic rule —
+   * uniformly across the chain, and it happens precisely on the gap days
+   * a direction model most cares about. Carrying the date makes staleness
+   * a checkable fact instead of an invisible one.
+   */
+  readonly underlyingAsOfDay: string | null;
 
   /** Instant of the snapshot. */
   readonly asOf: string;

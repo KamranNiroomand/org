@@ -1,0 +1,1 @@
+ALTER TABLE `option_quotes` ADD `underlying_asof_day` text;

@@ -49,6 +49,7 @@ export async function repriceDay(
       volume: optionQuotes.volume,
       openInterest: optionQuotes.openInterest,
       underlyingE4: optionQuotes.underlyingE4,
+      underlyingAsOfDay: optionQuotes.underlyingAsOfDay,
       underlying: optionContracts.underlying,
       expiry: optionContracts.expiry,
       type: optionContracts.type,

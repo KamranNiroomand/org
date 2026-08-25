@@ -140,6 +140,17 @@ export const optionQuotes = sqliteTable(
     openInterest: integer('open_interest').notNull().default(0),
     /** Underlying price at the same instant — needed to reprice historically. */
     underlyingE4: integer('underlying_e4').notNull(),
+    /**
+     * The trading day `underlying_e4`'s bar actually belongs to. The spot is
+     * fetched as "the latest daily bar in a trailing window", which silently
+     * returns a prior day's close whenever the capture day's aggregate is not
+     * yet published — and a carried-forward spot shifts every spot-derived
+     * value (moneyness, intrinsic bounds, the liquidity gate) across the
+     * whole chain, worst on exactly the gap days the model cares about.
+     * Null on rows captured before this column existed: unknown provenance,
+     * not fresh provenance — downstream must skip the check, not pass it.
+     */
+    underlyingAsOfDay: text('underlying_asof_day'),
 
     /**
      * Implied vol in basis points (3160 = 31.60%), computed by us rather than

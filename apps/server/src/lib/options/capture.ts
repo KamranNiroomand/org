@@ -131,6 +131,7 @@ function persistChain(
       volume: q.volume,
       openInterest: q.openInterest,
       underlyingE4: q.underlyingE4,
+      underlyingAsOfDay: q.underlyingAsOfDay,
       ivBps: null,
       delta: null,
       gamma: null,

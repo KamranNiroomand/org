@@ -54,6 +54,7 @@ function chainFromFixture(): ChainQuote[] {
       volume: c.volume,
       openInterest: c.openInterest,
       underlyingE4: toE4(fixture.spot),
+      underlyingAsOfDay: DAY,
       asOf: ASOF,
       tradingDay: DAY,
       vendorIv: null,
