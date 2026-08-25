@@ -25,6 +25,7 @@ from app.features import (
     close_location_value,
     iv_rank,
     max_daily_return,
+    cpiv_spread,
     overnight_intraday_returns,
     put_call_ratios,
     residual_momentum,
@@ -648,3 +649,68 @@ class TestReversalAndLiquidity:
         panel = build_feature_panel(bars)
         for col in ("reversal_21d", "reversal_x_turnover_21d", "amihud_illiquidity_21d"):
             assert col in panel.columns
+
+
+class TestCpivSpread:
+    """Cremers-Weinbaum call-put IV spread: parity deviation across matched
+    (expiry, strike) pairs, weighted by the pair's smaller open interest."""
+
+    def _paired_chain(self) -> pl.DataFrame:
+        # Two strikes, both legs each. Strike 100: call 0.32 / put 0.30
+        # (spread +0.02), pair OI min(200, 100) = 100. Strike 110: call
+        # 0.40 / put 0.44 (spread -0.04), pair OI min(50, 300) = 50.
+        return pl.DataFrame(
+            {
+                "expiry": ["2026-09-18"] * 4,
+                "type": ["call", "put", "call", "put"],
+                "strike": [100.0, 100.0, 110.0, 110.0],
+                "iv": [0.32, 0.30, 0.40, 0.44],
+                "delta": [0.5, -0.5, 0.3, -0.7],
+                "open_interest": [200, 100, 50, 300],
+                "volume": [10, 10, 10, 10],
+            }
+        )
+
+    def test_weighted_by_the_pair_s_smaller_open_interest(self) -> None:
+        # (0.02 * 100 + -0.04 * 50) / 150 = 0.0
+        assert cpiv_spread(self._paired_chain()) == pytest.approx(0.0, abs=1e-12)
+
+    def test_unpaired_strikes_contribute_nothing(self) -> None:
+        # A call-only chain has no pairs: null, not an average of call IVs
+        # (that would rediscover skew, which risk_reversal measures).
+        assert cpiv_spread(_nvda_call_chain()) is None
+
+    def test_zero_oi_pairs_fall_back_to_equal_weight(self) -> None:
+        chain = self._paired_chain().with_columns(pl.lit(0).alias("open_interest"))
+        # (0.02 + -0.04) / 2 = -0.01
+        assert cpiv_spread(chain) == pytest.approx(-0.01, abs=1e-12)
+
+
+class TestOptionFeaturePanelJoin:
+    def test_left_join_keeps_bar_days_without_chains(self) -> None:
+        # Two years of bars against days-old chains: an inner join would
+        # collapse the training panel to the chain era. Bars rows without
+        # a chain must survive with nulls.
+        # 250 bars: the longest feature warm-up (residual momentum's 63d
+        # window on top of its own burn-in) eats ~188 rows.
+        bars = TestUnderlyingFeaturesExactness()._linear_bars(250)
+        option_panel = pl.DataFrame(
+            {
+                "symbol": ["X"],
+                "day": [bars["day"][-1]],
+                "cpiv_spread": [0.02],
+                "iv_term_slope": [0.05],
+                "risk_reversal_25d": [-0.01],
+                "put_call_oi_ratio": [0.8],
+                "put_call_volume_ratio": [0.9],
+            }
+        )
+        panel = build_feature_panel(bars, option_panel=option_panel)
+        assert panel.height > 1
+        joined_day = panel.filter(pl.col("day") == bars["day"][-1])
+        assert joined_day["cpiv_spread"][0] == pytest.approx(0.02)
+        assert panel["cpiv_spread"].null_count() == panel.height - 1
+
+    def test_no_option_panel_changes_nothing(self) -> None:
+        bars = TestUnderlyingFeaturesExactness()._linear_bars(250)
+        assert build_feature_panel(bars).columns == build_feature_panel(bars, option_panel=None).columns
