@@ -18,6 +18,7 @@ import { captureChains } from './options/capture.js';
 import { listUniverse, seedUniverse, toVendorSymbol } from './options/universe.js';
 import { syncRates } from './options/rates.js';
 import { snapshotMarketDb } from '../db/market/snapshot.js';
+import { syncBars } from './options/barsSync.js';
 import { isRunner } from './options/role.js';
 import { markOpenPositions, computeDailyEquity } from './paper.js';
 import { registerModelRun } from './options/modelRegistry.js';
@@ -585,6 +586,23 @@ export async function runOptionsCapture(
       // Without a curve, implied vol is left null rather than solved against a
       // made-up rate. Capture still proceeds: the quotes are what matter.
       result.errors.push(`Rate curve: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Bars before chains, every night. Bars were originally loaded by a
+    // one-off script and then never again — the chain corpus grew nightly
+    // while every forecast input (momentum, HAR vol, the whole feature
+    // panel) silently froze at the last hand-run backfill, a week stale by
+    // the time anyone noticed. The sync is incremental with a small
+    // overlap window (see barsSync.ts); a failure is reported but does not
+    // block the chain capture, which is the irreplaceable part.
+    try {
+      const bars = await syncBars(new PolygonProvider());
+      log.info(`Bars sync: ${bars.barsWritten} bars across ${bars.symbolsDone} symbols`);
+      if (bars.errors.length > 0) {
+        result.errors.push(`Bars sync: ${bars.errors.slice(0, 3).join('; ')}`);
+      }
+    } catch (err) {
+      result.errors.push(`Bars sync: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const symbols = listUniverse({ activeOnly: true }).map((u) => toVendorSymbol(u.symbol));
