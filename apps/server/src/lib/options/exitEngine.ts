@@ -404,6 +404,46 @@ export async function runExitEngine(
           });
         }
 
+        // An extended target date (the horizon time-stop's "model still
+        // wants this" outcome) is persisted for the same reason the stop
+        // ratchet is: unwritten, the audit trail and the UI keep showing
+        // a date the position is weeks past, and every reader has to
+        // rediscover why the engine is still holding. Functionally the
+        // rule re-evaluates from scratch each pass, so this write is for
+        // the record, not the logic — `exitUpdatedAt` stays untouched for
+        // the same document-cutoff reason as above.
+        if (
+          decision.newTargetExitDate !== null &&
+          decision.newTargetExitDate !== order.targetExitDate
+        ) {
+          summary.revised += 1;
+          record(order, 'target_moved', decision.triggeredBy, {
+            oldTargetExitDate: order.targetExitDate,
+            newTargetExitDate: decision.newTargetExitDate,
+            reasonText: decision.reason,
+          });
+          paperDb.transaction((tx) => {
+            tx.insert(paperExitRevisions)
+              .values({
+                orderId: order.id,
+                revisedAt: nowIso(),
+                oldTargetExitPriceE4: order.targetExitPriceE4,
+                newTargetExitPriceE4: order.targetExitPriceE4,
+                oldTargetExitDate: order.targetExitDate,
+                newTargetExitDate: decision.newTargetExitDate,
+                oldStopLossPriceE4: order.stopLossPriceE4,
+                newStopLossPriceE4: order.stopLossPriceE4,
+                reason: decision.reason,
+                triggeredBy: 'rule',
+              })
+              .run();
+            tx.update(paperOrders)
+              .set({ targetExitDate: decision.newTargetExitDate })
+              .where(eq(paperOrders.id, order.id))
+              .run();
+          });
+        }
+
         if (decision.action === 'hold') {
           record(order, 'held', decision.triggeredBy, { currentPriceE4: quote.bidE4, dte });
           continue;
