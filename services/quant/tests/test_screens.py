@@ -37,6 +37,7 @@ def _chain(rows: list[dict]) -> pl.DataFrame:
         "volume": 50,
         "open_interest": 500,
         "underlying_price": 100.0,
+        "underlying_asof_day": "2026-08-21",
         "iv": 0.3,
         "delta": 0.5,
         "gamma": 0.01,
@@ -309,6 +310,34 @@ class TestIndividualScreens:
 
         assert result.passed.height == 0
         assert result.dropped == {"stale_price": 1}
+
+    def test_a_stale_spot_disqualifies_the_chain_by_name(self) -> None:
+        # The capture layer's "latest bar in a trailing window" hands back
+        # Friday's close when Monday's aggregate is not yet published. On
+        # a gap day that spot is wrong for *every* contract at once —
+        # moneyness centred above real ATM, legitimate ITM calls reading
+        # as bounds violations. The provenance column makes it checkable.
+        rows = [
+            {"occ_symbol": "FRESH", "underlying_asof_day": "2026-08-21"},
+            {"occ_symbol": "CARRIED", "underlying_asof_day": "2026-08-20"},
+        ]
+        chain = _chain(rows).with_columns(pl.col("underlying_asof_day"))
+        result = screen_quotes(chain, trading_day="2026-08-21", symbol_vol=0.3)
+        assert set(result.passed["occ_symbol"].to_list()) == {"FRESH"}
+        assert result.dropped_rows["stale_spot"] == ["CARRIED"]
+
+    def test_unknown_spot_provenance_skips_the_check_rather_than_failing_it(self) -> None:
+        # Rows captured before the column existed are *unknown*, not
+        # fresh and not stale — and a frame without the column at all
+        # (older callers) must keep working.
+        rows = [{"occ_symbol": "LEGACY", "underlying_asof_day": None}]
+        chain = _chain(rows)
+        result = screen_quotes(chain, trading_day="2026-08-21", symbol_vol=0.3)
+        assert result.passed.height == 1
+
+        no_column = _chain([{"occ_symbol": "OLDFRAME"}]).drop("underlying_asof_day")
+        result2 = screen_quotes(no_column, trading_day="2026-08-21", symbol_vol=0.3)
+        assert result2.passed.height == 1
 
     def test_a_missing_spot_is_named_not_blamed_on_moneyness(self) -> None:
         # strike/0 is inf, inf is outside any band — the audit would read

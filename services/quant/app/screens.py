@@ -180,6 +180,25 @@ def screen_quotes(
     # when the truth is "the underlying had no price".
     apply("no_spot", pl.col("underlying_price").is_not_null() & (pl.col("underlying_price") > 0))
 
+    # A spot that belongs to a *prior* day. The capture layer fetches the
+    # underlying close as "the latest daily bar in a trailing window",
+    # which silently hands back Friday's close when Monday's aggregate is
+    # not yet published — and unlike a stale option print, a stale spot
+    # corrupts the *entire chain at once*: NVDA gaps down 12% and every
+    # moneyness, every intrinsic bound, and the gate's below-intrinsic
+    # rule are computed against a price ~14% above the real one, centring
+    # the admission band above true ATM and making legitimate ITM calls
+    # read as bounds violations. Runs before anything spot-derived so the
+    # audit names the actual failure. Null provenance (rows captured
+    # before the column existed, or callers without it) means *unknown*,
+    # not fresh — the check is skipped, never passed by default.
+    if trading_day is not None and "underlying_asof_day" in df.columns:
+        apply(
+            "stale_spot",
+            pl.col("underlying_asof_day").is_null()
+            | (pl.col("underlying_asof_day") >= pl.lit(trading_day)),
+        )
+
     # Years to expiry, calendar-day convention (the same 365 denominator
     # pricing.py uses; the clip to one day exists only here, to keep √T
     # nonzero for a same-day expiry). Parsed non-strictly: `expiry` is

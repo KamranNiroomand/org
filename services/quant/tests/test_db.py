@@ -43,6 +43,7 @@ def _build_market_db(path: Path) -> None:
             volume INTEGER NOT NULL DEFAULT 0,
             open_interest INTEGER NOT NULL DEFAULT 0,
             underlying_e4 INTEGER NOT NULL,
+            underlying_asof_day TEXT,
             iv_bps INTEGER,
             delta REAL,
             gamma REAL,
