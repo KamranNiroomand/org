@@ -350,6 +350,7 @@ export async function runExitEngine(
           entryEv: order.entryEv ?? undefined,
           currentEv,
           newDocumentsCount: docs.length,
+          today: day,
         });
 
         if (decision.action === 'exit_now') {

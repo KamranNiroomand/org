@@ -117,7 +117,14 @@ def compute_initial_exit_target(
 
 ExitAction = Literal["hold", "exit_now", "needs_review"]
 ExitTrigger = Literal[
-    "trail_raised", "stop_loss", "dte_floor", "ev_sign_flip", "new_news", "unchanged"
+    "trail_raised",
+    "stop_loss",
+    "dte_floor",
+    "thesis_expired",
+    "target_extended",
+    "ev_sign_flip",
+    "new_news",
+    "unchanged",
 ]
 
 
@@ -142,6 +149,8 @@ def evaluate_exit(
     new_documents_count: int = 0,
     min_dte_floor: int = MIN_DTE_FLOOR,
     trail_pct: float = DEFAULT_TRAIL_PCT,
+    today: str | None = None,
+    forecast_horizon_days: int = 5,
 ) -> ExitDecision:
     """Recheck logic for an open position, run every time the intraday job
     fires. Deterministic rules first — checked in order of how urgent they
@@ -216,6 +225,65 @@ def evaluate_exit(
         trailed = current_price * (1.0 - trail_pct)
         if trailed > target.stop_loss_price:
             trailed_stop = trailed
+
+    # The time-stop: the position's thesis has a shelf life, and it is the
+    # model's own forecast horizon. The direction model predicts a 5-day
+    # return; `target_exit_date` was set from exactly that horizon at
+    # entry. A position still open past that date is being held on a
+    # prediction that has already fully played out — every further day is
+    # theta paid for no modelled edge. Before this rule existed, nothing
+    # acted on the date at all: positions drifted past it until the DTE
+    # floor forced the issue weeks later, bleeding decay the whole way.
+    #
+    # The rule is deliberately evidence-gated in both directions:
+    #
+    # * Past the date with the daily health check's EV **non-positive** —
+    #   the model, re-run against current prices, no longer wants this
+    #   position — exit. Two independent facts (horizon spent, edge gone)
+    #   both point out.
+    # * Past the date with EV still **positive**: the model still likes it
+    #   *at today's prices*, which is a fresh thesis, so the date extends
+    #   one more horizon (never inside the DTE floor) rather than exiting
+    #   a position the model would re-enter tomorrow.
+    # * Past the date with EV **unknown** (health has not scored it yet):
+    #   hold unchanged. Acting on missing data is how a transient scoring
+    #   gap becomes a forced sale; the DTE floor remains the backstop.
+    if (
+        today is not None
+        and today > target.target_exit_date
+        and current_ev is not None
+    ):
+        if current_ev <= 0:
+            return ExitDecision(
+                action="exit_now",
+                new_target_exit_price=None,
+                new_target_exit_date=None,
+                new_stop_loss_price=None,
+                reason=(
+                    f"Target date {target.target_exit_date} has passed and current "
+                    f"EV is {current_ev:.2f} — the forecast horizon is spent and "
+                    f"the model no longer supports the position."
+                ),
+                triggered_by="thesis_expired",
+            )
+        extension_days = max(1, min(forecast_horizon_days, dte - min_dte_floor))
+        extended = (date.fromisoformat(today) + timedelta(days=extension_days)).isoformat()
+        # The raised trailing stop, if any, travels with the extension —
+        # same reasoning as the review escalations below: a decision that
+        # drops the ratchet resets the trail every time it fires.
+        return ExitDecision(
+            action="hold",
+            new_target_exit_price=target.target_exit_price,
+            new_target_exit_date=extended,
+            new_stop_loss_price=trailed_stop,
+            reason=(
+                f"Target date {target.target_exit_date} has passed but current EV "
+                f"is still {current_ev:.2f} — extending one forecast horizon to "
+                f"{extended}."
+            ),
+            triggered_by="target_extended",
+        )
+
 
     ev_flipped = (
         entry_ev is not None and current_ev is not None and (entry_ev >= 0) != (current_ev >= 0)

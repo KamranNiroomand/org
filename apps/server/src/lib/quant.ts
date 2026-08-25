@@ -240,6 +240,10 @@ export interface SelectEntriesInput {
   heldUnderlyings: string[];
   availableCapital: number;
   openPositionCount: number;
+  /** Model entries already opened for this trading day, across every
+   * invocation — counted from the decision log so a rerun after a server
+   * restart tops up instead of double-spending the daily budget. */
+  openedToday: number;
   maxConcurrentPositions: number;
   maxNewPositions: number;
   minEvPerRisk: number;
@@ -304,6 +308,7 @@ export async function selectEntries(input: SelectEntriesInput): Promise<SelectEn
         held_underlyings: input.heldUnderlyings,
         available_capital: input.availableCapital,
         open_position_count: input.openPositionCount,
+        opened_today: input.openedToday,
         max_concurrent_positions: input.maxConcurrentPositions,
         max_new_positions: input.maxNewPositions,
         min_ev_per_risk: input.minEvPerRisk,
@@ -481,6 +486,8 @@ export interface EvaluateExitInput {
   entryEv?: number;
   currentEv?: number;
   newDocumentsCount?: number;
+  /** Operating trading day, for the horizon time-stop — see exit.py. */
+  today?: string;
 }
 
 /**
@@ -507,6 +514,7 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
         entry_ev: input.entryEv ?? null,
         current_ev: input.currentEv ?? null,
         new_documents_count: input.newDocumentsCount ?? 0,
+        today: input.today ?? null,
       }),
       signal: AbortSignal.timeout(10_000),
     });

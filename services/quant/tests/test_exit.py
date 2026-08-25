@@ -215,3 +215,67 @@ class TestEvaluateExit:
         )
         assert decision.action == "exit_now"
         assert decision.triggered_by == "stop_loss"
+
+
+class TestHorizonTimeStop:
+    """The thesis has a shelf life: the model predicts a 5-day return, and
+    target_exit_date was set from exactly that horizon. Before this rule a
+    position drifted past its date until the DTE floor forced the issue
+    weeks later, paying theta the whole way on a prediction that had fully
+    played out."""
+
+    def _target(self, **overrides):
+        base = dict(
+            target_exit_price=15.0,
+            stop_loss_price=5.0,
+            target_exit_date="2026-08-20",
+            reason="",
+        )
+        base.update(overrides)
+        return ExitTarget(**base)
+
+    def test_past_the_date_with_negative_ev_exits(self) -> None:
+        d = evaluate_exit(10.0, dte=40, target=self._target(),
+                          current_ev=-12.0, today="2026-08-24")
+        assert d.action == "exit_now"
+        assert d.triggered_by == "thesis_expired"
+
+    def test_past_the_date_with_positive_ev_extends_one_horizon(self) -> None:
+        d = evaluate_exit(10.0, dte=40, target=self._target(),
+                          current_ev=30.0, today="2026-08-24")
+        assert d.action == "hold"
+        assert d.triggered_by == "target_extended"
+        assert d.new_target_exit_date == "2026-08-29"
+
+    def test_past_the_date_with_no_ev_view_holds_unchanged(self) -> None:
+        # Acting on missing data turns a transient scoring gap into a
+        # forced sale; the DTE floor stays the backstop.
+        d = evaluate_exit(10.0, dte=40, target=self._target(),
+                          current_ev=None, today="2026-08-24")
+        assert d.action == "hold"
+        assert d.triggered_by == "unchanged"
+
+    def test_the_extension_never_reaches_inside_the_dte_floor(self) -> None:
+        d = evaluate_exit(10.0, dte=5, target=self._target(),
+                          current_ev=30.0, today="2026-08-24")
+        assert d.triggered_by == "target_extended"
+        # dte 5, floor 3: at most 2 days out, not the full 5-day horizon.
+        assert d.new_target_exit_date == "2026-08-26"
+
+    def test_a_winner_past_its_date_keeps_the_raised_trail_on_extension(self) -> None:
+        d = evaluate_exit(20.0, dte=40, target=self._target(),
+                          current_ev=30.0, today="2026-08-24")
+        assert d.triggered_by == "target_extended"
+        assert d.new_stop_loss_price == pytest.approx(14.0)  # 30% below 20
+
+    def test_the_stop_and_dte_floor_outrank_the_time_stop(self) -> None:
+        stopped = evaluate_exit(4.0, dte=40, target=self._target(),
+                                current_ev=-12.0, today="2026-08-24")
+        assert stopped.triggered_by == "stop_loss"
+        expiring = evaluate_exit(10.0, dte=2, target=self._target(),
+                                 current_ev=30.0, today="2026-08-24")
+        assert expiring.triggered_by == "dte_floor"
+
+    def test_no_today_keeps_the_old_behavior(self) -> None:
+        d = evaluate_exit(10.0, dte=40, target=self._target(), current_ev=-12.0)
+        assert d.action == "hold"

@@ -1,4 +1,4 @@
-import { and, desc, eq, lte, sql } from 'drizzle-orm';
+import { and, count, desc, eq, lte, sql } from 'drizzle-orm';
 import { config } from '../config.js';
 import { marketDb } from '../db/market/index.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
@@ -467,6 +467,25 @@ const DECISION_BATCH_SIZE = 1_000;
 
 /** Decisions for one trading day, newest first — what the UI and any
  * "why didn't it buy X" question read. */
+/**
+ * How many model entries this trading day has already opened, across every
+ * invocation. Counted from the decision log — the audit trail every entry
+ * run writes — rather than from order `openedAt` timestamps, because the
+ * operating trading day and the wall-clock date routinely differ (a reader
+ * opens day N's positions at 04:30 on day N+1). Exists because a server
+ * restart re-fired the entry job for a day that had already spent its
+ * slots, and the per-invocation cap happily allocated a second full risk
+ * budget — see `select_entries` in rank.py, which subtracts this.
+ */
+export function modelEntriesOpenedOn(day: string): number {
+  const row = paperDb
+    .select({ n: count() })
+    .from(paperDecisionLog)
+    .where(and(eq(paperDecisionLog.day, day), eq(paperDecisionLog.decision, 'opened')))
+    .get();
+  return row?.n ?? 0;
+}
+
 export function decisionsForDay(day: string): Array<typeof paperDecisionLog.$inferSelect> {
   return paperDb
     .select()
