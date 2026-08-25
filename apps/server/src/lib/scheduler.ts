@@ -751,7 +751,7 @@ export async function runRetrain(log: FastifyBaseLogger, reason: string): Promis
     return result;
   }
   retraining = true;
-  log.info(`Weekly retrain starting (${reason})`);
+  log.info(`Retrain starting (${reason})`);
 
   try {
     for (const { target, horizon } of TARGETS) {
@@ -793,7 +793,7 @@ export async function runRetrain(log: FastifyBaseLogger, reason: string): Promis
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     result.errors.push(message);
-    log.error({ err }, 'Weekly retrain failed');
+    log.error({ err }, 'Retrain failed');
   } finally {
     retraining = false;
   }
@@ -1078,7 +1078,7 @@ export function startScheduler(log: FastifyBaseLogger): void {
   }
 
   if (!config.market.isRunner) {
-    log.info('Weekly retrain not scheduled — MARKET_ROLE=reader. Training runs on the runner.');
+    log.info('Retrain not scheduled — MARKET_ROLE=reader. Training runs on the runner.');
   } else if (!cron.validate(config.market.retrainCron)) {
     log.error(`RETRAIN_CRON is not valid: "${config.market.retrainCron}" — retrain disabled`);
   } else {
@@ -1091,7 +1091,7 @@ export function startScheduler(log: FastifyBaseLogger): void {
       },
       { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
     );
-    log.info(`Weekly retrain scheduled (${config.market.retrainCron}), next run ${getNextRetrainRun() ?? 'unknown'}`);
+    log.info(`Retrain scheduled (${config.market.retrainCron}), next run ${getNextRetrainRun() ?? 'unknown'}`);
   }
 
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
