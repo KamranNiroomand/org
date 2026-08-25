@@ -470,7 +470,26 @@ def implied_vol(
 
     # No-arbitrage bounds. Below the floor or above the ceiling the quote is
     # not a price this model can produce at any volatility.
-    floor = value(MIN_VOL)
+    #
+    # For an American option the floor is *intrinsic*, not the tree's value
+    # at MIN_VOL: at near-zero vol with a positive rate the CRR tree
+    # degenerates (the per-step drift outruns the up-move, the risk-neutral
+    # probability leaves [0,1]) and the "American" value collapses to the
+    # European one — for an ITM put, K·e^(-rT) − S, *below* intrinsic. A
+    # real print between that broken floor and intrinsic then "solves" to
+    # σ ≈ MIN_VOL, and downstream the EV model reads σ≈0 as literal truth:
+    # the underlying cannot move, the put pays intrinsic with certainty,
+    # P(profit) = 100%. That exact chain sized a real paper position 4x on
+    # a COST put whose close sat 1.5% under end-of-day intrinsic — the
+    # ordinary non-synchronous-close artifact, carrying no volatility
+    # information at all. An American option is never worth less than
+    # immediate exercise, so a price at or below intrinsic determines no
+    # volatility, which is precisely this function's documented contract.
+    tree_floor = value(MIN_VOL)
+    floor = tree_floor
+    if american:
+        intrinsic = max(spot - strike, 0.0) if is_call else max(strike - spot, 0.0)
+        floor = max(floor, intrinsic)
     ceiling = value(MAX_VOL)
     if price <= floor or price >= ceiling:
         return None
@@ -480,8 +499,12 @@ def implied_vol(
     if ceiling - floor < 1e-4:
         return None
 
+    # Brent brackets on the *tree's* values: `f_lo` must be the function's
+    # actual value at MIN_VOL, not the intrinsic-raised rejection floor —
+    # the floor above decides whether a solution exists, the bracket below
+    # finds it.
     lo, hi = MIN_VOL, MAX_VOL
-    f_lo = floor - price
+    f_lo = tree_floor - price
     f_hi = ceiling - price
 
     # Brent's method.
