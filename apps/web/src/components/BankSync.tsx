@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Building2, Plus, RefreshCw, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { AlertTriangle, Building2, History, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePlaidLink, type PlaidLinkOnSuccess } from 'react-plaid-link';
 import { Badge, Button, Card, CardHeader, Empty, cn } from './ui';
 import { api } from '../lib/api';
@@ -51,6 +51,13 @@ export function BankSync() {
   const qc = useQueryClient();
   const [linkToken, setLinkToken] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Why we opened Link decides what to do when it finishes: a fresh connect or
+  // a reauth needs a token exchange, but "extend history" reuses an already
+  // linked item — Plaid update mode widens its history window, so the only
+  // follow-up is a sync to pull the newly available months.
+  const linkIntent = useRef<{ mode: 'connect-reauth' | 'extend'; itemId?: string }>({
+    mode: 'connect-reauth',
+  });
 
   const { data: status } = useQuery({
     queryKey: ['plaid-status'],
@@ -88,6 +95,20 @@ export function BankSync() {
     onError: (e) => setNotice((e as Error).message),
   });
 
+  // Sync a single item — used after an "extend history" update, so only the
+  // affected bank is re-pulled rather than the whole nightly job.
+  const syncItem = useMutation({
+    mutationFn: (itemId: string) =>
+      api.post<Array<{ added: number; categorized: number }>>('/api/plaid/sync', { itemId }),
+    onSuccess: (r) => {
+      const added = r.reduce((n, o) => n + o.added, 0);
+      const categorized = r.reduce((n, o) => n + o.categorized, 0);
+      setNotice(`Backfilled — ${added} older transactions pulled, ${categorized} categorized.`);
+      refreshAll();
+    },
+    onError: (e) => setNotice((e as Error).message),
+  });
+
   const syncNow = useMutation({
     mutationFn: () =>
       api.post<{ banks: { added: number; categorized: number }; errors: string[] }>(
@@ -113,6 +134,16 @@ export function BankSync() {
   // with something the user can act on.
   const onLinkSuccess = useCallback<PlaidLinkOnSuccess>(
     (publicToken, metadata) => {
+      const intent = linkIntent.current;
+      setLinkToken(null);
+
+      // Extend-history reuses an existing item: nothing to exchange, just pull
+      // the wider window Plaid now exposes for it.
+      if (intent.mode === 'extend' && intent.itemId) {
+        syncItem.mutate(intent.itemId);
+        return;
+      }
+
       if (!publicToken) {
         setNotice('Plaid returned no token for that connection. Try again.');
         return;
@@ -122,7 +153,7 @@ export function BankSync() {
         institutionName: metadata.institution?.name ?? undefined,
       });
     },
-    [exchange],
+    [exchange, syncItem],
   );
 
   const { open, ready } = usePlaidLink({
@@ -191,7 +222,10 @@ PLAID_SECRET=...`}
             <Button
               size="sm"
               variant="primary"
-              onClick={() => mintToken.mutate(undefined)}
+              onClick={() => {
+                linkIntent.current = { mode: 'connect-reauth' };
+                mintToken.mutate(undefined);
+              }}
               disabled={mintToken.isPending || !status.encryptionAvailable}
             >
               <Plus className="size-3.5" /> Connect
@@ -245,9 +279,29 @@ PLAID_SECRET=...`}
                 )}
               </div>
 
-              {item.status === 'needs_reauth' && (
-                <Button size="sm" variant="secondary" onClick={() => mintToken.mutate(item.id)}>
+              {item.status === 'needs_reauth' ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    linkIntent.current = { mode: 'connect-reauth', itemId: item.id };
+                    mintToken.mutate(item.id);
+                  }}
+                >
                   Reconnect
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title="Pull older transactions Plaid didn't include when this bank was first connected"
+                  disabled={mintToken.isPending || syncItem.isPending}
+                  onClick={() => {
+                    linkIntent.current = { mode: 'extend', itemId: item.id };
+                    mintToken.mutate(item.id);
+                  }}
+                >
+                  <History className="size-3.5" /> Extend history
                 </Button>
               )}
 

@@ -68,6 +68,11 @@ export async function plaidRoutes(app: FastifyInstance): Promise<void> {
         // Transactions drives the ledger; liabilities adds APR, due dates, and
         // minimum payments for credit cards.
         products: existing ? undefined : [Products.Transactions, Products.Liabilities],
+        // Ask for the full history window. On a fresh connect this sets how far
+        // back the first sync reaches; on an existing item (update mode) Plaid
+        // honours it too, so completing Link update backfills older months that
+        // the original, shorter default never pulled.
+        transactions: { days_requested: config.plaid.transactionDays },
         ...(existing
           ? { access_token: (await import('../crypto.js')).decrypt(existing.accessTokenEnc) }
           : {}),
