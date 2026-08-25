@@ -439,6 +439,9 @@ class ExitDecisionRequest(BaseModel):
     entry_ev: float | None = None
     current_ev: float | None = None
     new_documents_count: int = 0
+    #: The caller's operating trading day, for the horizon time-stop —
+    #: see `evaluate_exit`. Null keeps the pre-time-stop behavior.
+    today: str | None = None
 
 
 class ExitDecisionResponse(BaseModel):
@@ -470,6 +473,11 @@ def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
         entry_ev=request.entry_ev,
         current_ev=request.current_ev,
         new_documents_count=request.new_documents_count,
+        # Horizon left at exit.py's default rather than read from the model
+        # manifest: this endpoint is deliberately model-free and
+        # database-free (see ExitDecisionRequest's docstring), and the
+        # extension length is a pacing heuristic, not a modelled quantity.
+        today=request.today,
     )
     return ExitDecisionResponse(
         action=decision.action,
@@ -576,6 +584,10 @@ class SelectEntriesRequest(BaseModel):
     #: Dollars actually available to deploy, after the caller's own reserve.
     available_capital: float = Field(ge=0)
     open_position_count: int = Field(ge=0, default=0)
+    #: Model entries the day has already opened (all invocations, from the
+    #: caller's decision log) — see `select_entries` for the restart
+    #: double-spend this closes.
+    opened_today: int = Field(ge=0, default=0)
     max_concurrent_positions: int = Field(gt=0)
     max_new_positions: int = Field(gt=0)
     min_ev_per_risk: float
@@ -711,6 +723,7 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
         open_position_count=request.open_position_count,
         max_concurrent_positions=request.max_concurrent_positions,
         max_new_positions=request.max_new_positions,
+        opened_today=request.opened_today,
         min_ev_per_risk=request.min_ev_per_risk,
         min_prob_profit=request.min_prob_profit,
         min_dte=request.min_dte,

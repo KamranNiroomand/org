@@ -534,6 +534,7 @@ class TestSelectEntriesRejections:
             open_position_count=0,
             max_concurrent_positions=10,
             max_new_positions=5,
+            opened_today=0,
             min_ev_per_risk=0.05,
             min_prob_profit=0.5,
             min_dte=14,
@@ -717,6 +718,7 @@ class TestSelectEntries:
             open_position_count=0,
             max_concurrent_positions=10,
             max_new_positions=5,
+            opened_today=0,
             min_ev_per_risk=0.05,
             min_prob_profit=0.5,
             # The shipped band, and `_candidate`'s 30-day fixture sits
@@ -811,6 +813,7 @@ class TestSelectEntriesSizing:
             open_position_count=0,
             max_concurrent_positions=10,
             max_new_positions=5,
+            opened_today=0,
             min_ev_per_risk=0.05,
             min_prob_profit=0.5,
             min_dte=14,
@@ -925,6 +928,7 @@ class TestSelectEntriesDteBand:
             open_position_count=0,
             max_concurrent_positions=10,
             max_new_positions=5,
+            opened_today=0,
             min_ev_per_risk=0.05,
             min_prob_profit=0.5,
             min_dte=14,
@@ -1123,3 +1127,50 @@ class TestModelSelection:
         monkeypatch.setattr("app.rank.read_champion_run", lambda target="dir": None)
         with pytest.raises(SystemExit, match="No trained models found"):
             resolve_model(tmp_path / "empty")
+
+
+class TestDailyCapAndCertaintyGuards:
+    """Two entry guards added after live incidents: a server restart
+    re-fired the entry job and double-spent the daily budget, and a
+    degenerate sigma=3bps solve printed P(profit)=100% on a position that
+    was then sized 4x."""
+
+    def _select(self, candidates, **overrides):
+        defaults = dict(
+            held_underlyings=set(),
+            available_capital=10_000.0,
+            open_position_count=0,
+            max_concurrent_positions=10,
+            max_new_positions=5,
+            opened_today=0,
+            min_ev_per_risk=0.05,
+            min_prob_profit=0.5,
+            min_dte=14,
+            max_dte=60,
+        )
+        defaults.update(overrides)
+        return select_entries(candidates, **defaults)
+
+    def test_a_rerun_tops_up_instead_of_respending_the_daily_budget(self) -> None:
+        # Five slots per day, five already opened by the first invocation:
+        # a rerun (restart, catch-up) must open nothing more.
+        cands = [_candidate(occ_symbol=f"C{i}", underlying=f"U{i}") for i in range(5)]
+        selected, rejected = self._select(cands, opened_today=5, open_position_count=5)
+        assert selected == []
+        assert all(r.reason == "daily_cap_spent" for r in rejected)
+
+    def test_a_partial_day_opens_only_the_remainder(self) -> None:
+        cands = [_candidate(occ_symbol=f"C{i}", underlying=f"U{i}") for i in range(5)]
+        selected, rejected = self._select(cands, opened_today=3, open_position_count=3)
+        assert len(selected) == 2
+        assert any(r.reason == "day_full" for r in rejected)
+
+    def test_near_certain_profit_is_rejected_as_a_data_artifact(self) -> None:
+        sure_thing = _candidate(occ_symbol="SURE", prob_profit=1.0, ev=999.0)
+        honest = _candidate(occ_symbol="OK", underlying="BBB", prob_profit=0.62)
+        selected, rejected = self._select([sure_thing, honest])
+        assert [s.contract.occ_symbol for s in selected] == ["OK"]
+        assert any(
+            r.reason == "implausible_certainty" and r.contract.occ_symbol == "SURE"
+            for r in rejected
+        )

@@ -78,6 +78,13 @@ MAX_VOL_FORECAST_RATIO = 2.0
 # simplification) at this magnitude, +/-. See
 # _annualize_horizon_return's docstring for why.
 MAX_ANNUALIZED_DRIFT = 1.0
+#: Entry guard: reject any candidate whose modelled P(profit) exceeds this.
+#: See the `implausible_certainty` rejection in `select_entries` — the COST
+#: sigma=3bps incident, generalized. Genuine single-leg long-option
+#: candidates on a weak-edge 5-day forecast live far below this line
+#: (a deep-ITM near-stock position tops out around ~0.8 against its own
+#: breakeven); only degenerate inputs reach past it.
+MAX_PLAUSIBLE_PROB_PROFIT = 0.95
 _MIN_YEARS = 1e-9
 _MIN_VOL = 1e-9
 
@@ -743,6 +750,7 @@ def select_entries(
     open_position_count: int,
     max_concurrent_positions: int,
     max_new_positions: int,
+    opened_today: int,
     min_ev_per_risk: float,
     min_prob_profit: float,
     min_dte: int,
@@ -805,17 +813,29 @@ def select_entries(
     """
     remaining = available_capital
     room = max(0, max_concurrent_positions - open_position_count)
-    budget_slots = min(room, max_new_positions)
+    # The daily cap counts what the *day* already opened, not what this
+    # invocation opens. Found live: a server restart re-fired the entry
+    # job for a trading day that had already spent its five slots, and
+    # "max new positions" — enforced per call — happily allocated five
+    # more, a second full risk budget on the same day's same board. The
+    # caller reports how many model entries the day already has (from the
+    # decision log, the same audit trail both runs wrote to), and this
+    # subtracts them so a rerun is a no-op instead of a double-spend.
+    budget_slots = min(room, max(0, max_new_positions - opened_today))
     if budget_slots <= 0 or remaining <= 0:
         # Still explain every candidate rather than returning silently: a
         # day that opened nothing because the book was full looks exactly
         # like a day the market offered nothing, and those call for
         # opposite responses.
-        reason = "no_slots_remaining" if budget_slots <= 0 else "no_capital_remaining"
+        if budget_slots <= 0:
+            reason = "daily_cap_spent" if opened_today >= max_new_positions else "no_slots_remaining"
+        else:
+            reason = "no_capital_remaining"
         detail = {
             "open_position_count": open_position_count,
             "max_concurrent_positions": max_concurrent_positions,
             "max_new_positions": max_new_positions,
+            "opened_today": opened_today,
             "available_capital": available_capital,
         }
         return [], [EntryRejection(contract=c, reason=reason, detail=detail) for c in candidates]
@@ -849,6 +869,20 @@ def select_entries(
             continue
         if c.prob_profit < min_prob_profit:
             reject(c, "prob_below_bar", prob_profit=c.prob_profit, bar=min_prob_profit)
+            continue
+        if c.prob_profit > MAX_PLAUSIBLE_PROB_PROFIT:
+            # Too good to be true is a data defect, not alpha. Found live:
+            # a put whose close sat below end-of-day intrinsic solved to
+            # sigma = 3bps, the EV engine read sigma = 0 as "the underlying
+            # cannot move", printed P(profit) = 100%, and sized the
+            # position 4x. The solver now refuses that solve, but the
+            # principle outlives the instance: a 5-day directional model
+            # whose out-of-sample rank IC is ~0.04 cannot honestly assign
+            # near-certainty to any single-leg long option — when the
+            # arithmetic says it did, the input is broken somewhere, and
+            # the right response is to walk away, not to size up.
+            reject(c, "implausible_certainty", prob_profit=c.prob_profit,
+                   bar=MAX_PLAUSIBLE_PROB_PROFIT)
             continue
         if c.dte < min_dte or c.dte > max_dte:
             reject(c, "dte_outside_band", dte=c.dte, min_dte=min_dte, max_dte=max_dte)

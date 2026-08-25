@@ -1,5 +1,5 @@
 import { config } from '../../config.js';
-import { accountCapacity, contractMultiplier, logDecisions, openOrder, PaperError } from '../paper.js';
+import { accountCapacity, contractMultiplier, logDecisions, modelEntriesOpenedOn, openOrder, PaperError } from '../paper.js';
 import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
@@ -65,6 +65,7 @@ export async function runAutoEntry(
         heldUnderlyings: capacity.heldUnderlyings,
         availableCapital,
         openPositionCount: capacity.openPositionCount,
+        openedToday: modelEntriesOpenedOn(day),
         maxConcurrentPositions: config.market.autoEntry.maxConcurrentPositions,
         maxNewPositions: config.market.autoEntry.maxNewPositionsPerDay,
         minEvPerRisk: config.market.autoEntry.minEvPerRisk,
