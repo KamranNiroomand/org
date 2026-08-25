@@ -95,7 +95,14 @@ const schema = z.object({
   // Friday's close as its latest day; no reason to wait further into the
   // week. Local time, like the nightly bank sync: a quiet moment on the
   // runner's own clock, not the market's.
-  RETRAIN_CRON: z.string().default('0 8 * * 0'),
+  // Daily, not weekly. A refit of an unchanged configuration on one more
+  // day of data is not a new hypothesis against the multiple-testing
+  // hurdle (the config hash is identical), registration never
+  // auto-promotes (the champion only changes by explicit decision), and
+  // training takes minutes — so the only effect of a faster cadence is
+  // that a fresh, fairly-compared challenger is always available instead
+  // of up to a week stale.
+  RETRAIN_CRON: z.string().default('0 8 * * *'),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
   // Auto-entry: once/day, every candidate clearing both bars below (and
