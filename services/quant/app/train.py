@@ -38,8 +38,8 @@ import polars as pl
 
 from .cv import purged_walk_forward_splits
 from .db import read_bars
-from .features import build_feature_panel, option_feature_panel
-from .labels import direction_bucket, forward_return
+from .features import build_feature_panel, option_feature_panel, rank_features_per_day
+from .labels import direction_bucket, forward_return, vol_scaled_forward_return
 from .metrics import ic_summary, information_coefficient, rmse
 from .models import beats_baseline, mean_baseline, train_lgbm_regressor
 
@@ -80,6 +80,8 @@ def _config_hash(
     horizon: int,
     feature_cols: list[str],
     early_stopping_rounds: int | None = None,
+    label_kind: str = "raw",
+    rank_features: bool = False,
 ) -> str:
     """Identifies a training configuration. Anything that changes the
     fitted model must be in here.
@@ -104,10 +106,30 @@ def _config_hash(
             "horizon": horizon,
             "features": feature_cols,
             "early_stopping_rounds": early_stopping_rounds,
+            "label_kind": label_kind,
+            "rank_features": rank_features,
         },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+#: The current training configuration's preprocessing — both halves of
+#: trial #20 (see MODEL_TRIAL_COUNT in apps/server/src/config.ts).
+#:
+#: `LABEL_KIND = "vol_scaled"`: the label is the forward return in the
+#: symbol's own trailing-sigma units — see `vol_scaled_forward_return`
+#: for why predicting raw returns mostly teaches a cross-sectional model
+#: which names are volatile. Inference multiplies the prediction back by
+#: the current trailing sigma (manifest-gated in rank.py, so older raw-
+#: label models keep scoring unchanged).
+#:
+#: `RANK_FEATURES = True`: features are per-day cross-sectional ranks in
+#: [-1, 1] — see `rank_features_per_day`. Applied identically at
+#: training and inference, keyed off the same manifest.
+LABEL_KIND = "vol_scaled"
+LABEL_VOL_WINDOW = 21
+RANK_FEATURES = True
 
 
 def build_panel(target: str, horizon: int) -> pl.DataFrame:
@@ -122,7 +144,10 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
     features = build_feature_panel(bars, option_panel=option_feature_panel())
 
     if target == "dir":
-        labels = forward_return(bars, horizon)
+        if LABEL_KIND == "vol_scaled":
+            labels = vol_scaled_forward_return(bars, horizon, vol_window=LABEL_VOL_WINDOW)
+        else:
+            labels = forward_return(bars, horizon)
         label_col = f"fwd_ret_{horizon}d"
     elif target == "vrp":
         raise SystemExit(
@@ -132,7 +157,11 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
     else:
         raise SystemExit(f"Unknown target: {target!r} (expected 'dir' or 'vrp')")
 
-    panel = features.join(labels, on=["symbol", "day"], how="inner")
+    if RANK_FEATURES:
+        panel_features = rank_features_per_day(features, FEATURE_COLS)
+    else:
+        panel_features = features
+    panel = panel_features.join(labels, on=["symbol", "day"], how="inner")
     return panel.rename({label_col: "label"})
 
 
@@ -227,7 +256,10 @@ def train(
     final_model = lgb.LGBMRegressor(**final_params)
     final_model.fit(panel[FEATURE_COLS].to_numpy(), panel["label"].to_numpy())
 
-    config_hash = _config_hash(target, horizon, FEATURE_COLS, early_stopping_rounds)
+    config_hash = _config_hash(
+        target, horizon, FEATURE_COLS, early_stopping_rounds,
+        label_kind=LABEL_KIND, rank_features=RANK_FEATURES,
+    )
     run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{config_hash}"
     base_dir = output_dir or (Path.home() / ".org" / "market" / "models")
     run_dir = base_dir / run_id
@@ -256,6 +288,8 @@ def train(
                 "train_days": {"first": days[0], "last": days[-1], "count": len(days)},
                 "n_splits": n_splits,
                 "embargo": embargo,
+                "label": {"kind": LABEL_KIND, "vol_window": LABEL_VOL_WINDOW},
+                "rank_features": RANK_FEATURES,
                 "metrics": metrics,
             },
             indent=2,

@@ -567,15 +567,48 @@ def _forecast_inputs(
         raise SystemExit("No bars in market.db.")
 
     all_features = build_feature_panel(bars).filter(pl.col("day") <= trading_day)
+    # Preprocessing must mirror training exactly, and the manifest is the
+    # single source of what that was — a model trained on per-day feature
+    # ranks scored on raw levels (or vice versa) is garbage that still
+    # returns numbers. Older manifests carry neither key and score raw,
+    # unchanged.
+    if manifest.get("rank_features", False):
+        from .features import rank_features_per_day
+
+        all_features = rank_features_per_day(all_features, feature_cols)
     latest_features = all_features.sort("day").group_by("symbol", maintain_order=True).last()
     if latest_features.height == 0:
         raise SystemExit(f"No features available on or before {trading_day} — not enough trailing bars yet.")
 
     predicted = booster.predict(latest_features.select(feature_cols).to_numpy())
-    drift_by_symbol = {
-        row["symbol"]: _annualize_horizon_return(float(pred), horizon)
-        for row, pred in zip(latest_features.iter_rows(named=True), predicted)
-    }
+
+    label_cfg = manifest.get("label") or {}
+    if label_cfg.get("kind") == "vol_scaled":
+        # The model predicted the horizon return in trailing-sigma units;
+        # multiplying back by each symbol's *current* trailing sigma —
+        # same estimator, same window as the label's denominator —
+        # recovers a return. A symbol without enough vol history has no
+        # honest scale and gets no drift, exactly as it had no label.
+        from .vol import TRADING_DAYS_PER_YEAR, rolling_realized_vol
+
+        window = int(label_cfg.get("vol_window", 21))
+        vols = rolling_realized_vol(bars, window).filter(pl.col("day") <= trading_day)
+        latest_sigma = {
+            row["symbol"]: row["realized_vol"] * (horizon / TRADING_DAYS_PER_YEAR) ** 0.5
+            for row in vols.sort("day").group_by("symbol", maintain_order=True).last().iter_rows(named=True)
+        }
+        drift_by_symbol = {
+            row["symbol"]: _annualize_horizon_return(
+                float(pred) * latest_sigma[row["symbol"]], horizon
+            )
+            for row, pred in zip(latest_features.iter_rows(named=True), predicted)
+            if row["symbol"] in latest_sigma and latest_sigma[row["symbol"]] > 0
+        }
+    else:
+        drift_by_symbol = {
+            row["symbol"]: _annualize_horizon_return(float(pred), horizon)
+            for row, pred in zip(latest_features.iter_rows(named=True), predicted)
+        }
 
     # A volatility *forecast*, not a volatility measurement carried flat.
     # See har.py: realized vol mean-reverts, so extrapolating the trailing
