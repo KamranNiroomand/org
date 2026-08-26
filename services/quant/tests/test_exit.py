@@ -8,6 +8,10 @@ from __future__ import annotations
 import pytest
 
 from app.exit import (
+    DEFAULT_STOP_LOSS_PCT,
+    MAX_STOP_PCT,
+    MIN_STOP_PCT,
+    vol_scaled_stop_pct,
     MIN_DTE_FLOOR,
     ExitTarget,
     compute_initial_exit_target,
@@ -279,3 +283,85 @@ class TestHorizonTimeStop:
     def test_no_today_keeps_the_old_behavior(self) -> None:
         d = evaluate_exit(10.0, dte=40, target=self._target(), current_ev=-12.0)
         assert d.action == "hold"
+
+
+class TestVolScaledStop:
+    """The systematic-desk convention: every stop the same number of
+    sigmas away, not the same number of percent."""
+
+    def test_high_vol_options_get_wider_stops_than_low_vol_ones(self) -> None:
+        # ATM-ish call on an 80%-vol name vs a 15%-vol name, same price
+        # and delta: the stop distance must order by volatility.
+        wild = vol_scaled_stop_pct(5.0, spot=100.0, delta=0.5, sigma=0.80, horizon_days=5)
+        calm = vol_scaled_stop_pct(5.0, spot=100.0, delta=0.5, sigma=0.15, horizon_days=5)
+        assert wild > calm
+
+    def test_clamped_to_the_documented_band(self) -> None:
+        extreme = vol_scaled_stop_pct(0.5, spot=500.0, delta=0.9, sigma=1.5, horizon_days=5)
+        assert extreme == MAX_STOP_PCT
+        sleepy = vol_scaled_stop_pct(50.0, spot=100.0, delta=0.9, sigma=0.04, horizon_days=5)
+        assert sleepy == MIN_STOP_PCT
+
+    def test_missing_inputs_degrade_to_the_flat_default_not_no_stop(self) -> None:
+        assert vol_scaled_stop_pct(5.0, None, 0.5, 0.3, 5) == DEFAULT_STOP_LOSS_PCT
+        assert vol_scaled_stop_pct(5.0, 100.0, None, 0.3, 5) == DEFAULT_STOP_LOSS_PCT
+        assert vol_scaled_stop_pct(5.0, 100.0, 0.5, None, 5) == DEFAULT_STOP_LOSS_PCT
+
+    def test_deep_itm_low_elasticity_gets_a_tighter_stop(self) -> None:
+        # A deep-ITM call (delta ~0.95, big premium) moves like stock —
+        # small relative vol — so its stop sits near the floor, where a
+        # cheap OTM lottery ticket's sits near the cap.
+        itm = vol_scaled_stop_pct(60.0, spot=450.0, delta=0.95, sigma=0.35, horizon_days=5)
+        otm = vol_scaled_stop_pct(1.2, spot=450.0, delta=0.15, sigma=0.35, horizon_days=5)
+        assert itm < otm
+
+
+class TestBreakevenRatchet:
+    def _target(self):
+        return ExitTarget(
+            target_exit_price=15.0, stop_loss_price=5.0,
+            target_exit_date="2026-12-01", reason="",
+        )
+
+    def test_halfway_to_target_raises_the_stop_to_entry(self) -> None:
+        # entry 10, target 15 -> armed at 12.5. At 12.6 the stop becomes
+        # entry: the trade can now end flat but never give back a gain.
+        d = evaluate_exit(12.6, dte=40, target=self._target(), entry_price=10.0)
+        assert d.new_stop_loss_price == pytest.approx(10.0)
+
+    def test_below_halfway_the_original_stop_stands(self) -> None:
+        d = evaluate_exit(12.0, dte=40, target=self._target(), entry_price=10.0)
+        assert d.new_stop_loss_price is None
+
+    def test_the_trail_wins_once_it_exceeds_breakeven(self) -> None:
+        # At 20 the 30% trail (14.0) is above entry (10.0) — the higher
+        # ratchet governs.
+        d = evaluate_exit(20.0, dte=40, target=self._target(), entry_price=10.0)
+        assert d.new_stop_loss_price == pytest.approx(14.0)
+
+
+class TestHorizonReentryBar:
+    def _target(self):
+        return ExitTarget(
+            target_exit_price=15.0, stop_loss_price=5.0,
+            target_exit_date="2026-08-20", reason="",
+        )
+
+    def test_positive_but_below_bar_ev_exits_at_the_horizon(self) -> None:
+        # The professional test is "would I put this on today", not "is
+        # EV above zero": +30 EV against a 100 re-entry bar is a position
+        # the model would not open, so past the horizon it goes.
+        d = evaluate_exit(10.0, dte=40, target=self._target(),
+                          current_ev=30.0, today="2026-08-24", horizon_ev_floor=100.0)
+        assert d.action == "exit_now"
+        assert d.triggered_by == "thesis_expired"
+
+    def test_above_bar_ev_still_extends(self) -> None:
+        d = evaluate_exit(10.0, dte=40, target=self._target(),
+                          current_ev=150.0, today="2026-08-24", horizon_ev_floor=100.0)
+        assert d.triggered_by == "target_extended"
+
+    def test_zero_floor_reproduces_the_old_sign_test(self) -> None:
+        d = evaluate_exit(10.0, dte=40, target=self._target(),
+                          current_ev=30.0, today="2026-08-24")
+        assert d.triggered_by == "target_extended"

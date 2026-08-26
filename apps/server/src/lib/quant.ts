@@ -488,6 +488,11 @@ export interface EvaluateExitInput {
   newDocumentsCount?: number;
   /** Operating trading day, for the horizon time-stop — see exit.py. */
   today?: string;
+  /** Entry price E4, for the breakeven ratchet. */
+  entryPriceE4?: number;
+  /** "Would this clear the entry bar today" floor for the horizon
+   * time-stop, in per-contract dollars — see evaluate_exit. */
+  horizonEvFloor?: number;
 }
 
 /**
@@ -515,6 +520,8 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
         current_ev: input.currentEv ?? null,
         new_documents_count: input.newDocumentsCount ?? 0,
         today: input.today ?? null,
+        entry_price: input.entryPriceE4 !== undefined ? input.entryPriceE4 / 10_000 : null,
+        horizon_ev_floor: input.horizonEvFloor ?? 0,
       }),
       signal: AbortSignal.timeout(10_000),
     });

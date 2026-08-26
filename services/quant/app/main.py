@@ -19,7 +19,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from app.classify import SymbolRow, classify_universe
-from app.exit import ExitTarget, compute_initial_exit_target, evaluate_exit
+from app.exit import (
+    ExitTarget,
+    compute_initial_exit_target,
+    evaluate_exit,
+    vol_scaled_stop_pct,
+)
 from app.performance import model_performance
 from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import (
@@ -247,7 +252,11 @@ class RankRequest(BaseModel):
 
 
 def _try_compute_exit_target(
-    market_price: float, expiry: str, entry_day: str, horizon: int
+    market_price: float,
+    expiry: str,
+    entry_day: str,
+    horizon: int,
+    contract: "RankedContract | None" = None,
 ) -> ExitTarget | None:
     """`compute_initial_exit_target` refuses (raises `ValueError`) when a
     contract's remaining life leaves no day that both exists and clears its
@@ -255,8 +264,29 @@ def _try_compute_exit_target(
     target exists" case as `entry_day`/`horizon` being unknown, so it gets
     the same treatment here: null suggested fields, not a crash of the
     entire `/rank` response over one contract too close to expiry.
+
+    When the ranked contract is supplied, the stop is volatility-scaled
+    from its own delta, spot, and IV (see `vol_scaled_stop_pct`) — the
+    systematic-desk convention of placing every stop the same number of
+    sigmas away instead of the same number of percent. Without it, the
+    flat default applies.
     """
+    stop_pct = (
+        vol_scaled_stop_pct(
+            market_price,
+            contract.spot,
+            contract.delta,
+            contract.market_iv,
+            horizon,
+        )
+        if contract is not None
+        else None
+    )
     try:
+        if stop_pct is not None:
+            return compute_initial_exit_target(
+                market_price, expiry, entry_day, horizon, stop_loss_pct=stop_pct
+            )
         return compute_initial_exit_target(market_price, expiry, entry_day, horizon)
     except ValueError:
         return None
@@ -292,7 +322,7 @@ class RankedContractResponse(BaseModel):
         cls, c: RankedContract, entry_day: str | None = None, horizon: int | None = None
     ) -> "RankedContractResponse":
         target = (
-            _try_compute_exit_target(c.market_price, c.expiry, entry_day, horizon)
+            _try_compute_exit_target(c.market_price, c.expiry, entry_day, horizon, contract=c)
             if entry_day is not None and horizon is not None
             else None
         )
@@ -442,6 +472,11 @@ class ExitDecisionRequest(BaseModel):
     #: The caller's operating trading day, for the horizon time-stop —
     #: see `evaluate_exit`. Null keeps the pre-time-stop behavior.
     today: str | None = None
+    #: Entry price, for the breakeven ratchet; the horizon floor is the
+    #: "would this clear the entry bar today" threshold, in the same
+    #: per-contract dollars as `current_ev`. Defaults keep old behavior.
+    entry_price: float | None = None
+    horizon_ev_floor: float = 0.0
 
 
 class ExitDecisionResponse(BaseModel):
@@ -478,6 +513,8 @@ def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
         # database-free (see ExitDecisionRequest's docstring), and the
         # extension length is a pacing heuristic, not a modelled quantity.
         today=request.today,
+        entry_price=request.entry_price,
+        horizon_ev_floor=request.horizon_ev_floor,
     )
     return ExitDecisionResponse(
         action=decision.action,
@@ -713,7 +750,8 @@ def select_entries_endpoint(request: SelectEntriesRequest) -> SelectEntriesRespo
     plannable = [
         c
         for c in ranked
-        if _try_compute_exit_target(c.market_price, c.expiry, request.day, horizon) is not None
+        if _try_compute_exit_target(c.market_price, c.expiry, request.day, horizon, contract=c)
+        is not None
     ]
 
     selected, rejected = select_entries(

@@ -221,6 +221,11 @@ class RankedContract:
     ev: float
     ev_per_risk: float
     prob_profit: float
+    #: Spot and delta at ranking time, threaded through for the vol-scaled
+    #: stop (see exit.vol_scaled_stop_pct). Optional so older serialized
+    #: contracts and thin test fixtures keep constructing.
+    spot: float | None = None
+    delta: float | None = None
 
 
 def _vol_forecast_ratio(
@@ -390,6 +395,8 @@ def rank_underlying(
                 ev=ev,
                 ev_per_risk=(ev / capital) if capital > 0 else 0.0,
                 prob_profit=prob,
+                spot=spot,
+                delta=row.get("delta"),
             )
         )
     return out
