@@ -22,6 +22,7 @@ import { readDocumentsSince } from '../text/news.js';
 import { nowIso, todayKey } from '../util.js';
 import { PolygonProvider } from './polygon.js';
 import { operatingTradingDay } from './positionHealth.js';
+import { fetchTradierQuotes } from './tradier.js';
 import type { OptionsProvider } from './provider.js';
 
 /**
@@ -40,6 +41,9 @@ export interface ExitEngineDeps {
    * without fighting `config`'s deliberate read-only typing. */
   anthropicConfigured: boolean;
   maxCallsPerRun: number;
+  /** The Tradier realism overlay — see lib/options/tradier.ts. Injected
+   * so tests exercise both the measured and print-basis paths. */
+  fetchTradierQuotes: typeof fetchTradierQuotes;
   computeExitTarget: typeof computeExitTarget;
 }
 
@@ -50,6 +54,7 @@ const defaultDeps: ExitEngineDeps = {
   anthropicConfigured: config.anthropic.configured,
   maxCallsPerRun: config.market.exitRecheck.maxCallsPerRun,
   computeExitTarget,
+  fetchTradierQuotes,
 };
 
 /**
@@ -314,11 +319,20 @@ export async function runExitEngine(
       exitPriceE4: number,
       reason: string,
       detail: Record<string, unknown> = {},
+      exitBasis: 'measured' | 'modelled' = 'modelled',
     ) => {
-      closeOrder({ orderId: order.id, exitPriceE4 });
+      closeOrder({ orderId: order.id, exitPriceE4, exitBasis });
       summary.closed += 1;
-      record(order, 'exited', reason, { exitPriceE4, ...detail });
+      record(order, 'exited', reason, { exitPriceE4, exitBasis, ...detail });
     };
+
+    // One batched quote call for every open position, once per pass —
+    // the realism overlay. Where Tradier answers, the bid becomes the
+    // evaluation price with basis 'measured' (which the spread haircut
+    // deliberately leaves untouched: a bid IS the touchable number);
+    // where it doesn't, each position falls back to the print-basis path
+    // below, exactly as before the overlay existed.
+    const liveQuotes = await deps.fetchTradierQuotes(orders.map((o) => o.occSymbol));
 
     for (const order of orders) {
       summary.checked += 1;
@@ -342,8 +356,11 @@ export async function runExitEngine(
         // 10/10 "no live bid available". A modelled basis is worse than a
         // bid and better than a rulebook that never runs; closes made on
         // it are already recorded as 'modelled' by closeOrder.
-        const evalPriceE4 = quote ? (quote.bidE4 ?? quote.lastE4 ?? quote.closeE4) : null;
-        if (!quote || evalPriceE4 === null) {
+        const live = liveQuotes.get(order.occSymbol);
+        const measuredBidE4 = live?.bidE4 ?? quote?.bidE4 ?? null;
+        const evalPriceE4 =
+          measuredBidE4 ?? (quote ? (quote.lastE4 ?? quote.closeE4) : null);
+        if (evalPriceE4 === null) {
           summary.errors.push(
             `${order.occSymbol}: no usable price (bid, last, or close) — skipping this recheck`,
           );
@@ -355,7 +372,7 @@ export async function runExitEngine(
         // with the session instead of standing at last night's close all
         // day. Written before the decision, so even a pass that exits or
         // errors below leaves the freshest observation on record.
-        recordIntradayMark(order.id, day, evalPriceE4, quote.bidE4 !== null ? 'measured' : 'modelled');
+        recordIntradayMark(order.id, day, evalPriceE4, measuredBidE4 !== null ? 'measured' : 'modelled');
 
         const docs = readDocumentsSince(contract.underlying, order.exitUpdatedAt ?? order.openedAt);
         const currentEv = health?.contracts[order.occSymbol]?.ev ?? undefined;
@@ -389,7 +406,13 @@ export async function runExitEngine(
         });
 
         if (decision.action === 'exit_now') {
-          closeAndTally(order, evalPriceE4, decision.triggeredBy, { reasonText: decision.reason });
+          closeAndTally(
+            order,
+            evalPriceE4,
+            decision.triggeredBy,
+            { reasonText: decision.reason },
+            measuredBidE4 !== null ? 'measured' : 'modelled',
+          );
           continue;
         }
 
@@ -403,6 +426,7 @@ export async function runExitEngine(
             orderId: order.id,
             contracts: decision.reduceContracts,
             exitPriceE4: evalPriceE4,
+            exitBasis: measuredBidE4 !== null ? 'measured' : 'modelled',
           });
           summary.reduced += 1;
           record(order, 'reduced', decision.triggeredBy, {
@@ -600,7 +624,13 @@ export async function runExitEngine(
         if (revised) summary.revised += 1;
 
         if (advice.action === 'exit_now') {
-          closeAndTally(order, evalPriceE4, 'advisor_exit_now', { reasoning: advice.reasoning });
+          closeAndTally(
+            order,
+            evalPriceE4,
+            'advisor_exit_now',
+            { reasoning: advice.reasoning },
+            measuredBidE4 !== null ? 'measured' : 'modelled',
+          );
           continue;
         }
         // advice.action === 'hold': the cutoff moved, the target stands.

@@ -3,6 +3,7 @@ import { accountCapacity, contractMultiplier, logDecisions, modelEntriesOpenedOn
 import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
+import { fetchTradierQuotes } from './tradier.js';
 import { selectEntries, QuantRefusal, QuantUnavailable, type RejectedEntry, type ScreenedOutEntry, type SelectedEntry } from '../quant.js';
 
 /**
@@ -129,6 +130,13 @@ export async function runAutoEntry(
   // Depleted as positions open, so the cap below is against cash actually
   // left rather than the whole day's budget for every pick in turn.
   let remainingE4 = Math.round(availableCapital * 10_000);
+  // One batched quote call for the day's selections — the entry-side
+  // realism overlay, mirror image of the exit engine's. Where Tradier
+  // answers with a real ask, the fill is that ask, basis 'measured', and
+  // the modelled-fill haircut stays out of it; where it doesn't, the
+  // print-derived price pays the buy-side haircut in openOrder as before.
+  const liveAsks = await fetchTradierQuotes(selected.map((s) => s.contract.occ_symbol));
+
   for (const { contract: candidate, quantity } of selected) {
     try {
       // The sidecar sizes every selection at one contract or more; a
@@ -201,10 +209,12 @@ export async function runAutoEntry(
       }
       // Order and exit plan land in one insert — see `OpenOrderInput.exitPlan`
       // for why this must not be an insert followed by an update.
+      const liveAskE4 = liveAsks.get(candidate.occ_symbol)?.askE4 ?? null;
       const orderId = openOrder({
         occSymbol: candidate.occ_symbol,
         quantity: size,
-        entryPriceE4,
+        entryPriceE4: liveAskE4 ?? entryPriceE4,
+        entryBasis: liveAskE4 !== null ? 'measured' : 'modelled',
         source: 'model',
         notes: `Auto-opened ${size}x: EV ${candidate.ev.toFixed(2)}/contract, ${(candidate.ev_per_risk * 100).toFixed(1)}% of risk, P(profit) ${(candidate.prob_profit * 100).toFixed(0)}%, ${candidate.dte}d to expiry.`,
         entryEv: candidate.ev,

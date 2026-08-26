@@ -68,6 +68,10 @@ export interface OpenOrderInput {
   side?: 'long' | 'short';
   /** Overrides the auto-fetched ask. Required until real quotes exist to fetch. */
   entryPriceE4?: number;
+  /** 'measured' when entryPriceE4 is a real quoted ask (the Tradier
+   * overlay) — exempt from the modelled-fill haircut. Defaults to
+   * 'modelled' for any explicit price, which is what a print is. */
+  entryBasis?: 'measured' | 'modelled';
   notes?: string;
   /** Which UI opened this — a manual typed entry, or one click off the ranked board. */
   source?: 'manual' | 'model';
@@ -86,7 +90,9 @@ export interface OpenOrderInput {
     targetExitPriceE4: number;
     stopLossPriceE4: number;
     targetExitDate: string;
-  };
+    /** 'measured' when entryPriceE4 is a real quoted ask (Tradier overlay). */
+  entryBasis?: 'measured' | 'modelled';
+};
   /**
    * The ranked signal's expected value at the moment this order opened —
    * the reference point the exit engine compares against to detect a sign
@@ -126,10 +132,17 @@ export function openOrder(input: OpenOrderInput): string {
   let entryBasis: 'measured' | 'modelled';
   if (input.entryPriceE4 !== undefined) {
     if (!(input.entryPriceE4 > 0)) throw new PaperError('entryPriceE4 must be positive');
-    // An explicit price is a print, not an offer — a real buyer pays the
-    // ask side of it. See haircutE4.
-    entryPriceE4 = haircutE4(input.entryPriceE4, 'buy');
-    entryBasis = 'modelled';
+    if (input.entryBasis === 'measured') {
+      // A real quoted ask — already the price a buyer pays. See
+      // CloseOrderInput.exitBasis for the mirror-image rule.
+      entryPriceE4 = input.entryPriceE4;
+      entryBasis = 'measured';
+    } else {
+      // An explicit price is a print, not an offer — a real buyer pays
+      // the ask side of it. See haircutE4.
+      entryPriceE4 = haircutE4(input.entryPriceE4, 'buy');
+      entryBasis = 'modelled';
+    }
   } else {
     const today = new Date().toISOString().slice(0, 10);
     const quote = latestQuote(input.occSymbol, today);
@@ -173,6 +186,11 @@ export function openOrder(input: OpenOrderInput): string {
 export interface CloseOrderInput {
   orderId: string;
   exitPriceE4?: number;
+  /** 'measured' when exitPriceE4 is a real quoted bid (the Tradier
+   * overlay) — recorded as such and exempt from the modelled-fill
+   * haircut, because a bid already IS the touchable number. Defaults to
+   * 'modelled' for any explicit price, which is what a print is. */
+  exitBasis?: 'measured' | 'modelled';
 }
 
 export interface ReduceOrderInput {
@@ -180,6 +198,8 @@ export interface ReduceOrderInput {
   /** Contracts to sell — must leave at least one open. */
   contracts: number;
   exitPriceE4: number;
+  /** Same semantics as CloseOrderInput.exitBasis. */
+  exitBasis?: 'measured' | 'modelled';
 }
 
 /**
@@ -205,8 +225,10 @@ export function reduceOrder(input: ReduceOrderInput): string {
     );
   }
   if (!(input.exitPriceE4 >= 0)) throw new PaperError('exitPriceE4 must not be negative');
-  // Same sell-side haircut as closeOrder — a scale-out is a sale.
-  const exitPriceE4 = haircutE4(input.exitPriceE4, 'sell');
+  // Same sell-side semantics as closeOrder — a scale-out is a sale.
+  const exitBasis = input.exitBasis === 'measured' ? 'measured' : 'modelled';
+  const exitPriceE4 =
+    exitBasis === 'measured' ? input.exitPriceE4 : haircutE4(input.exitPriceE4, 'sell');
 
   const sliceId = newId();
   paperDb.transaction((tx) => {
@@ -224,7 +246,7 @@ export function reduceOrder(input: ReduceOrderInput): string {
         entryBasis: order.entryBasis,
         status: 'closed',
         exitPriceE4,
-        exitBasis: 'modelled',
+        exitBasis,
         source: order.source,
         notes: `Scaled out of ${order.occSymbol}: ${input.contracts} of ${order.quantity} sold at the milestone.`,
         openedAt: order.openedAt,
@@ -249,9 +271,14 @@ export function closeOrder(input: CloseOrderInput): void {
   let exitBasis: 'measured' | 'modelled';
   if (input.exitPriceE4 !== undefined) {
     if (!(input.exitPriceE4 >= 0)) throw new PaperError('exitPriceE4 must not be negative');
-    // A seller fetches the bid side of the print — see haircutE4.
-    exitPriceE4 = haircutE4(input.exitPriceE4, 'sell');
-    exitBasis = 'modelled';
+    if (input.exitBasis === 'measured') {
+      exitPriceE4 = input.exitPriceE4;
+      exitBasis = 'measured';
+    } else {
+      // A seller fetches the bid side of the print — see haircutE4.
+      exitPriceE4 = haircutE4(input.exitPriceE4, 'sell');
+      exitBasis = 'modelled';
+    }
   } else {
     const today = new Date().toISOString().slice(0, 10);
     const quote = latestQuote(order.occSymbol, today);
