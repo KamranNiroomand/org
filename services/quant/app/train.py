@@ -181,6 +181,12 @@ class TargetSpec:
     label_vol_window: int
     default_n_splits: int
     include_news: bool
+    #: CV floor. None = the generic len//(n_splits+2) heuristic, which is
+    #: fine until the horizon itself approaches it: at h=126 the purge
+    #: (horizon + embargo = 128 days) exceeds the heuristic's 125 on a
+    #: 2-year corpus and the first fold starves. A long-horizon target
+    #: must state its own floor.
+    min_train_days: int | None = None
 
 
 TARGETS: dict[str, TargetSpec] = {
@@ -191,7 +197,7 @@ TARGETS: dict[str, TargetSpec] = {
     # Stock engine: ~6-12 month positions. Two folds until the bar corpus
     # is deep enough for four (the CV math, not a preference: a 126-day
     # horizon plus purge eats ~128 training days per fold).
-    "stk_long": TargetSpec(126, STOCK_LONG_COLS, 63, 2, include_news=True),
+    "stk_long": TargetSpec(126, STOCK_LONG_COLS, 63, 2, include_news=True, min_train_days=180),
 }
 
 
@@ -263,7 +269,7 @@ def train(
         )
 
     days = sorted(panel["day"].unique().to_list())
-    min_train = min_train_days or max(60, len(days) // (n_splits + 2))
+    min_train = min_train_days or spec.min_train_days or max(60, len(days) // (n_splits + 2))
     splits = purged_walk_forward_splits(days, n_splits, horizon, embargo, min_train)
 
     model_result = train_lgbm_regressor(
