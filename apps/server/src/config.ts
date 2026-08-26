@@ -129,6 +129,17 @@ const schema = z.object({
   // 20 as of 2026-08-26: trial #20 is the vol-scaled label + per-day
   // feature-rank configuration (see services/quant/app/train.py).
   MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(20),
+  // The modelled-fill spread haircut. With no quote entitlement, every
+  // paper fill and mark derives from a *print* (close or last trade) —
+  // a price two other people met at, not one offered to us. Real option
+  // spreads make that systematically flattering in both directions, so
+  // modelled buys pay this fraction more and modelled sells/marks fetch
+  // this fraction less (with an absolute per-share floor for cheap
+  // contracts, where spreads are proportionally widest). Real measured
+  // bids/asks, when the plan ever provides them, pass through untouched.
+  // 3% ≈ a conservative half-spread for liquid single-name options.
+  PAPER_SPREAD_HAIRCUT_PCT: z.coerce.number().min(0).max(0.2).default(0.03),
+  PAPER_SPREAD_HAIRCUT_MIN_E4: z.coerce.number().int().min(0).default(500),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
   // Auto-entry: once/day, every candidate clearing both bars below (and
@@ -343,6 +354,8 @@ export const config = {
      */
     retrainCron: env.RETRAIN_CRON,
     modelTrialCount: env.MODEL_TRIAL_COUNT,
+    spreadHaircutPct: env.PAPER_SPREAD_HAIRCUT_PCT,
+    spreadHaircutMinE4: env.PAPER_SPREAD_HAIRCUT_MIN_E4,
     /** E4 — same unit as every other dollar figure in this database. */
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */

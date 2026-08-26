@@ -49,6 +49,14 @@ export default defineConfig({
       // timing rather than logic. Port 1 is privileged and unbound, so the
       // connection refuses immediately instead of timing out.
       QUANT_URL: 'http://127.0.0.1:1',
+      // Accounting tests assert exact fill arithmetic; the spread haircut
+      // is a *policy* layered on top of it, pinned to zero here so every
+      // test states the number it means. The haircut math itself is
+      // tested directly (paper.test.ts's haircutE4 cases) with explicit
+      // parameters, and its live wiring is verified against the running
+      // book, where its entire effect is a visible, intended equity drop.
+      PAPER_SPREAD_HAIRCUT_PCT: '0',
+      PAPER_SPREAD_HAIRCUT_MIN_E4: '0',
       // news.ts/edgar.ts guard on these being present before doing anything,
       // same as every other provider key in this project — but their tests
       // exercise the persist/cutoff logic through an injected fetcher that
