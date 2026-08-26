@@ -126,9 +126,11 @@ const schema = z.object({
   // changes (feature set, horizon, target, early stopping). The first
   // scheduled daily run silently defaulted to 1 and reported a 1.96
   // hurdle against results that had really consumed 19 trials.
-  // 20 as of 2026-08-26: trial #20 is the vol-scaled label + per-day
-  // feature-rank configuration (see services/quant/app/train.py).
-  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(20),
+  // 22 as of 2026-08-26: trial #20 was the vol-scaled label + per-day
+  // feature-rank configuration; trials #21 and #22 are the stock
+  // engine's stk_short and stk_long configurations (see TARGETS in
+  // services/quant/app/train.py).
+  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(22),
   // The modelled-fill spread haircut. With no quote entitlement, every
   // paper fill and mark derives from a *print* (close or last trade) —
   // a price two other people met at, not one offered to us. Real option
