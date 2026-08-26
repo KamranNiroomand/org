@@ -118,6 +118,15 @@ const schema = z.object({
   // that a fresh, fairly-compared challenger is always available instead
   // of up to a week stale.
   RETRAIN_CRON: z.string().default('0 8 * * *'),
+  // The multiple-testing trial count, passed to every scheduled training.
+  // This is the number of model *configurations* ever evaluated against
+  // the corpus — the quantity the significance hurdle rises with — and it
+  // NEVER goes down. A refit of an unchanged configuration is not a new
+  // trial; bump this by hand in .env whenever the configuration actually
+  // changes (feature set, horizon, target, early stopping). The first
+  // scheduled daily run silently defaulted to 1 and reported a 1.96
+  // hurdle against results that had really consumed 19 trials.
+  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(19),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
   // Auto-entry: once/day, every candidate clearing both bars below (and
@@ -331,6 +340,7 @@ export const config = {
      * `/api/quant/runs/:id/promote` route for why.
      */
     retrainCron: env.RETRAIN_CRON,
+    modelTrialCount: env.MODEL_TRIAL_COUNT,
     /** E4 — same unit as every other dollar figure in this database. */
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
