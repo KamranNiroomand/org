@@ -126,6 +126,11 @@ export interface PaperOrder {
   entryBasis: 'measured' | 'modelled';
   status: 'open' | 'closed';
   exitPriceE4: number | null;
+  /** Latest nightly mark — the same rows the equity curve is built from.
+   * Null until the first marking after open. */
+  markPriceE4: number | null;
+  markTradingDay: string | null;
+  markBasis: string | null;
   exitBasis: 'measured' | 'modelled' | null;
   source: 'manual' | 'model';
   notes: string | null;

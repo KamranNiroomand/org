@@ -486,6 +486,23 @@ export function modelEntriesOpenedOn(day: string): number {
   return row?.n ?? 0;
 }
 
+/**
+ * The latest stored mark per order. The account-level equity curve is
+ * built from these rows nightly, but until this existed nothing handed
+ * them back per position — the UI's per-trade return fell back to
+ * "exit price, or entry" and every open position read +0.00% while the
+ * account showed thousands of unrealized P&L from the very same marks.
+ */
+export function latestMarkByOrder(): Map<string, typeof paperMarks.$inferSelect> {
+  const rows = paperDb.select().from(paperMarks).all();
+  const byOrder = new Map<string, typeof paperMarks.$inferSelect>();
+  for (const row of rows) {
+    const existing = byOrder.get(row.orderId);
+    if (!existing || row.id > existing.id) byOrder.set(row.orderId, row);
+  }
+  return byOrder;
+}
+
 export function decisionsForDay(day: string): Array<typeof paperDecisionLog.$inferSelect> {
   return paperDb
     .select()

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import { paperDb } from '../db/paper/index.js';
 import { paperEquity, paperOrders } from '../db/paper/schema.js';
-import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct } from '../lib/paper.js';
+import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct , latestMarkByOrder } from '../lib/paper.js';
 import { computePositionHealth, latestCapturedTradingDay, latestPositionHealth } from '../lib/options/positionHealth.js';
 import { runExitEngine, revisionsByOrder } from '../lib/options/exitEngine.js';
 
@@ -73,14 +73,23 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
     const orders = paperDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all();
     const healthByOrder = latestPositionHealth();
     const revisionsByOrderId = revisionsByOrder();
+    const markByOrder = latestMarkByOrder();
     return {
       startingBalanceE4: config.market.paperStartingBalanceE4,
       equity,
-      orders: orders.map((o) => ({
-        ...o,
-        health: healthByOrder.get(o.id) ?? null,
-        exitRevisions: revisionsByOrderId.get(o.id) ?? [],
-      })),
+      orders: orders.map((o) => {
+        const mark = markByOrder.get(o.id);
+        return {
+          ...o,
+          health: healthByOrder.get(o.id) ?? null,
+          exitRevisions: revisionsByOrderId.get(o.id) ?? [],
+          // The same rows the equity curve is built from — see
+          // latestMarkByOrder. Null until the first marking after open.
+          markPriceE4: mark?.markPriceE4 ?? null,
+          markTradingDay: mark?.tradingDay ?? null,
+          markBasis: mark?.basis ?? null,
+        };
+      }),
     };
   });
 

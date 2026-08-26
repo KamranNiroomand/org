@@ -272,8 +272,14 @@ function OrderRow({ order, onClosed }: { order: PaperOrder; onClosed: () => void
     onSuccess: onClosed,
   });
 
-  const current = order.exitPriceE4 ?? order.entryPriceE4;
-  const tradeReturn = ((current - order.entryPriceE4) / order.entryPriceE4) * 100;
+  // Closed: the banked exit. Open: the latest nightly mark — the same
+  // rows the account equity curve is built from, so this number and the
+  // curve can never disagree again (they did: the curve showed +$6,936
+  // while every card fell back to entry-vs-entry and printed +0.00%).
+  // An open position with no mark yet is honestly "not marked", not 0%.
+  const current = order.exitPriceE4 ?? order.markPriceE4;
+  const tradeReturn =
+    current === null ? null : ((current - order.entryPriceE4) / order.entryPriceE4) * 100;
 
   const autoManaged = order.targetExitPriceE4 !== null;
 
@@ -297,14 +303,25 @@ function OrderRow({ order, onClosed }: { order: PaperOrder; onClosed: () => void
         )}
       </div>
       <div className="tnum text-right">
-        <div className={cn('font-medium', tradeReturn >= 0 ? 'text-positive' : 'text-negative')}>
-          {order.exitPriceE4 !== null ? pct(tradeReturn) : `${pct(tradeReturn)} unrealized`}
-        </div>
-        {order.exitPriceE4 !== null && (
+        {tradeReturn === null ? (
+          <div className="text-muted">not marked yet</div>
+        ) : (
+          <div className={cn('font-medium', tradeReturn >= 0 ? 'text-positive' : 'text-negative')}>
+            {order.exitPriceE4 !== null ? pct(tradeReturn) : `${pct(tradeReturn)} unrealized`}
+          </div>
+        )}
+        {order.exitPriceE4 !== null ? (
           <div className="text-muted">
             exit {usd(order.exitPriceE4)}
             {order.exitBasis === 'modelled' && ' · estimated'}
           </div>
+        ) : (
+          order.markPriceE4 !== null && (
+            <div className="text-muted">
+              mark {usd(order.markPriceE4)}
+              {order.markTradingDay !== null && ` · ${order.markTradingDay}`}
+            </div>
+          )
         )}
       </div>
       {order.status === 'open' && (
