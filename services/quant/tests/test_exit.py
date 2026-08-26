@@ -365,3 +365,58 @@ class TestHorizonReentryBar:
         d = evaluate_exit(10.0, dte=40, target=self._target(),
                           current_ev=30.0, today="2026-08-24")
         assert d.triggered_by == "target_extended"
+
+
+class TestScaleOut:
+    """At the target: bank half, trail the rest. quantity < initial_quantity
+    is the durable already-scaled fact, so a restart can never bank the
+    same half twice."""
+
+    def _target(self):
+        return ExitTarget(
+            target_exit_price=15.0, stop_loss_price=5.0,
+            target_exit_date="2026-12-01", reason="",
+        )
+
+    def test_first_touch_of_the_target_banks_half(self) -> None:
+        d = evaluate_exit(15.5, dte=40, target=self._target(),
+                          quantity=8, initial_quantity=8)
+        assert d.action == "reduce"
+        assert d.triggered_by == "scale_out"
+        assert d.reduce_contracts == 4
+
+    def test_an_already_scaled_position_trails_instead(self) -> None:
+        d = evaluate_exit(15.5, dte=40, target=self._target(),
+                          quantity=4, initial_quantity=8)
+        assert d.action == "hold"
+        assert d.triggered_by == "trail_raised"
+
+    def test_a_one_lot_cannot_split_and_trails_as_before(self) -> None:
+        d = evaluate_exit(15.5, dte=40, target=self._target(),
+                          quantity=1, initial_quantity=1)
+        assert d.action == "hold"
+        assert d.triggered_by == "trail_raised"
+
+    def test_odd_lots_bank_the_floor_half(self) -> None:
+        d = evaluate_exit(15.5, dte=40, target=self._target(),
+                          quantity=7, initial_quantity=7)
+        assert d.reduce_contracts == 3
+
+    def test_the_raised_stop_travels_with_the_reduction(self) -> None:
+        d = evaluate_exit(20.0, dte=40, target=self._target(),
+                          quantity=8, initial_quantity=8, entry_price=10.0)
+        assert d.action == "reduce"
+        assert d.new_stop_loss_price == pytest.approx(14.0)
+
+    def test_the_stop_and_dte_floor_still_outrank_the_scale_out(self) -> None:
+        below_stop = evaluate_exit(4.0, dte=40, target=self._target(),
+                                   quantity=8, initial_quantity=8)
+        assert below_stop.triggered_by == "stop_loss"
+        expiring = evaluate_exit(15.5, dte=2, target=self._target(),
+                                 quantity=8, initial_quantity=8)
+        assert expiring.triggered_by == "dte_floor"
+
+    def test_missing_quantity_keeps_the_old_all_or_nothing_path(self) -> None:
+        d = evaluate_exit(15.5, dte=40, target=self._target())
+        assert d.action == "hold"
+        assert d.triggered_by == "trail_raised"

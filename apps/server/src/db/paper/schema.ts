@@ -77,6 +77,20 @@ export const paperOrders = sqliteTable(
     multiplier: integer('multiplier'),
     side: text('side', { enum: ['long', 'short'] }).notNull().default('long'),
     quantity: integer('quantity').notNull(),
+    /**
+     * Contracts at open, before any scale-out. `quantity < initialQuantity`
+     * is the durable fact "this position has already banked its milestone
+     * half" — the scale-out rule keys on it, so a restart can never sell
+     * the same half twice. Null on orders opened before scaling existed;
+     * read as "initial equals current".
+     */
+    initialQuantity: integer('initial_quantity'),
+    /**
+     * For the closed slice a scale-out splits off: the id of the open
+     * order it came from. Lineage for the audit trail; null everywhere
+     * else.
+     */
+    splitFrom: text('split_from'),
     /** Per-contract entry price, E4. The ask for a long — what it actually cost. */
     entryPriceE4: integer('entry_price_e4').notNull(),
     /** Whether entryPriceE4 came from a real quote or was estimated. */
@@ -193,7 +207,7 @@ export const paperDecisionLog = sqliteTable(
     occSymbol: text('occ_symbol').notNull(),
     underlying: text('underlying'),
     decision: text('decision', {
-      enum: ['opened', 'rejected', 'trimmed', 'failed', 'held', 'exited', 'target_moved', 'adopted'],
+      enum: ['opened', 'rejected', 'trimmed', 'failed', 'held', 'exited', 'reduced', 'target_moved', 'adopted'],
     }).notNull(),
     /** The fixed-vocabulary rule behind it — `ev_below_bar`, `dte_outside_band`,
      * `stop_loss`, and so on. A vocabulary rather than prose because the

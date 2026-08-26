@@ -477,10 +477,14 @@ class ExitDecisionRequest(BaseModel):
     #: per-contract dollars as `current_ev`. Defaults keep old behavior.
     entry_price: float | None = None
     horizon_ev_floor: float = 0.0
+    #: Current and at-open contract counts, for the scale-out rule.
+    quantity: int | None = None
+    initial_quantity: int | None = None
 
 
 class ExitDecisionResponse(BaseModel):
     action: str
+    reduce_contracts: int | None = None
     new_target_exit_price: float | None
     new_target_exit_date: str | None
     #: A raised trailing stop the caller must persist, or null when the
@@ -515,9 +519,12 @@ def exit_decision(request: ExitDecisionRequest) -> ExitDecisionResponse:
         today=request.today,
         entry_price=request.entry_price,
         horizon_ev_floor=request.horizon_ev_floor,
+        quantity=request.quantity,
+        initial_quantity=request.initial_quantity,
     )
     return ExitDecisionResponse(
         action=decision.action,
+        reduce_contracts=decision.reduce_contracts,
         new_target_exit_price=decision.new_target_exit_price,
         new_target_exit_date=decision.new_target_exit_date,
         new_stop_loss_price=decision.new_stop_loss_price,

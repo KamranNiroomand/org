@@ -106,7 +106,8 @@ const NEVER_REVIEW_DEPS: ExitEngineDeps = {
     newTargetExitDate: '2026-09-01',
     newStopLossPriceE4: null,
     reason: 'no trigger',
-    triggeredBy: 'unchanged',
+    reduceContracts: null,
+        triggeredBy: 'unchanged',
   }),
   scoreHeldContracts: async () => ({ model_run_id: 'test', model_beats_baseline: false, contracts: {} }),
   adviseOnExit: async () => {
@@ -172,6 +173,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'Live price 0.40 hit the 0.50 stop.',
+        reduceContracts: null,
         triggeredBy: 'stop_loss',
       }),
     });
@@ -211,6 +213,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: '2026-09-01',
         newStopLossPriceE4: toE4(2.1),
         reason: 'stop raised',
+        reduceContracts: null,
         triggeredBy: 'trail_raised',
       }),
     });
@@ -234,6 +237,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: '2026-09-01',
         newStopLossPriceE4: toE4(2.1),
         reason: 'letting it run with the stop raised',
+        reduceContracts: null,
         triggeredBy: 'trail_raised',
       }),
     });
@@ -265,6 +269,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: '2026-09-01',
         newStopLossPriceE4: toE4(2.1),
         reason: 'stop raised',
+        reduceContracts: null,
         triggeredBy: 'trail_raised',
       }),
     });
@@ -308,6 +313,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: '2026-09-01',
         newStopLossPriceE4: toE4(0.1), // below the 0.5 already in force
         reason: 'should be ignored',
+        reduceContracts: null,
         triggeredBy: 'trail_raised',
       }),
     });
@@ -420,7 +426,8 @@ describe('runExitEngine', () => {
           newTargetExitDate: null,
           newStopLossPriceE4: null,
           reason: 'stop hit on close basis',
-          triggeredBy: 'stop_loss',
+          reduceContracts: null,
+        triggeredBy: 'stop_loss',
         };
       },
     };
@@ -428,6 +435,32 @@ describe('runExitEngine', () => {
     expect(summary.errors).toHaveLength(0);
     expect(summary.closed).toBe(1);
     expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('closed');
+  });
+
+  it('banks the milestone half on a reduce decision and keeps the survivor open', async () => {
+    const id = openManagedPosition({ quantity: 8 });
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async () => ({
+        action: 'reduce',
+        newTargetExitPriceE4: toE4(3.0),
+        newTargetExitDate: '2026-09-01',
+        newStopLossPriceE4: null,
+        reduceContracts: 4,
+        reason: 'target reached — scaling out',
+        triggeredBy: 'scale_out',
+      }),
+    };
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(3.2))), deps);
+    expect(summary.reduced).toBe(1);
+    expect(summary.closed).toBe(0);
+    const all = paperDb.select().from(paperOrders).all();
+    const survivor = all.find((o) => o.id === id)!;
+    const slice = all.find((o) => o.splitFrom === id)!;
+    expect(survivor.status).toBe('open');
+    expect(survivor.quantity).toBe(4);
+    expect(slice.status).toBe('closed');
+    expect(slice.exitPriceE4).toBe(toE4(3.2));
   });
 
   it('closes the position on a deterministic exit_now decision, without ever calling the LLM advisor', async () => {
@@ -440,6 +473,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'hit stop-loss',
+        reduceContracts: null,
         triggeredBy: 'stop_loss',
       }),
     };
@@ -469,6 +503,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'EV flipped sign',
+        reduceContracts: null,
         triggeredBy: 'ev_sign_flip',
       }),
     };
@@ -490,6 +525,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'new documents',
+        reduceContracts: null,
         triggeredBy: 'new_news',
       }),
       adviseOnExit: async () => ({
@@ -522,6 +558,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'EV flipped sign',
+        reduceContracts: null,
         triggeredBy: 'ev_sign_flip',
       }),
       adviseOnExit: async () => ({
@@ -550,6 +587,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'new documents',
+        reduceContracts: null,
         triggeredBy: 'new_news',
       }),
     };
@@ -596,6 +634,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'hit stop-loss',
+        reduceContracts: null,
         triggeredBy: 'stop_loss',
       }),
     };
@@ -615,6 +654,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'new documents',
+        reduceContracts: null,
         triggeredBy: 'new_news',
       }),
       adviseOnExit: async () => ({
@@ -643,6 +683,7 @@ describe('runExitEngine', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'new documents',
+        reduceContracts: null,
         triggeredBy: 'new_news',
       }),
       adviseOnExit: async () => ({
@@ -671,6 +712,7 @@ describe('runExitEngine revision atomicity', () => {
         newTargetExitDate: null,
         newStopLossPriceE4: null,
         reason: 'new documents',
+        reduceContracts: null,
         triggeredBy: 'new_news',
       }),
       adviseOnExit: async () => ({

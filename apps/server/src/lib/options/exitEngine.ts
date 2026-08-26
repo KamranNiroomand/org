@@ -10,7 +10,7 @@ import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
 import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
-import { contractMultiplier, closeOrder, logDecisions } from '../paper.js';
+import { reduceOrder, contractMultiplier, closeOrder, logDecisions } from '../paper.js';
 import {
   computeExitTarget,
   evaluateExit,
@@ -76,6 +76,7 @@ export interface ExitEngineSummary {
    * run — see `adoptUnmanagedOrders`. Normally 0. */
   adopted: number;
   closed: number;
+  reduced: number;
   revised: number;
   escalated: number;
   llmCallsMade: number;
@@ -218,6 +219,7 @@ export async function runExitEngine(
     checked: 0,
     adopted: 0,
     closed: 0,
+    reduced: 0,
     revised: 0,
     escalated: 0,
     llmCallsMade: 0,
@@ -365,6 +367,8 @@ export async function runExitEngine(
           newDocumentsCount: docs.length,
           today: day,
           entryPriceE4: order.entryPriceE4,
+          quantity: order.quantity,
+          initialQuantity: order.initialQuantity ?? order.quantity,
           // Half the entry bar, in the same per-contract dollars as the
           // health check's EV: the professional horizon test is "would I
           // still put this on today", and the half-bar hysteresis keeps a
@@ -379,6 +383,27 @@ export async function runExitEngine(
 
         if (decision.action === 'exit_now') {
           closeAndTally(order, evalPriceE4, decision.triggeredBy, { reasonText: decision.reason });
+          continue;
+        }
+
+        if (decision.action === 'reduce' && decision.reduceContracts !== null) {
+          // The milestone scale-out: the sold half becomes its own closed
+          // row (realized P&L, lineage via splitFrom), the survivor keeps
+          // this id and every ratchet. reduceOrder refuses a reduction
+          // that would empty the position, so a mis-sized decision
+          // surfaces as an error instead of a silent full close.
+          const sliceId = reduceOrder({
+            orderId: order.id,
+            contracts: decision.reduceContracts,
+            exitPriceE4: evalPriceE4,
+          });
+          summary.reduced += 1;
+          record(order, 'reduced', decision.triggeredBy, {
+            contracts: decision.reduceContracts,
+            exitPriceE4: evalPriceE4,
+            sliceId,
+            reasonText: decision.reason,
+          });
           continue;
         }
 

@@ -62,6 +62,13 @@ DEFAULT_TRAIL_PCT = 0.30
 STOP_SIGMAS = 1.5
 MIN_STOP_PCT = 0.25
 MAX_STOP_PCT = 0.60
+#: At the profit target, sell this fraction of the position and trail
+#: the rest — the desk-standard scale-out. Banking half converts paper
+#: gain into realized gain and cuts the position's variance in half,
+#: while the surviving half keeps the unbounded right tail the option
+#: was bought for; all-or-nothing forced a choice between the two. A
+#: one-lot cannot split and simply trails, as before.
+SCALE_OUT_FRACTION = 0.5
 #: Once a position is halfway to its profit target, the stop rises to
 #: entry: from there the trade can end flat, but never round-trip a real
 #: gain into a loss. The oldest desk rule there is, made monotone the
@@ -179,8 +186,9 @@ def compute_initial_exit_target(
     )
 
 
-ExitAction = Literal["hold", "exit_now", "needs_review"]
+ExitAction = Literal["hold", "exit_now", "reduce", "needs_review"]
 ExitTrigger = Literal[
+    "scale_out",
     "trail_raised",
     "stop_loss",
     "dte_floor",
@@ -202,6 +210,8 @@ class ExitDecision:
     new_stop_loss_price: float | None
     reason: str
     triggered_by: ExitTrigger
+    #: For action "reduce": how many contracts to sell. None otherwise.
+    reduce_contracts: int | None = None
 
 
 def evaluate_exit(
@@ -217,6 +227,8 @@ def evaluate_exit(
     forecast_horizon_days: int = 5,
     entry_price: float | None = None,
     horizon_ev_floor: float = 0.0,
+    quantity: int | None = None,
+    initial_quantity: int | None = None,
 ) -> ExitDecision:
     """Recheck logic for an open position, run every time the intraday job
     fires. Deterministic rules first — checked in order of how urgent they
@@ -370,6 +382,35 @@ def evaluate_exit(
             triggered_by="target_extended",
         )
 
+
+    # Scale-out: the first time the target is reached on a position that
+    # can split, bank SCALE_OUT_FRACTION of it and trail the rest. "First
+    # time" is a durable fact, not a flag: quantity < initial_quantity
+    # means a slice was already sold, so a restart can never bank the same
+    # half twice. A one-lot cannot split and falls through to the plain
+    # trail. The raised stop travels with the reduction, same as with
+    # every other decision.
+    if (
+        current_price >= target.target_exit_price
+        and quantity is not None
+        and quantity >= 2
+        and (initial_quantity is None or quantity >= initial_quantity)
+    ):
+        to_sell = max(1, int(quantity * SCALE_OUT_FRACTION))
+        if to_sell < quantity:
+            return ExitDecision(
+                action="reduce",
+                new_target_exit_price=target.target_exit_price,
+                new_target_exit_date=target.target_exit_date,
+                new_stop_loss_price=trailed_stop,
+                reason=(
+                    f"Price {current_price:.2f} reached the {target.target_exit_price:.2f} "
+                    f"target — banking {to_sell} of {quantity} contracts and trailing "
+                    f"the remainder."
+                ),
+                triggered_by="scale_out",
+                reduce_contracts=to_sell,
+            )
 
     ev_flipped = (
         entry_ev is not None and current_ev is not None and (entry_ev >= 0) != (current_ev >= 0)

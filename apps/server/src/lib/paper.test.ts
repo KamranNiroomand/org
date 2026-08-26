@@ -17,6 +17,7 @@ import {
   computeDailyEquity,
   markOpenPositions,
   openOrder,
+  reduceOrder,
   PaperError,
   tradeReturnPct,
 } from './paper.js';
@@ -126,6 +127,47 @@ describe('openOrder', () => {
     expect(() => openOrder({ occSymbol: 'GHOST 260101C00001000', quantity: 1, entryPriceE4: 100 })).toThrow(
       /Unknown contract/,
     );
+  });
+});
+
+describe('reduceOrder', () => {
+  it('splits the sold half into its own closed row and keeps the survivor whole', () => {
+    const id = openOrder({ occSymbol: OCC, quantity: 8, entryPriceE4: 10_000 });
+    const sliceId = reduceOrder({ orderId: id, contracts: 4, exitPriceE4: 15_000 });
+
+    const all = paperDb.select().from(paperOrders).all();
+    const survivor = all.find((o) => o.id === id)!;
+    const slice = all.find((o) => o.id === sliceId)!;
+
+    expect(survivor.status).toBe('open');
+    expect(survivor.quantity).toBe(4);
+    expect(survivor.initialQuantity).toBe(8); // the durable already-scaled fact
+    expect(slice.status).toBe('closed');
+    expect(slice.quantity).toBe(4);
+    expect(slice.entryPriceE4).toBe(10_000); // cost basis travels with the slice
+    expect(slice.exitPriceE4).toBe(15_000);
+    expect(slice.splitFrom).toBe(id);
+  });
+
+  it('keeps the account arithmetic exact across the split', () => {
+    // 8 @ $1.00 = $800 out of a clean account. Selling 4 @ $1.50 banks
+    // $600 back and a $200 realized gain; the surviving 4 remain deployed
+    // at cost. Free cash must land on the same number a whole-position
+    // close of half the size would produce — the split is invisible to
+    // every sum.
+    const before = accountCapacity().freeCashE4;
+    const id = openOrder({ occSymbol: OCC, quantity: 8, entryPriceE4: 10_000 });
+    reduceOrder({ orderId: id, contracts: 4, exitPriceE4: 15_000 });
+    const after = accountCapacity().freeCashE4;
+    // -800 (entry) + 600 (slice proceeds) = net -200 vs before, in dollars x multiplier.
+    expect(before - after).toBe((8 * 10_000 - 4 * 15_000) * 100);
+  });
+
+  it('refuses a reduction that would close or overdraw the position', () => {
+    const id = openOrder({ occSymbol: OCC, quantity: 2, entryPriceE4: 10_000 });
+    expect(() => reduceOrder({ orderId: id, contracts: 2, exitPriceE4: 15_000 })).toThrow(/use closeOrder/);
+    expect(() => reduceOrder({ orderId: id, contracts: 3, exitPriceE4: 15_000 })).toThrow(PaperError);
+    expect(() => reduceOrder({ orderId: id, contracts: 0, exitPriceE4: 15_000 })).toThrow(PaperError);
   });
 });
 
