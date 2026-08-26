@@ -216,7 +216,24 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<PolygonEnvelo
       continue;
     }
 
-    if (res.ok) return (await res.json()) as PolygonEnvelope<T>;
+    if (res.ok) {
+      // Reading and parsing the body is part of the attempt, not an
+      // epilogue to it. A truncated response — the connection dropping
+      // mid-body — arrives with status 200 and then throws from
+      // `res.json()`, and with the parse outside this loop's error
+      // handling that one flaky read escaped as a hard failure: the exit
+      // engine logged "recheck failed" for the same AAPL position three
+      // passes running, each a monitoring gap on a live position, for a
+      // fault a single retry absorbs.
+      try {
+        return (await res.json()) as PolygonEnvelope<T>;
+      } catch (err) {
+        lastError = `body read failed: ${err instanceof Error ? err.message : String(err)}`;
+        if (attempt === MAX_RETRIES) break;
+        await sleep(backoffMs(attempt));
+        continue;
+      }
+    }
 
     const body = await res.text().catch(() => '');
     lastError = `${res.status} ${res.statusText}${body ? ` — ${body.slice(0, 300)}` : ''}`;
