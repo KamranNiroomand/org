@@ -133,6 +133,7 @@ export function openOrder(input: OpenOrderInput): string {
       multiplier,
       side: 'long',
       quantity: input.quantity,
+      initialQuantity: input.quantity,
       entryPriceE4,
       entryBasis,
       status: 'open',
@@ -152,6 +153,68 @@ export function openOrder(input: OpenOrderInput): string {
 export interface CloseOrderInput {
   orderId: string;
   exitPriceE4?: number;
+}
+
+export interface ReduceOrderInput {
+  orderId: string;
+  /** Contracts to sell — must leave at least one open. */
+  contracts: number;
+  exitPriceE4: number;
+}
+
+/**
+ * Scale-out: sells part of an open position by **splitting the order** —
+ * the sold contracts become their own closed row (same entry, real exit,
+ * `splitFrom` lineage) and the original keeps its id, stops, target, and
+ * history with a reduced quantity. The split is what keeps every existing
+ * sum honest with zero changes: realized P&L is the closed slice, open
+ * exposure is the surviving row, and cash arithmetic
+ * (entries out, exits in, over all rows) never sees a special case.
+ */
+export function reduceOrder(input: ReduceOrderInput): string {
+  const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, input.orderId)).get();
+  if (!order) throw new PaperError(`Unknown order: ${input.orderId}`);
+  if (order.status === 'closed') throw new PaperError(`Order ${input.orderId} is already closed`);
+  if (!Number.isInteger(input.contracts) || input.contracts <= 0) {
+    throw new PaperError(`contracts must be a positive integer, got ${input.contracts}`);
+  }
+  if (input.contracts >= order.quantity) {
+    throw new PaperError(
+      `A reduction must leave the position open — selling ${input.contracts} of ` +
+        `${order.quantity} is a close; use closeOrder.`,
+    );
+  }
+  if (!(input.exitPriceE4 >= 0)) throw new PaperError('exitPriceE4 must not be negative');
+
+  const sliceId = newId();
+  paperDb.transaction((tx) => {
+    tx.insert(paperOrders)
+      .values({
+        id: sliceId,
+        occSymbol: order.occSymbol,
+        underlying: order.underlying,
+        multiplier: order.multiplier,
+        side: order.side,
+        quantity: input.contracts,
+        initialQuantity: input.contracts,
+        splitFrom: order.id,
+        entryPriceE4: order.entryPriceE4,
+        entryBasis: order.entryBasis,
+        status: 'closed',
+        exitPriceE4: input.exitPriceE4,
+        exitBasis: 'modelled',
+        source: order.source,
+        notes: `Scaled out of ${order.occSymbol}: ${input.contracts} of ${order.quantity} sold at the milestone.`,
+        openedAt: order.openedAt,
+        closedAt: nowIso(),
+      })
+      .run();
+    tx.update(paperOrders)
+      .set({ quantity: order.quantity - input.contracts })
+      .where(eq(paperOrders.id, order.id))
+      .run();
+  });
+  return sliceId;
 }
 
 /** Closes an open position, at the **bid** — what it would actually fetch. */

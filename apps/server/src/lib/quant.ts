@@ -389,7 +389,7 @@ export interface ExitTarget {
   targetExitDate: string;
 }
 
-export type ExitAction = 'hold' | 'exit_now' | 'needs_review';
+export type ExitAction = 'hold' | 'exit_now' | 'reduce' | 'needs_review';
 
 /**
  * A first-pass exit plan for a position that is *already* open.
@@ -477,6 +477,8 @@ export interface ExitDecisionResult {
   newStopLossPriceE4: number | null;
   reason: string;
   triggeredBy: string;
+  /** For action 'reduce': contracts to sell. Null otherwise. */
+  reduceContracts: number | null;
 }
 
 export interface EvaluateExitInput {
@@ -493,6 +495,9 @@ export interface EvaluateExitInput {
   /** "Would this clear the entry bar today" floor for the horizon
    * time-stop, in per-contract dollars — see evaluate_exit. */
   horizonEvFloor?: number;
+  /** Current and at-open contract counts, for the scale-out rule. */
+  quantity?: number;
+  initialQuantity?: number;
 }
 
 /**
@@ -522,6 +527,8 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
         today: input.today ?? null,
         entry_price: input.entryPriceE4 !== undefined ? input.entryPriceE4 / 10_000 : null,
         horizon_ev_floor: input.horizonEvFloor ?? 0,
+        quantity: input.quantity ?? null,
+        initial_quantity: input.initialQuantity ?? null,
       }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -538,9 +545,11 @@ export async function evaluateExit(input: EvaluateExitInput): Promise<ExitDecisi
     new_stop_loss_price: number | null;
     reason: string;
     triggered_by: string;
+    reduce_contracts?: number | null;
   };
   return {
     action: body.action,
+    reduceContracts: body.reduce_contracts ?? null,
     newTargetExitPriceE4: body.new_target_exit_price !== null ? Math.round(body.new_target_exit_price * 10_000) : null,
     newTargetExitDate: body.new_target_exit_date,
     newStopLossPriceE4: body.new_stop_loss_price !== null ? Math.round(body.new_stop_loss_price * 10_000) : null,
