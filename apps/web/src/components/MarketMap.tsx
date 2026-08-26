@@ -347,6 +347,33 @@ export function MarketMap() {
     [byCap, mapSize.width, mapSize.height],
   );
 
+  /**
+   * Live without a button. The quotes drawn here go stale the moment the
+   * market moves, and "press sync every time you look" is a job for a
+   * timer, not a person. Once a minute, only while this tab is actually
+   * visible (a background tab quoting Yahoo all day is how rate limits
+   * get spent on nobody), never stacking a new request onto one still in
+   * flight, and always the symbols currently drawn — the same ≤250-batch
+   * the manual button sends. The button stays for "I want it now".
+   */
+  const visibleSymbolsRef = useRef<string[]>([]);
+  const refreshVisibleRef = useRef(refreshVisible);
+  refreshVisibleRef.current = refreshVisible;
+  useEffect(() => {
+    const tick = () => {
+      const m = refreshVisibleRef.current;
+      if (document.visibilityState !== 'visible') return;
+      if (m.isPending || visibleSymbolsRef.current.length === 0) return;
+      m.mutate(visibleSymbolsRef.current);
+    };
+    const id = setInterval(tick, 60_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, []);
+
   const treeData = useMemo(() => {
     const top = byCap.slice(0, boxCount);
     return top.map((r) => {
@@ -362,6 +389,7 @@ export function MarketMap() {
       };
     });
   }, [byCap, boxCount, dark]);
+  visibleSymbolsRef.current = treeData.map((d) => d.name);
 
   const sorted = useMemo(() => {
     const rows = [...filtered];
@@ -440,7 +468,7 @@ export function MarketMap() {
               variant="ghost"
               onClick={() => refreshVisible.mutate(treeData.map((d) => d.name))}
               disabled={isFetching || refreshVisible.isPending}
-              title="Re-quote the companies currently shown"
+              title="Re-quote now — also refreshes automatically every minute while this tab is visible"
             >
               <RefreshCw
                 className={cn('size-3.5', (isFetching || refreshVisible.isPending) && 'animate-spin')}
