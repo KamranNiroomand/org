@@ -506,6 +506,35 @@ def build_feature_panel(
     return features
 
 
+def rank_features_per_day(panel: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
+    """Map each feature to its cross-sectional rank in [-1, 1], per day.
+
+    The Gu-Kelly-Xiu convention. A raw feature level carries two things
+    tangled together: where this symbol stands *relative to the market
+    today* (the cross-sectional signal a daily ranking actually trades
+    on) and the market-wide level of the feature (a regime effect that
+    drifts across the panel's two years and teaches the model splits that
+    stop generalizing the moment the regime moves). Ranking per day keeps
+    the first and discards the second, and makes every feature robust to
+    outliers for free — a 40-sigma amihud print becomes rank 1.0, not a
+    lever on the whole tree.
+
+    Nulls stay null: an unranked missing value must remain "missing" (its
+    own LightGBM branch), never be imputed to mid-rank.
+    """
+    exprs = []
+    for c in cols:
+        r = pl.col(c).rank(method="average").over("day")
+        n = pl.col(c).is_not_null().sum().over("day")
+        exprs.append(
+            pl.when(pl.col(c).is_null() | (n <= 1))
+            .then(None)
+            .otherwise((r - 1) / (n - 1) * 2.0 - 1.0)
+            .alias(c)
+        )
+    return panel.with_columns(exprs)
+
+
 # ---------------------------------------------------------------------------
 # Chain surface features — awaiting real captured data to validate against
 # ---------------------------------------------------------------------------

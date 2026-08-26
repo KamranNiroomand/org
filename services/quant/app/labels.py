@@ -44,6 +44,54 @@ def forward_return(bars: pl.DataFrame, horizon: int) -> pl.DataFrame:
     return with_label.filter(pl.col(label_col).is_not_null()).select(["symbol", "day", label_col])
 
 
+def vol_scaled_forward_return(
+    bars: pl.DataFrame, horizon: int, vol_window: int = 21
+) -> pl.DataFrame:
+    """`forward_return` divided by the symbol's own trailing volatility over
+    the horizon — the return in *sigma units*, stamped on day `t`.
+
+    Predicting raw returns hands a cross-sectional model an easier and
+    useless question: most of the raw-return variance across 560 symbols
+    is "which names are volatile", not "which names will go up", so model
+    capacity is spent learning a vol ranking the HAR forecast already
+    provides. Scaling each label by that symbol's trailing vol removes
+    the nuisance axis and leaves the direction question — the standard
+    normalization in the cross-sectional return-prediction literature
+    (Gu, Kelly & Xiu 2020 and practitioner convention alike).
+
+    The scale uses **only trailing** bars (`rolling_realized_vol` stamped
+    on day `t` looks back, never forward), so nothing about the future
+    leaks into the denominator. The scale itself (`label_sigma_h`) rides
+    along per row: training divides by it, inference multiplies the
+    prediction by the *current* trailing sigma to recover a return —
+    symmetric by construction, and a symbol with no vol history yet drops
+    out of training rather than entering with a fabricated scale.
+    """
+    from .vol import TRADING_DAYS_PER_YEAR, rolling_realized_vol
+
+    raw = forward_return(bars, horizon)
+    if raw.height == 0:
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.Utf8,
+                "day": pl.Utf8,
+                f"fwd_ret_{horizon}d": pl.Float64,
+                "label_sigma_h": pl.Float64,
+            }
+        )
+    vols = rolling_realized_vol(bars, vol_window)
+    scale = (horizon / TRADING_DAYS_PER_YEAR) ** 0.5
+    label_col = f"fwd_ret_{horizon}d"
+    joined = raw.join(vols, on=["symbol", "day"], how="inner").with_columns(
+        (pl.col("realized_vol") * scale).alias("label_sigma_h")
+    )
+    return (
+        joined.filter(pl.col("label_sigma_h") > 0)
+        .with_columns((pl.col(label_col) / pl.col("label_sigma_h")).alias(label_col))
+        .select(["symbol", "day", label_col, "label_sigma_h"])
+    )
+
+
 def direction_bucket(
     bars: pl.DataFrame, horizon: int, flat_threshold: float = 0.01
 ) -> pl.DataFrame:

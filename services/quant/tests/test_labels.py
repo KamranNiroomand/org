@@ -178,3 +178,37 @@ class TestContractReturn:
     def test_rejects_a_nonpositive_entry(self) -> None:
         with pytest.raises(ValueError, match="positive"):
             contract_return(entry_mid=0.0, exit_mid=1.0)
+
+
+class TestVolScaledForwardReturn:
+    def _trending_bars(self, n: int = 60) -> "pl.DataFrame":
+        import polars as pl
+        rows = []
+        for sym, step in (("CALM", 0.001), ("WILD", 0.02)):
+            close = 100.0
+            for i in range(n):
+                close *= 1 + step * (1 if i % 2 == 0 else -0.5)
+                rows.append({
+                    "symbol": sym, "day": f"2026-{3 + i // 28:02d}-{1 + i % 28:02d}",
+                    "open": close, "high": close * 1.01, "low": close * 0.99,
+                    "close": close, "adj_close": close, "volume": 1000,
+                })
+        return pl.DataFrame(rows)
+
+    def test_label_is_forward_return_over_trailing_sigma(self) -> None:
+        import polars as pl
+        from app.labels import forward_return, vol_scaled_forward_return
+
+        bars = self._trending_bars()
+        raw = forward_return(bars, 5)
+        scaled = vol_scaled_forward_return(bars, 5, vol_window=21)
+        j = raw.join(scaled, on=["symbol", "day"], how="inner", suffix="_s")
+        recovered = j["fwd_ret_5d_s"] * j["label_sigma_h"]
+        assert recovered.to_list() == pytest.approx(j["fwd_ret_5d"].to_list(), rel=1e-9)
+
+    def test_symbols_without_vol_history_drop_out(self) -> None:
+        from app.labels import vol_scaled_forward_return
+
+        bars = self._trending_bars(n=10)  # shorter than the 21-day window
+        out = vol_scaled_forward_return(bars, 5, vol_window=21)
+        assert out.height == 0

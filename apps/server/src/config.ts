@@ -126,7 +126,9 @@ const schema = z.object({
   // changes (feature set, horizon, target, early stopping). The first
   // scheduled daily run silently defaulted to 1 and reported a 1.96
   // hurdle against results that had really consumed 19 trials.
-  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(19),
+  // 20 as of 2026-08-26: trial #20 is the vol-scaled label + per-day
+  // feature-rank configuration (see services/quant/app/train.py).
+  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(20),
   // Artificial starting balance for the paper book, in whole dollars.
   PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(100_000),
   // Auto-entry: once/day, every candidate clearing both bars below (and
