@@ -328,7 +328,19 @@ export class PolygonProvider implements OptionsProvider {
 
   private async fetchLiveChain(request: ChainRequest): Promise<ChainQuote[]> {
     const asOf = new Date().toISOString();
-    const tradingDay = asOf.slice(0, 10);
+    // The trading day is a fact about the US session, so it is the date in
+    // New York — never the UTC date. `asOf.slice(0, 10)` looked identical
+    // for months because capture started at 16:45 ET (20:45 UTC, same
+    // date), until a slow night pushed the run past 20:00 ET: the capture
+    // straddled UTC midnight and stamped half of one session's board with
+    // the *next* day's date — a phantom trading day the ranking then
+    // treated as a real session whose every spot was "stale".
+    const tradingDay = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(asOf));
     const underlying = request.underlying.toUpperCase();
 
     const [raw, spot] = await Promise.all([

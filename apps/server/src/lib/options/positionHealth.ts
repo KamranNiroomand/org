@@ -148,6 +148,21 @@ export function latestPositionHealth(): Map<string, typeof paperPositionHealth.$
  * match the scheduler's own, since a local-vs-UTC split is the second way
  * these drift apart — in the evening they name different days.
  */
+/**
+ * Today's date in New York — the only calendar the US session runs on.
+ * UTC dates agree with this between 00:00 and 20:00 ET and silently
+ * disagree after; a nightly job delayed past 8pm ET stamped a phantom
+ * next-day trading day with exactly that bug.
+ */
+export function nyToday(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 export function operatingTradingDay(): string {
   return latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
 }

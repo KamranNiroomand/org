@@ -25,7 +25,7 @@ import { registerModelRun } from './options/modelRegistry.js';
 import { ingestNewsForUniverse } from './text/news.js';
 import { ingestEdgarForUniverse } from './text/edgar.js';
 import { classifyUnclassifiedDocuments } from './text/classify.js';
-import { computePositionHealth, latestCapturedTradingDay } from './options/positionHealth.js';
+import { computePositionHealth, latestCapturedTradingDay, nyToday } from './options/positionHealth.js';
 import { runAutoEntry } from './options/autoEntry.js';
 import { runExitEngine, type ExitEngineSummary } from './options/exitEngine.js';
 import { pullMarketSnapshot } from './options/marketPull.js';
@@ -198,7 +198,7 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
       const pull = await pullMarketSnapshot();
       if (pull.ok) {
         log.info(`Market sync: ${pull.message}`);
-        const tradingDay = latestCapturedTradingDay() ?? new Date().toISOString().slice(0, 10);
+        const tradingDay = latestCapturedTradingDay() ?? nyToday();
         await runPaperMaintenance(log, tradingDay);
         // Same reasoning as runPaperMaintenance just above: a paper-trading
         // decision belongs on whichever machine the corpus is fresh on, not
@@ -588,23 +588,6 @@ export async function runOptionsCapture(
       result.errors.push(`Rate curve: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Bars before chains, every night. Bars were originally loaded by a
-    // one-off script and then never again — the chain corpus grew nightly
-    // while every forecast input (momentum, HAR vol, the whole feature
-    // panel) silently froze at the last hand-run backfill, a week stale by
-    // the time anyone noticed. The sync is incremental with a small
-    // overlap window (see barsSync.ts); a failure is reported but does not
-    // block the chain capture, which is the irreplaceable part.
-    try {
-      const bars = await syncBars(new PolygonProvider());
-      log.info(`Bars sync: ${bars.barsWritten} bars across ${bars.symbolsDone} symbols`);
-      if (bars.errors.length > 0) {
-        result.errors.push(`Bars sync: ${bars.errors.slice(0, 3).join('; ')}`);
-      }
-    } catch (err) {
-      result.errors.push(`Bars sync: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
     const symbols = listUniverse({ activeOnly: true }).map((u) => toVendorSymbol(u.symbol));
     result.symbols = symbols.length;
 
@@ -629,7 +612,7 @@ export async function runOptionsCapture(
     // inside `runNightly`, since this job never runs there — see
     // `runPaperMaintenance`'s own doc comment for why that split exists.
     {
-      const tradingDay = new Date().toISOString().slice(0, 10);
+      const tradingDay = nyToday();
       await runPaperMaintenance(log, tradingDay);
 
       // After marking/health-checking existing positions against tonight's
@@ -854,6 +837,7 @@ function runNightlyPanel(log: FastifyBaseLogger): string | null {
 
 let task: ReturnType<typeof cron.schedule> | null = null;
 let captureTask: ReturnType<typeof cron.schedule> | null = null;
+let barsSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let retrainTask: ReturnType<typeof cron.schedule> | null = null;
 let textSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let watchlistTextSyncTask: ReturnType<typeof cron.schedule> | null = null;
@@ -1029,6 +1013,29 @@ export function startScheduler(log: FastifyBaseLogger): void {
         // Eastern, not local — see config.market.captureCron.
         { timezone: config.market.captureTimezone },
       );
+      // Bars on their own morning schedule — see BARS_SYNC_CRON in
+      // config.ts for why they cannot ride along with the 16:45 capture.
+      // The snapshot regenerates right after so a reader's 06:00 pull
+      // carries the fresh bars.
+      barsSyncTask = cron.schedule(
+        config.market.barsSyncCron,
+        () => {
+          void (async () => {
+            try {
+              const bars = await syncBars(new PolygonProvider());
+              log.info(`Bars sync: ${bars.barsWritten} bars across ${bars.symbolsDone} symbols`);
+              if (bars.errors.length > 0) {
+                log.warn(`Bars sync errors: ${bars.errors.slice(0, 3).join('; ')}`);
+              }
+              snapshotMarketDb();
+            } catch (err) {
+              log.error({ err }, 'Bars sync failed');
+            }
+          })();
+        },
+        { timezone: config.market.captureTimezone },
+      );
+      log.info(`Bars sync scheduled (${config.market.barsSyncCron} ${config.market.captureTimezone})`);
       log.info(
         `Option capture scheduled (${config.market.captureCron} ` +
           `${config.market.captureTimezone}), next run ${getNextCaptureRun() ?? 'unknown'}`,
@@ -1110,6 +1117,8 @@ export function stopScheduler(): void {
   task = null;
   captureTask?.stop();
   captureTask = null;
+  barsSyncTask?.stop();
+  barsSyncTask = null;
   retrainTask?.stop();
   retrainTask = null;
   textSyncTask?.stop();

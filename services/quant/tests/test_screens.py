@@ -311,33 +311,45 @@ class TestIndividualScreens:
         assert result.passed.height == 0
         assert result.dropped == {"stale_price": 1}
 
-    def test_a_stale_spot_disqualifies_the_chain_by_name(self) -> None:
-        # The capture layer's "latest bar in a trailing window" hands back
-        # Friday's close when Monday's aggregate is not yet published. On
-        # a gap day that spot is wrong for *every* contract at once —
-        # moneyness centred above real ATM, legitimate ITM calls reading
-        # as bounds violations. The provenance column makes it checkable.
+    def test_a_one_trading_day_spot_lag_is_the_healthy_state(self) -> None:
+        # The vendor never publishes a session's bar by capture time, so
+        # every healthy row's spot belongs to the *prior* trading day.
+        # The first version demanded asof == trading_day and rejected the
+        # entire board on its first night. Lag equal to the prior day
+        # passes; anything older is the pathological case — a symbol the
+        # vendor stopped publishing, whose whole chain is priced against
+        # a spot the market left behind.
         rows = [
-            {"occ_symbol": "FRESH", "underlying_asof_day": "2026-08-21"},
-            {"occ_symbol": "CARRIED", "underlying_asof_day": "2026-08-20"},
+            {"occ_symbol": "NORMAL_LAG", "underlying_asof_day": "2026-08-20"},
+            {"occ_symbol": "ABANDONED", "underlying_asof_day": "2026-08-12"},
         ]
-        chain = _chain(rows).with_columns(pl.col("underlying_asof_day"))
-        result = screen_quotes(chain, trading_day="2026-08-21", symbol_vol=0.3)
-        assert set(result.passed["occ_symbol"].to_list()) == {"FRESH"}
-        assert result.dropped_rows["stale_spot"] == ["CARRIED"]
+        chain = _chain(rows)
+        result = screen_quotes(
+            chain, trading_day="2026-08-21", prior_day="2026-08-20", symbol_vol=0.3
+        )
+        assert set(result.passed["occ_symbol"].to_list()) == {"NORMAL_LAG"}
+        assert result.dropped_rows["stale_spot"] == ["ABANDONED"]
 
     def test_unknown_spot_provenance_skips_the_check_rather_than_failing_it(self) -> None:
         # Rows captured before the column existed are *unknown*, not
-        # fresh and not stale — and a frame without the column at all
-        # (older callers) must keep working.
+        # fresh and not stale; a frame without the column at all (older
+        # callers) must keep working; and with no prior_day the caller
+        # has not said what lag is normal, so the check does not run.
         rows = [{"occ_symbol": "LEGACY", "underlying_asof_day": None}]
-        chain = _chain(rows)
-        result = screen_quotes(chain, trading_day="2026-08-21", symbol_vol=0.3)
+        result = screen_quotes(
+            _chain(rows), trading_day="2026-08-21", prior_day="2026-08-20", symbol_vol=0.3
+        )
         assert result.passed.height == 1
 
         no_column = _chain([{"occ_symbol": "OLDFRAME"}]).drop("underlying_asof_day")
-        result2 = screen_quotes(no_column, trading_day="2026-08-21", symbol_vol=0.3)
+        result2 = screen_quotes(
+            no_column, trading_day="2026-08-21", prior_day="2026-08-20", symbol_vol=0.3
+        )
         assert result2.passed.height == 1
+
+        old_spot = _chain([{"occ_symbol": "NOPRIOR", "underlying_asof_day": "2026-08-12"}])
+        result3 = screen_quotes(old_spot, trading_day="2026-08-21", symbol_vol=0.3)
+        assert result3.passed.height == 1
 
     def test_a_missing_spot_is_named_not_blamed_on_moneyness(self) -> None:
         # strike/0 is inf, inf is outside any band — the audit would read

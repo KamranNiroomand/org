@@ -724,18 +724,19 @@ def option_feature_panel() -> pl.DataFrame:
             }
         )
 
-    stats_by_day: dict[str, pl.DataFrame | None] = {}
+    stats_by_day: dict[str, tuple[str | None, pl.DataFrame | None]] = {}
     rows: list[dict] = []
     for (symbol, day), chain in sorted(
         all_quotes.partition_by(["underlying", "trading_day"], as_dict=True).items()
     ):
         if day not in stats_by_day:
             prior = prior_trading_day(day)
-            stats_by_day[day] = read_day_stats(prior) if prior else None
+            stats_by_day[day] = (prior, read_day_stats(prior) if prior else None)
+        prior, stats = stats_by_day[day]
 
         ratios = put_call_ratios(chain)
 
-        screened = screen_quotes(chain, stats_by_day[day], trading_day=day).passed
+        screened = screen_quotes(chain, stats, trading_day=day, prior_day=prior).passed
         front_expiry = (
             screened["expiry"].min() if screened.height > 0 else None
         )
