@@ -1,4 +1,8 @@
+import { eq, sql } from 'drizzle-orm';
 import { config } from '../../config.js';
+import { marketDb } from '../../db/market/index.js';
+import { optionContracts, optionQuotes } from '../../db/market/schema.js';
+import { listUniverse } from './universe.js';
 import { accountCapacity, contractMultiplier, logDecisions, modelEntriesOpenedOn, openOrder, PaperError } from '../paper.js';
 import type { paperDecisionLog } from '../../db/paper/schema.js';
 
@@ -53,6 +57,30 @@ export async function runAutoEntry(
   day: string,
   selectEntriesFn: typeof selectEntries = selectEntries,
 ): Promise<AutoEntryResult> {
+  // A board that covers a fraction of the universe is not a smaller
+  // menu — it is a *biased* one: capture walks symbols alphabetically,
+  // so a truncated night leaves only the front of the alphabet, and an
+  // EV-greedy selection over it is alphabetical bias wearing a ranking's
+  // clothes (found live: a board cut off at "CVX" produced a book of
+  // A/B/C names). Refusing to shop from it loses one day of entries;
+  // shopping from it poisons the book with a bias no later day undoes.
+  const boardCoverage = marketDb
+    .select({ n: sql<number>`count(distinct ${optionContracts.underlying})` })
+    .from(optionQuotes)
+    .innerJoin(optionContracts, eq(optionQuotes.occSymbol, optionContracts.occSymbol))
+    .where(eq(optionQuotes.tradingDay, day))
+    .get()?.n ?? 0;
+  const universeSize = listUniverse({ activeOnly: true }).length;
+  if (universeSize > 0 && boardCoverage < universeSize * 0.5) {
+    const skippedReason =
+      `partial_board: only ${boardCoverage}/${universeSize} underlyings captured for ${day} — ` +
+      `an alphabetically-biased menu; not opening entries from it`;
+    logDecisions([
+      { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'partial_board', detail: { boardCoverage, universeSize } },
+    ]);
+    return { day, opened: [], skippedReason, failures: [] };
+  }
+
   const capacity = accountCapacity();
   const availableCapital =
     (capacity.freeCashE4 / 10_000) * (1 - config.market.autoEntry.capitalReservePct);
