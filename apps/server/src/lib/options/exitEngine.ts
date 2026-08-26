@@ -330,8 +330,21 @@ export async function runExitEngine(
 
         const chain = await provider.fetchChain({ underlying: contract.underlying, maxDte: dte + 1 });
         const quote = chain.find((q) => q.occSymbol === order.occSymbol);
-        if (!quote || quote.bidE4 === null) {
-          summary.errors.push(`${order.occSymbol}: no live bid available — skipping this recheck`);
+        // The evaluation price falls back through the same basis hierarchy
+        // the nightly marking job uses: a real bid when the plan ever has
+        // one, else the last trade, else the running close. Requiring a
+        // bid outright meant that on the current no-quote-entitlement
+        // plan *every* recheck skipped *every* position — the stop, the
+        // trailing ratchet, and the horizon time-stop had never actually
+        // evaluated once, discovered only when a manual recheck reported
+        // 10/10 "no live bid available". A modelled basis is worse than a
+        // bid and better than a rulebook that never runs; closes made on
+        // it are already recorded as 'modelled' by closeOrder.
+        const evalPriceE4 = quote ? (quote.bidE4 ?? quote.lastE4 ?? quote.closeE4) : null;
+        if (!quote || evalPriceE4 === null) {
+          summary.errors.push(
+            `${order.occSymbol}: no usable price (bid, last, or close) — skipping this recheck`,
+          );
           continue;
         }
 
@@ -340,7 +353,7 @@ export async function runExitEngine(
         const modelBeatsBaseline = health?.model_beats_baseline ?? false;
 
         const decision = await deps.evaluateExit({
-          currentPriceE4: quote.bidE4,
+          currentPriceE4: evalPriceE4,
           dte,
           target: {
             targetExitPriceE4: order.targetExitPriceE4!,
@@ -365,7 +378,7 @@ export async function runExitEngine(
         });
 
         if (decision.action === 'exit_now') {
-          closeAndTally(order, quote.bidE4, decision.triggeredBy, { reasonText: decision.reason });
+          closeAndTally(order, evalPriceE4, decision.triggeredBy, { reasonText: decision.reason });
           continue;
         }
 
@@ -456,7 +469,7 @@ export async function runExitEngine(
         }
 
         if (decision.action === 'hold') {
-          record(order, 'held', decision.triggeredBy, { currentPriceE4: quote.bidE4, dte });
+          record(order, 'held', decision.triggeredBy, { currentPriceE4: evalPriceE4, dte });
           continue;
         }
 
@@ -480,7 +493,7 @@ export async function runExitEngine(
           underlying: contract.underlying,
           escalationReason: decision.reason,
           entryPriceE4: order.entryPriceE4,
-          currentPriceE4: quote.bidE4,
+          currentPriceE4: evalPriceE4,
           targetExitPriceE4: order.targetExitPriceE4!,
           stopLossPriceE4: order.stopLossPriceE4!,
           targetExitDate: order.targetExitDate!,
@@ -555,7 +568,7 @@ export async function runExitEngine(
         if (revised) summary.revised += 1;
 
         if (advice.action === 'exit_now') {
-          closeAndTally(order, quote.bidE4, 'advisor_exit_now', { reasoning: advice.reasoning });
+          closeAndTally(order, evalPriceE4, 'advisor_exit_now', { reasoning: advice.reasoning });
           continue;
         }
         // advice.action === 'hold': the cutoff moved, the target stands.

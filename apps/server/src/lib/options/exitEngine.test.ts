@@ -395,11 +395,39 @@ describe('runExitEngine', () => {
     expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('open');
   });
 
-  it('records an error and leaves the position open when no live bid is available', async () => {
+  it('records an error and leaves the position open when no price of any basis exists', async () => {
     const id = openManagedPosition();
     const summary = await runExitEngine(log, new StubProvider(liveQuote(null)), NEVER_REVIEW_DEPS);
-    expect(summary.errors.some((e) => e.includes('no live bid'))).toBe(true);
+    expect(summary.errors.some((e) => e.includes('no usable price'))).toBe(true);
     expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('open');
+  });
+
+  it('falls back to the close basis when no bid exists, instead of skipping', async () => {
+    // The plan carries no quote entitlement, so requiring a bid meant
+    // every recheck skipped every position — the stop and both ratchets
+    // never actually ran. Close-basis evaluation is worse than a bid and
+    // better than a rulebook that never fires.
+    const id = openManagedPosition();
+    const quote = { ...liveQuote(null), closeE4: toE4(1.0) };
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      evaluateExit: async (input) => {
+        // The close made it through as the evaluation price.
+        expect(input.currentPriceE4).toBe(toE4(1.0));
+        return {
+          action: 'exit_now',
+          newTargetExitPriceE4: null,
+          newTargetExitDate: null,
+          newStopLossPriceE4: null,
+          reason: 'stop hit on close basis',
+          triggeredBy: 'stop_loss',
+        };
+      },
+    };
+    const summary = await runExitEngine(log, new StubProvider(quote), deps);
+    expect(summary.errors).toHaveLength(0);
+    expect(summary.closed).toBe(1);
+    expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('closed');
   });
 
   it('closes the position on a deterministic exit_now decision, without ever calling the LLM advisor', async () => {
