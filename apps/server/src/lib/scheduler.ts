@@ -742,7 +742,11 @@ export async function runRetrain(log: FastifyBaseLogger, reason: string): Promis
 
       const proc = spawnSync(
         'uv',
-        ['run', '--project', quantDir, 'python', '-m', 'app.train', '--target', target, '--horizon', String(horizon)],
+        [
+          'run', '--project', quantDir, 'python', '-m', 'app.train',
+          '--target', target, '--horizon', String(horizon),
+          '--n-trials', String(config.market.modelTrialCount),
+        ],
         { cwd: repoRoot, encoding: 'utf8', timeout: 30 * 60_000 },
       );
 
