@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyBaseLogger } from 'fastify';
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc, desc, eq, sql } from 'drizzle-orm';
 import { config } from '../config.js';
 import { nowIso, todayKey } from './util.js';
 import { db } from '../db/index.js';
@@ -18,6 +18,8 @@ import { captureChains } from './options/capture.js';
 import { listUniverse, seedUniverse, toVendorSymbol } from './options/universe.js';
 import { syncRates } from './options/rates.js';
 import { snapshotMarketDb } from '../db/market/snapshot.js';
+import { marketDb } from '../db/market/index.js';
+import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { syncBars } from './options/barsSync.js';
 import { isRunner } from './options/role.js';
 import { markOpenPositions, computeDailyEquity } from './paper.js';
@@ -1129,6 +1131,48 @@ export function startScheduler(log: FastifyBaseLogger): void {
       });
     }
   }, 15_000).unref();
+
+  // A capture interrupted mid-run leaves an *alphabetical prefix* of the
+  // universe as that night's whole board — found live when a deploy
+  // restart during the capture window stopped Monday's capture at "CVX"
+  // and the next morning's entries could only ever pick A-through-C
+  // names, an invisible selection bias wearing an EV ranking's clothes.
+  // Capture is idempotent per (contract, as_of), so the cure for an
+  // interruption is simply to run it again: on boot, if tonight's board
+  // should exist but covers well under the active universe, re-run.
+  if (isRunner()) {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          const today = nyToday();
+          const nowNy = new Intl.DateTimeFormat('en-US', {
+            timeZone: config.market.captureTimezone,
+            hour: '2-digit',
+            hour12: false,
+          }).format(new Date());
+          // Only after the capture window has plausibly finished (18:00
+          // ET) — rechecking before it starts would re-run yesterday.
+          if (Number(nowNy) < 18) return;
+          const captured = marketDb
+            .select({ n: sql<number>`count(distinct ${optionContracts.underlying})` })
+            .from(optionQuotes)
+            .innerJoin(optionContracts, eq(optionQuotes.occSymbol, optionContracts.occSymbol))
+            .where(eq(optionQuotes.tradingDay, today))
+            .get()?.n ?? 0;
+          const universe = listUniverse({ activeOnly: true }).length;
+          if (universe > 0 && captured < universe * 0.8) {
+            log.warn(
+              `Capture coverage for ${today}: ${captured}/${universe} underlyings — re-running capture`,
+            );
+            const r = await runOptionsCapture(log, 'catch-up: partial board');
+            lastCaptureResult = r;
+          }
+        } catch (err) {
+          log.error({ err }, 'Capture completeness check failed');
+        }
+      })();
+    }, 30_000).unref();
+  }
 }
 
 export function stopScheduler(): void {
