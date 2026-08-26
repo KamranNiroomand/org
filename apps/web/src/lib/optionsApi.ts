@@ -214,9 +214,16 @@ export const optionsApi = {
   /** Most recent run first — see the `/api/quant/runs` route. `metrics.beats_baseline`
    * is the one field that must never be hidden, per rank.py's own module docstring. */
   modelRuns: (target: string) =>
-    api.get<Array<{ runId: string; target: string; metrics: { beats_baseline?: boolean } }>>(
-      `/api/quant/runs?target=${target}`,
-    ),
+    api.get<
+      Array<{
+        runId: string;
+        target: string;
+        /** 'champion' is the run resolve_model actually serves; everything
+         * else is a challenger awaiting a promotion decision. */
+        status: 'champion' | 'challenger' | string;
+        metrics: { beats_baseline?: boolean };
+      }>
+    >(`/api/quant/runs?target=${target}`),
 
   rank: (day: string, top = 25, maxCapital?: number) =>
     api.get<RankResponse>(
