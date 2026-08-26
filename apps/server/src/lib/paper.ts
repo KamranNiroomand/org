@@ -367,6 +367,49 @@ export interface MarkResult {
  * exist for it — an absent mark is honest; a fabricated one is not, and
  * would silently corrupt the equity curve it feeds.
  */
+/**
+ * One mark row from the exit engine's recheck price — the same fields the
+ * nightly job writes, at intraday cadence. Exists because the book's
+ * numbers otherwise stand still all session: the engine fetches a fresh
+ * price for every open position every 15 minutes, evaluated it, and threw
+ * it away, while the cards and equity showed last night's close until the
+ * next morning. Skips the write when the price hasn't moved since the
+ * last mark, and refreshes the day's single row in place (the table is
+ * unique per order and day), so intraday marking adds no rows at all —
+ * the day's row just stays current.
+ */
+export function recordIntradayMark(
+  orderId: string,
+  tradingDay: string,
+  markPriceE4: number,
+  basis: 'measured' | 'modelled',
+): void {
+  const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, orderId)).get();
+  if (!order || order.status !== 'open') return;
+  const last = paperDb
+    .select()
+    .from(paperMarks)
+    .where(eq(paperMarks.orderId, orderId))
+    .orderBy(desc(paperMarks.id))
+    .limit(1)
+    .get();
+  if (last && last.markPriceE4 === markPriceE4) return;
+
+  const { multiplier } = contractMultiplier(order.occSymbol);
+  const unrealizedPlE4 = (markPriceE4 - order.entryPriceE4) * order.quantity * multiplier;
+  // One row per (order, day) — the table's own uniqueness. Intraday
+  // passes refresh the day's row in place; the day's final update is the
+  // session close, which is exactly what a daily mark should settle at.
+  paperDb
+    .insert(paperMarks)
+    .values({ orderId, asOf: nowIso(), tradingDay, markPriceE4, basis, unrealizedPlE4 })
+    .onConflictDoUpdate({
+      target: [paperMarks.orderId, paperMarks.tradingDay],
+      set: { asOf: nowIso(), markPriceE4, basis, unrealizedPlE4 },
+    })
+    .run();
+}
+
 export function markOpenPositions(tradingDay: string): MarkResult {
   const open = paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all();
   const result: MarkResult = { tradingDay, marked: 0, skipped: [] };
@@ -448,7 +491,11 @@ export function computeDailyEquity(day: string): void {
       .select()
       .from(paperMarks)
       .where(and(eq(paperMarks.orderId, o.id), lte(paperMarks.tradingDay, day)))
-      .orderBy(desc(paperMarks.tradingDay))
+      // id as the tiebreak: the intraday engine now appends marks during
+      // the session, so one trading day can hold several rows per order
+      // and "the latest write" must be deterministic, not whichever row
+      // the storage engine surfaces first.
+      .orderBy(desc(paperMarks.tradingDay), desc(paperMarks.id))
       .limit(1)
       .get();
     if (!mark) continue; // unmarked yet — excluded rather than valued at cost, which would hide P&L.

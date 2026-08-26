@@ -10,7 +10,7 @@ import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
 import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
-import { reduceOrder, contractMultiplier, closeOrder, logDecisions } from '../paper.js';
+import { recordIntradayMark, reduceOrder, contractMultiplier, closeOrder, logDecisions } from '../paper.js';
 import {
   computeExitTarget,
   evaluateExit,
@@ -349,6 +349,13 @@ export async function runExitEngine(
           );
           continue;
         }
+
+        // The price just fetched becomes the position's current mark —
+        // see recordIntradayMark for why the book's numbers should move
+        // with the session instead of standing at last night's close all
+        // day. Written before the decision, so even a pass that exits or
+        // errors below leaves the freshest observation on record.
+        recordIntradayMark(order.id, day, evalPriceE4, quote.bidE4 !== null ? 'measured' : 'modelled');
 
         const docs = readDocumentsSince(contract.underlying, order.exitUpdatedAt ?? order.openedAt);
         const currentEv = health?.contracts[order.occSymbol]?.ev ?? undefined;

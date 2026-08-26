@@ -17,6 +17,7 @@ import {
   computeDailyEquity,
   markOpenPositions,
   openOrder,
+  recordIntradayMark,
   reduceOrder,
   PaperError,
   tradeReturnPct,
@@ -127,6 +128,27 @@ describe('openOrder', () => {
     expect(() => openOrder({ occSymbol: 'GHOST 260101C00001000', quantity: 1, entryPriceE4: 100 })).toThrow(
       /Unknown contract/,
     );
+  });
+});
+
+describe('recordIntradayMark', () => {
+  it('appends a mark and skips unchanged prices', () => {
+    const id = openOrder({ occSymbol: OCC, quantity: 2, entryPriceE4: 10_000 });
+    recordIntradayMark(id, '2026-08-26', 12_000, 'modelled');
+    recordIntradayMark(id, '2026-08-26', 12_000, 'modelled'); // no-op
+    recordIntradayMark(id, '2026-08-26', 13_000, 'modelled');
+    const marks = paperDb.select().from(paperMarks).all().filter((m) => m.orderId === id);
+    // One row per (order, day): intraday updates refresh it in place.
+    expect(marks.map((m) => m.markPriceE4)).toEqual([13_000]);
+    // 2 contracts x 100 multiplier x $0.30/share gain on the final mark.
+    expect(marks.at(-1)!.unrealizedPlE4).toBe((13_000 - 10_000) * 2 * 100);
+  });
+
+  it('never marks a closed order', () => {
+    const id = openOrder({ occSymbol: OCC, quantity: 1, entryPriceE4: 10_000 });
+    closeOrder({ orderId: id, exitPriceE4: 11_000 });
+    recordIntradayMark(id, '2026-08-26', 12_000, 'modelled');
+    expect(paperDb.select().from(paperMarks).all().filter((m) => m.orderId === id)).toHaveLength(0);
   });
 });
 
