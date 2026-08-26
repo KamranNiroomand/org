@@ -100,6 +100,9 @@ function liveQuote(bidE4: number | null): ChainQuote {
 }
 
 const NEVER_REVIEW_DEPS: ExitEngineDeps = {
+  // No overlay in the default fixture: every test's price arrives through
+  // the print-basis path unless a test injects live quotes itself.
+  fetchTradierQuotes: async () => new Map(),
   evaluateExit: async () => ({
     action: 'hold',
     newTargetExitPriceE4: toE4(1.5),
@@ -435,6 +438,34 @@ describe('runExitEngine', () => {
     expect(summary.errors).toHaveLength(0);
     expect(summary.closed).toBe(1);
     expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('closed');
+  });
+
+  it('a live Tradier bid becomes the measured evaluation price and an un-haircut fill', async () => {
+    const id = openManagedPosition();
+    const deps: ExitEngineDeps = {
+      ...NEVER_REVIEW_DEPS,
+      fetchTradierQuotes: async () =>
+        new Map([[OCC, { bidE4: toE4(0.4), askE4: toE4(0.45), lastE4: toE4(0.42) }]]),
+      evaluateExit: async (input) => {
+        // The live bid outranks the chain's print-basis prices.
+        expect(input.currentPriceE4).toBe(toE4(0.4));
+        return {
+          action: 'exit_now',
+          newTargetExitPriceE4: null,
+          newTargetExitDate: null,
+          newStopLossPriceE4: null,
+          reduceContracts: null,
+          reason: 'stop hit on the real bid',
+          triggeredBy: 'stop_loss',
+        };
+      },
+    };
+    const summary = await runExitEngine(log, new StubProvider(liveQuote(null)), deps);
+    expect(summary.closed).toBe(1);
+    const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
+    // Measured basis, exact bid — no modelled-fill haircut applied.
+    expect(order.exitBasis).toBe('measured');
+    expect(order.exitPriceE4).toBe(toE4(0.4));
   });
 
   it('banks the milestone half on a reduce decision and keeps the survivor open', async () => {

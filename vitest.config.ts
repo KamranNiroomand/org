@@ -55,6 +55,9 @@ export default defineConfig({
       // tested directly (paper.test.ts's haircutE4 cases) with explicit
       // parameters, and its live wiring is verified against the running
       // book, where its entire effect is a visible, intended equity drop.
+      // The Tradier overlay tests inject their own fetch; the token just
+      // has to exist for tradierConfigured() to say yes.
+      TRADIER_API_KEY: 'test-token',
       PAPER_SPREAD_HAIRCUT_PCT: '0',
       PAPER_SPREAD_HAIRCUT_MIN_E4: '0',
       // news.ts/edgar.ts guard on these being present before doing anything,

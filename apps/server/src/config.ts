@@ -138,6 +138,14 @@ const schema = z.object({
   // contracts, where spreads are proportionally widest). Real measured
   // bids/asks, when the plan ever provides them, pass through untouched.
   // 3% ≈ a conservative half-spread for liquid single-name options.
+  // Tradier quote overlay — the realism layer Polygon's plan cannot
+  // provide. When a token is present, live NBBO bid/ask flows into the
+  // exit engine's evaluations and entry fills as *measured* prices,
+  // which the spread haircut deliberately leaves untouched. Sandbox
+  // tokens (free, no brokerage account) serve delayed quotes — enough
+  // to exercise the whole path; a production token makes them real-time.
+  TRADIER_API_KEY: z.string().optional(),
+  TRADIER_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
   PAPER_SPREAD_HAIRCUT_PCT: z.coerce.number().min(0).max(0.2).default(0.03),
   PAPER_SPREAD_HAIRCUT_MIN_E4: z.coerce.number().int().min(0).default(500),
   // Artificial starting balance for the paper book, in whole dollars.
@@ -355,6 +363,8 @@ export const config = {
     retrainCron: env.RETRAIN_CRON,
     modelTrialCount: env.MODEL_TRIAL_COUNT,
     spreadHaircutPct: env.PAPER_SPREAD_HAIRCUT_PCT,
+    tradierApiKey: env.TRADIER_API_KEY ?? null,
+    tradierEnv: env.TRADIER_ENV,
     spreadHaircutMinE4: env.PAPER_SPREAD_HAIRCUT_MIN_E4,
     /** E4 — same unit as every other dollar figure in this database. */
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
