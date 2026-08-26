@@ -23,6 +23,24 @@ import { newId, nowIso } from './util.js';
 
 export class PaperError extends Error {}
 
+/**
+ * The modelled-fill haircut — see PAPER_SPREAD_HAIRCUT_PCT in config.ts.
+ * A print is where two *other* people met; the price offered to us sits a
+ * half-spread away, against us on both sides. Applied exactly once, at
+ * the accounting boundary (open, close, reduce, mark), and only to
+ * modelled prices — a real measured bid or ask is already the touchable
+ * number.
+ */
+export function haircutE4(
+  printE4: number,
+  side: 'buy' | 'sell',
+  pct: number = config.market.spreadHaircutPct,
+  minE4: number = config.market.spreadHaircutMinE4,
+): number {
+  const h = Math.max(Math.round(printE4 * pct), minE4);
+  return side === 'buy' ? printE4 + h : Math.max(0, printE4 - h);
+}
+
 export function contractMultiplier(occSymbol: string): { multiplier: number; underlying: string } {
   const row = marketDb
     .select({ multiplier: optionContracts.multiplier, underlying: optionContracts.underlying })
@@ -108,7 +126,9 @@ export function openOrder(input: OpenOrderInput): string {
   let entryBasis: 'measured' | 'modelled';
   if (input.entryPriceE4 !== undefined) {
     if (!(input.entryPriceE4 > 0)) throw new PaperError('entryPriceE4 must be positive');
-    entryPriceE4 = input.entryPriceE4;
+    // An explicit price is a print, not an offer — a real buyer pays the
+    // ask side of it. See haircutE4.
+    entryPriceE4 = haircutE4(input.entryPriceE4, 'buy');
     entryBasis = 'modelled';
   } else {
     const today = new Date().toISOString().slice(0, 10);
@@ -185,6 +205,8 @@ export function reduceOrder(input: ReduceOrderInput): string {
     );
   }
   if (!(input.exitPriceE4 >= 0)) throw new PaperError('exitPriceE4 must not be negative');
+  // Same sell-side haircut as closeOrder — a scale-out is a sale.
+  const exitPriceE4 = haircutE4(input.exitPriceE4, 'sell');
 
   const sliceId = newId();
   paperDb.transaction((tx) => {
@@ -201,7 +223,7 @@ export function reduceOrder(input: ReduceOrderInput): string {
         entryPriceE4: order.entryPriceE4,
         entryBasis: order.entryBasis,
         status: 'closed',
-        exitPriceE4: input.exitPriceE4,
+        exitPriceE4,
         exitBasis: 'modelled',
         source: order.source,
         notes: `Scaled out of ${order.occSymbol}: ${input.contracts} of ${order.quantity} sold at the milestone.`,
@@ -227,7 +249,8 @@ export function closeOrder(input: CloseOrderInput): void {
   let exitBasis: 'measured' | 'modelled';
   if (input.exitPriceE4 !== undefined) {
     if (!(input.exitPriceE4 >= 0)) throw new PaperError('exitPriceE4 must not be negative');
-    exitPriceE4 = input.exitPriceE4;
+    // A seller fetches the bid side of the print — see haircutE4.
+    exitPriceE4 = haircutE4(input.exitPriceE4, 'sell');
     exitBasis = 'modelled';
   } else {
     const today = new Date().toISOString().slice(0, 10);
@@ -386,6 +409,7 @@ export function recordIntradayMark(
 ): void {
   const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, orderId)).get();
   if (!order || order.status !== 'open') return;
+  if (basis === 'modelled') markPriceE4 = haircutE4(markPriceE4, 'sell');
   const last = paperDb
     .select()
     .from(paperMarks)
@@ -426,7 +450,10 @@ export function markOpenPositions(tradingDay: string): MarkResult {
       // No quote entitlement, or a real-but-empty bid: fall back to the
       // contract's own last traded price. A traded price, not a touchable
       // one — see gate.ts — so this is recorded as modelled, not measured.
-      markPriceE4 = quote.closeE4;
+      // Valued at what a sale would fetch, not at the print — see
+      // haircutE4. The measured-bid branch above needs no adjustment: a
+      // bid IS the touchable number.
+      markPriceE4 = haircutE4(quote.closeE4, 'sell');
       basis = 'modelled';
     }
 

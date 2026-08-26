@@ -9,7 +9,7 @@ import { paperDb } from '../db/paper/index.js';
 import { runPaperMigrations } from '../db/paper/migrate.js';
 import { paperDecisionLog, paperEquity, paperExitRevisions, paperMarks, paperOrders } from '../db/paper/schema.js';
 import { nowIso } from './util.js';
-import {
+import { haircutE4,
   accountCapacity,
   decisionsForDay,
   logDecisions,
@@ -128,6 +128,23 @@ describe('openOrder', () => {
     expect(() => openOrder({ occSymbol: 'GHOST 260101C00001000', quantity: 1, entryPriceE4: 100 })).toThrow(
       /Unknown contract/,
     );
+  });
+});
+
+describe('haircutE4', () => {
+  it('a buyer pays the ask side, a seller fetches the bid side', () => {
+    // 3% of a $60.00 print is $1.80 per share.
+    expect(haircutE4(600_000, 'buy', 0.03, 500)).toBe(618_000);
+    expect(haircutE4(600_000, 'sell', 0.03, 500)).toBe(582_000);
+  });
+
+  it('cheap contracts hit the absolute floor, where spreads are proportionally widest', () => {
+    // 3% of a $0.50 print is $0.015 — below the $0.05 floor, which wins.
+    expect(haircutE4(5_000, 'sell', 0.03, 500)).toBe(4_500);
+  });
+
+  it('never produces a negative sale price', () => {
+    expect(haircutE4(300, 'sell', 0.03, 500)).toBe(0);
   });
 });
 
