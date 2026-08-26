@@ -10,7 +10,7 @@ import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
 import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
-import { closeOrder, logDecisions } from '../paper.js';
+import { contractMultiplier, closeOrder, logDecisions } from '../paper.js';
 import {
   computeExitTarget,
   evaluateExit,
@@ -351,6 +351,17 @@ export async function runExitEngine(
           currentEv,
           newDocumentsCount: docs.length,
           today: day,
+          entryPriceE4: order.entryPriceE4,
+          // Half the entry bar, in the same per-contract dollars as the
+          // health check's EV: the professional horizon test is "would I
+          // still put this on today", and the half-bar hysteresis keeps a
+          // position hovering at the boundary from being churned.
+          horizonEvFloor:
+            (0.5 *
+              config.market.autoEntry.minEvPerRisk *
+              order.entryPriceE4 *
+              contractMultiplier(order.occSymbol).multiplier) /
+            10_000,
         });
 
         if (decision.action === 'exit_now') {

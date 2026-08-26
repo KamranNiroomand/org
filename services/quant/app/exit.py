@@ -29,6 +29,8 @@ Two functions, deliberately split by when each runs:
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
@@ -45,6 +47,68 @@ MIN_DTE_FLOOR = 3
 #: target has been reached. See `evaluate_exit` for why reaching the target
 #: raises a stop rather than closing the position.
 DEFAULT_TRAIL_PCT = 0.30
+
+#: Bounds on the volatility-scaled stop (see `vol_scaled_stop_pct`). The
+#: floor keeps a low-vol deep-ITM position from carrying a hair-trigger
+#: stop that ordinary close-price noise would fire; the cap keeps a
+#: high-vol position from being allowed to lose almost everything before
+#: the rule admits defeat. 1.5 sigmas, not 2: options are volatile enough
+#: that a 2-sigma weekly move exceeds the cap for nearly every listed
+#: contract, which would collapse the scaling into a constant — the
+#: 60%-for-everything stop the rule exists to replace. At 1.5 the band
+#: actually spreads: a deep-ITM stock-like call stops in the 30s, an ATM
+#: contract in the 40s-50s, and only genuine lottery tickets pin the cap,
+#: while day-to-day noise still sits comfortably below the trigger.
+STOP_SIGMAS = 1.5
+MIN_STOP_PCT = 0.25
+MAX_STOP_PCT = 0.60
+#: Once a position is halfway to its profit target, the stop rises to
+#: entry: from there the trade can end flat, but never round-trip a real
+#: gain into a loss. The oldest desk rule there is, made monotone the
+#: same way the trailing ratchet is.
+BREAKEVEN_ARM_FRACTION = 0.5
+
+
+def vol_scaled_stop_pct(
+    price: float,
+    spot: float | None,
+    delta: float | None,
+    sigma: float | None,
+    horizon_days: int,
+    stop_sigmas: float = STOP_SIGMAS,
+    min_pct: float = MIN_STOP_PCT,
+    max_pct: float = MAX_STOP_PCT,
+) -> float:
+    """Stop distance scaled to *this option's* volatility, not a constant.
+
+    A fixed percentage stop means a different trigger probability for
+    every position — the standard systematic-desk practice (ATR-style
+    volatility stops) is to place the stop a fixed number of sigmas away,
+    so noise fires it equally rarely everywhere. Kaminski & Lo's result
+    is the license for having a stop at all (they only add value when the
+    signal has momentum, which this one is); the scaling is what makes
+    one stop rule mean one thing across a 4%-vol ETF option and an
+    80%-vol biotech option.
+
+    The option's expected relative move over the forecast horizon comes
+    from its elasticity: sigma_opt ~= |delta| * S / P * sigma_underlying,
+    so stop_pct = stop_sigmas * sigma_opt * sqrt(h/252), clamped. Missing
+    inputs (no delta, no spot, no vol) fall back to the old flat 50% —
+    degrading to the previous behavior, never to no stop.
+    """
+    if (
+        price <= 0
+        or spot is None
+        or spot <= 0
+        or delta is None
+        or delta == 0
+        or sigma is None
+        or sigma <= 0
+    ):
+        return DEFAULT_STOP_LOSS_PCT
+    elasticity = abs(delta) * spot / price
+    sigma_opt = elasticity * sigma * math.sqrt(max(1, horizon_days) / 252.0)
+    return min(max_pct, max(min_pct, stop_sigmas * sigma_opt))
 
 
 @dataclass(frozen=True)
@@ -151,6 +215,8 @@ def evaluate_exit(
     trail_pct: float = DEFAULT_TRAIL_PCT,
     today: str | None = None,
     forecast_horizon_days: int = 5,
+    entry_price: float | None = None,
+    horizon_ev_floor: float = 0.0,
 ) -> ExitDecision:
     """Recheck logic for an open position, run every time the intraday job
     fires. Deterministic rules first — checked in order of how urgent they
@@ -220,11 +286,24 @@ def evaluate_exit(
     # escalate again: a restatement or an EV collapse would ride the
     # trailing stop down with nobody looking. So the raised stop travels
     # with whatever decision the checks below reach.
+    # Two monotone ratchets, taking whichever is higher:
+    #
+    # * The trail: above the profit target the stop follows the running
+    #   price at `trail_pct` below it.
+    # * Breakeven: once the position is halfway to its target, the stop
+    #   rises to entry — the oldest desk rule there is. From here the
+    #   trade can end flat but never round-trip a real gain into a loss;
+    #   before this rule a +30% winner could still ride all the way back
+    #   down to the original -50% stop.
     trailed_stop: float | None = None
     if current_price >= target.target_exit_price:
         trailed = current_price * (1.0 - trail_pct)
         if trailed > target.stop_loss_price:
             trailed_stop = trailed
+    if entry_price is not None and entry_price > 0:
+        halfway = entry_price + BREAKEVEN_ARM_FRACTION * (target.target_exit_price - entry_price)
+        if current_price >= halfway and entry_price > target.stop_loss_price:
+            trailed_stop = max(trailed_stop or 0.0, entry_price)
 
     # The time-stop: the position's thesis has a shelf life, and it is the
     # model's own forecast horizon. The direction model predicts a 5-day
@@ -253,7 +332,13 @@ def evaluate_exit(
         and today > target.target_exit_date
         and current_ev is not None
     ):
-        if current_ev <= 0:
+        # Not "is EV still positive" but "would this clear (half) the
+        # entry bar today" — the professional test is whether you would
+        # still put the position on, and the half-bar hysteresis keeps a
+        # position that hovers at the boundary from being churned. The
+        # caller supplies the floor in the same per-contract dollars as
+        # `current_ev`; 0.0 (the default) degrades to the old sign test.
+        if current_ev <= horizon_ev_floor:
             return ExitDecision(
                 action="exit_now",
                 new_target_exit_price=None,
@@ -261,8 +346,9 @@ def evaluate_exit(
                 new_stop_loss_price=None,
                 reason=(
                     f"Target date {target.target_exit_date} has passed and current "
-                    f"EV is {current_ev:.2f} — the forecast horizon is spent and "
-                    f"the model no longer supports the position."
+                    f"EV {current_ev:.2f} is below the {horizon_ev_floor:.2f} "
+                    f"re-entry bar — the horizon is spent and the model would "
+                    f"not put this position on today."
                 ),
                 triggered_by="thesis_expired",
             )
