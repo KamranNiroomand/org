@@ -277,6 +277,44 @@ def _vol_forecast_ratio(
     return min(realized_vol / reference, max_ratio)
 
 
+def _solve_missing_iv(
+    quotes: pl.DataFrame,
+    trading_day: str,
+    rate_curve: list[tuple[int, float]],
+    dividend_yield: float,
+) -> pl.DataFrame:
+    """Fill null `iv` on a small frame by solving from its own price/spot.
+
+    Exists for held contracts (see the call site) — never for whole
+    chains, where the nightly reprice with its capture-time rates is the
+    single writer of record. Rows whose solve honestly fails stay null.
+    """
+    if quotes.height == 0 or quotes["iv"].null_count() == 0:
+        return quotes
+    from .pricing import implied_vol, years_to_expiry
+
+    rows = quotes.to_dicts()
+    for r in rows:
+        if r["iv"] is not None or r["price"] is None or r["underlying_price"] is None:
+            continue
+        years = years_to_expiry(r["expiry"], trading_day)
+        if years <= 0:
+            continue
+        rate = _interpolate_rate(rate_curve, years * 365.0)
+        solved = implied_vol(
+            r["price"],
+            r["underlying_price"],
+            r["strike"],
+            years,
+            rate if rate is not None else 0.0,
+            dividend_yield,
+            is_call=r["type"] == "call",
+        )
+        if solved is not None:
+            r["iv"] = solved
+    return pl.DataFrame(rows, schema=quotes.schema)
+
+
 def rank_underlying(
     quotes: pl.DataFrame,
     trading_day: str,
@@ -995,6 +1033,18 @@ def score_held_contracts(
         held_quotes = quotes.filter(pl.col("occ_symbol").is_in(occ_symbols))
         if held_quotes.height == 0:
             continue
+        # A held position must always be priceable — the same principle as
+        # "held contracts are never screened out", one layer down. The
+        # nightly reprice targets `liquid` rows only, and a held contract
+        # that has drifted deep ITM on a rally is exactly the row the
+        # liquidity gate stops flagging (found live: four winning calls
+        # whose health read "no current view" the morning after a +9%
+        # day). Solving a handful of held contracts inline costs
+        # microseconds and only ever fills gaps — a stored solve is never
+        # overwritten, and a price the solver honestly refuses (below
+        # intrinsic, unidentified vol) stays null and the position stays
+        # visible as unscored rather than fictitiously priced.
+        held_quotes = _solve_missing_iv(held_quotes, trading_day, rate_curve, dividend_yield)
         for scored in rank_underlying(
             held_quotes,
             trading_day,

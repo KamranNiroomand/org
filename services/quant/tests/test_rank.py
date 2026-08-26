@@ -1174,3 +1174,45 @@ class TestDailyCapAndCertaintyGuards:
             r.reason == "implausible_certainty" and r.contract.occ_symbol == "SURE"
             for r in rejected
         )
+
+
+class TestSolveMissingHeldIv:
+    def test_a_held_contract_with_no_stored_solve_gets_one_inline(self) -> None:
+        # The nightly reprice covers liquid rows only; a held deep-ITM call
+        # the gate stopped flagging arrives here with iv null and must not
+        # come back unpriceable.
+        from app.rank import _solve_missing_iv
+        import polars as pl
+
+        quotes = pl.DataFrame(
+            {
+                "occ_symbol": ["HELD"],
+                "expiry": ["2026-10-16"],
+                "type": ["call"],
+                "strike": [420.0],
+                "price": [76.02],
+                "underlying_price": [456.745],
+                "iv": pl.Series([None], dtype=pl.Float64),
+            }
+        )
+        out = _solve_missing_iv(quotes, "2026-08-25", [(30, 0.04), (365, 0.04)], 0.0)
+        iv = out["iv"][0]
+        assert iv is not None and 0.1 < iv < 2.0
+
+    def test_a_below_intrinsic_price_stays_honestly_null(self) -> None:
+        from app.rank import _solve_missing_iv
+        import polars as pl
+
+        quotes = pl.DataFrame(
+            {
+                "occ_symbol": ["BAD"],
+                "expiry": ["2026-10-16"],
+                "type": ["call"],
+                "strike": [420.0],
+                "price": [30.0],  # intrinsic is 36.7 — no vol prices this
+                "underlying_price": [456.745],
+                "iv": pl.Series([None], dtype=pl.Float64),
+            }
+        )
+        out = _solve_missing_iv(quotes, "2026-08-25", [(30, 0.04)], 0.0)
+        assert out["iv"][0] is None
