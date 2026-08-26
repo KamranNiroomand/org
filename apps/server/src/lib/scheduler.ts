@@ -777,6 +777,21 @@ export async function runRetrain(log: FastifyBaseLogger, reason: string): Promis
 
       result.runs.push(outcome);
     }
+
+    // Refresh the transferable snapshot so a reader's next pull carries
+    // the run just registered. Without this, a run registered at 08:00
+    // sat invisible to the reader's dashboard until the *following*
+    // morning's 06:00 pull — the registry row existed for a full day
+    // before anyone could see it.
+    if (result.runs.some((r) => r.registered)) {
+      try {
+        snapshotMarketDb();
+      } catch (err) {
+        result.errors.push(
+          `Snapshot after retrain: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     result.errors.push(message);
