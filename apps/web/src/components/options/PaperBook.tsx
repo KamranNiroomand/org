@@ -430,15 +430,20 @@ export function PaperBook() {
   const closed = data.orders.filter((o) => o.status === 'closed');
   const points = data.equity.map((e) => ({ day: e.day.slice(5), equity: e4ToUsd(e.totalEquityE4) }));
   const autoManagedOpen = open.some((o) => o.targetExitPriceE4 !== null);
-  const latestRun = runs?.[0];
-  const modelBeatsBaseline = latestRun?.metrics?.beats_baseline ?? null;
+  // The model that actually manages these positions is the *champion* —
+  // resolve_model serves it regardless of how many newer challengers the
+  // daily cadence registers. Reading runs[0] here once produced a banner
+  // blaming the book on a failed challenger registered that morning that
+  // had never ranked a single entry.
+  const servingRun = runs?.find((r) => r.status === 'champion') ?? runs?.[0];
+  const modelBeatsBaseline = servingRun?.metrics?.beats_baseline ?? null;
 
   return (
     <div className="space-y-4">
       {autoManagedOpen && modelBeatsBaseline === false && (
         <div className="flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
           <AlertTriangle className="size-3.5 shrink-0" />
-          The model behind your auto-managed positions ({latestRun!.runId}) does not beat its own
+          The model behind your auto-managed positions ({servingRun!.runId}) does not beat its own
           out-of-fold baseline — every entry and exit below is acting on an unproven signal, not a
           validated one.
         </div>
