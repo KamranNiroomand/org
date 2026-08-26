@@ -125,6 +125,7 @@ def screen_quotes(
     quotes: pl.DataFrame,
     prior_stats: pl.DataFrame | None = None,
     trading_day: str | None = None,
+    prior_day: str | None = None,
     symbol_vol: float | None = None,
     standardized_max: float = STANDARDIZED_MONEYNESS_MAX,
     min_price: float = MIN_PRICE,
@@ -180,23 +181,29 @@ def screen_quotes(
     # when the truth is "the underlying had no price".
     apply("no_spot", pl.col("underlying_price").is_not_null() & (pl.col("underlying_price") > 0))
 
-    # A spot that belongs to a *prior* day. The capture layer fetches the
-    # underlying close as "the latest daily bar in a trailing window",
-    # which silently hands back Friday's close when Monday's aggregate is
-    # not yet published — and unlike a stale option print, a stale spot
-    # corrupts the *entire chain at once*: NVDA gaps down 12% and every
+    # A spot that belongs to a day *before the prior trading day*. The
+    # capture layer fetches the underlying close as "the latest daily bar
+    # in a trailing window" — and on this vendor plan the trading day's
+    # own bar is **never published by capture time** (16:45 ET), so a
+    # one-trading-day lag is the systematic, unavoidable state of every
+    # healthy row, not evidence of anything. The first version demanded
+    # asof == trading_day and rejected the entire board on its first
+    # night. What *is* pathological is a spot older than the corpus's own
+    # prior trading day: a symbol the vendor stopped publishing (found
+    # live: 170 contracts riding a spot nine days old), where every
     # moneyness, every intrinsic bound, and the gate's below-intrinsic
-    # rule are computed against a price ~14% above the real one, centring
-    # the admission band above true ATM and making legitimate ITM calls
-    # read as bounds violations. Runs before anything spot-derived so the
-    # audit names the actual failure. Null provenance (rows captured
-    # before the column existed, or callers without it) means *unknown*,
-    # not fresh — the check is skipped, never passed by default.
-    if trading_day is not None and "underlying_asof_day" in df.columns:
+    # rule are computed against a price the market has long left behind.
+    # `prior_day` comes from the caller (rank_day already computes it for
+    # the staleness screen); without it the check is skipped, because
+    # "how much lag is normal" is exactly the fact the caller holds. Null
+    # provenance (rows captured before the column existed, or callers
+    # without it) means *unknown*, not fresh — skipped, never passed by
+    # default.
+    if prior_day is not None and "underlying_asof_day" in df.columns:
         apply(
             "stale_spot",
             pl.col("underlying_asof_day").is_null()
-            | (pl.col("underlying_asof_day") >= pl.lit(trading_day)),
+            | (pl.col("underlying_asof_day") >= pl.lit(prior_day)),
         )
 
     # Years to expiry, calendar-day convention (the same 365 denominator

@@ -82,6 +82,15 @@ const schema = z.object({
   POLYGON_MAX_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().default(60),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
   OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
+  // Morning, deliberately, and on its own schedule. The vendor publishes a
+  // session's daily bar hours after the close, so a sync bundled with the
+  // 16:45 capture can never fetch that day's bar — and its 566-symbol
+  // sweep once delayed the chain capture two hours, far enough past 20:00
+  // ET that the UTC date rolled and half the board was stamped with a
+  // phantom next-day trading day. At 05:15 ET the prior session's bar
+  // exists, the vendor is idle, and the refreshed snapshot is ready
+  // before any reader's 06:00 pull.
+  BARS_SYNC_CRON: z.string().default('15 5 * * 2-6'),
   // News/EDGAR ingestion + classification, independent of the once-nightly
   // capture cadence above — see the module doc comment on why: a headline
   // that breaks at 10am is stale by the time the 16:45 capture job would
@@ -305,6 +314,7 @@ export const config = {
      * delay on the data plan.
      */
     captureCron: env.OPTIONS_CAPTURE_CRON,
+    barsSyncCron: env.BARS_SYNC_CRON,
     captureTimezone: 'America/New_York',
     /**
      * News/EDGAR ingestion + classification, on its own faster cadence —
