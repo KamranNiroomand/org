@@ -25,7 +25,7 @@ const CHUNK_PAUSE_MS = 120;
 
 const SP500_SET = new Set(SP500.map(([symbol]) => symbol));
 
-interface RawQuote {
+export interface RawQuote {
   symbol?: string;
   regularMarketPrice?: number;
   currency?: string;
@@ -71,7 +71,7 @@ const epochMs = (v: unknown): number | null => {
 };
 
 /** Quotes a list of symbols in batches, returning only what came back. */
-async function quoteAll(symbols: string[], pause = CHUNK_PAUSE_MS): Promise<RawQuote[]> {
+export async function quoteAll(symbols: string[], pause = CHUNK_PAUSE_MS): Promise<RawQuote[]> {
   let yf: YahooClient;
   try {
     yf = await getClient();

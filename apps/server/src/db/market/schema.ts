@@ -195,6 +195,39 @@ export const optionQuotes = sqliteTable(
  * and for every label — close-to-close alone discards the overnight gap, which
  * is most of the move around earnings, so the high and low are not optional.
  */
+/**
+ * One row per symbol per day of the valuation snapshot Yahoo already
+ * serves the `instruments` sweep — trailing/forward P/E, price-to-book,
+ * dividend yield, market cap, liquidity, 52-week range.
+ *
+ * Exists to start the clock. No fundamentals *history* exists anywhere
+ * (Yahoo only ever shows today's values), so a trained fundamentals
+ * factor is impossible until someone has been writing these down for a
+ * couple of quarters — the same reasoning as the option-feature panel,
+ * which accrued nightly for weeks before earning a place in a model.
+ * Deliberately snapshot-shaped rather than a financial-statements
+ * ingestion: statements are a real pipeline with a real vendor, deferred
+ * until the accrued snapshots prove the axis carries signal.
+ */
+export const fundamentalsSnapshots = sqliteTable(
+  'fundamentals_snapshots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    symbol: text('symbol').notNull(),
+    asOfDay: text('as_of_day').notNull(),
+    trailingPe: real('trailing_pe'),
+    forwardPe: real('forward_pe'),
+    priceToBook: real('price_to_book'),
+    dividendYield: real('dividend_yield'),
+    marketCap: real('market_cap'),
+    avgVolume: real('avg_volume'),
+    high52w: real('high_52w'),
+    low52w: real('low_52w'),
+    capturedAt: text('captured_at').notNull(),
+  },
+  (t) => [uniqueIndex('fundamentals_symbol_day_uq').on(t.symbol, t.asOfDay)],
+);
+
 export const equityBars = sqliteTable(
   'equity_bars',
   {
