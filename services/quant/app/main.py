@@ -28,6 +28,7 @@ from app.exit import (
 from app.performance import model_performance
 from app.pricing import american_price, bsm_greeks, implied_vol
 from app.rank import (
+    stock_rank,
     RankedContract,
     latest_model_dir,
     resolve_model,
@@ -353,6 +354,51 @@ class RankResponse(BaseModel):
     model_beats_baseline: bool
     model_information_coefficient: float
     contracts: list[RankedContractResponse]
+
+
+class StockRankRequest(BaseModel):
+    """Per-symbol forecast ranking for the stock engine — see
+    `rank.stock_rank`. `target` selects which horizon's champion answers
+    (stk_short ~1 month, stk_long ~6 months)."""
+
+    day: str = Field(description="Trading day, YYYY-MM-DD.")
+    target: str = "stk_short"
+    top: int = Field(default=25, gt=0, le=200)
+
+
+class StockPick(BaseModel):
+    symbol: str
+    rank: int
+    #: The model's raw forecast return over its own horizon — the ranking
+    #: key, at full resolution (never the clamped annualized drift).
+    horizon_return: float
+    annual_drift: float | None
+    forecast_vol: float | None
+    model_run_id: str
+    horizon_days: int
+
+
+class StockRankResponse(BaseModel):
+    model_run_id: str
+    target: str
+    horizon_days: int
+    picks: list[StockPick]
+
+
+@app.post("/stock/rank", response_model=StockRankResponse)
+def stock_rank_endpoint(request: StockRankRequest) -> StockRankResponse:
+    try:
+        picks = stock_rank(request.day, target=request.target, top=request.top)
+    except SystemExit as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    if not picks:
+        raise HTTPException(status_code=409, detail=f"No forecasts for {request.day}.")
+    return StockRankResponse(
+        model_run_id=picks[0]["model_run_id"],
+        target=request.target,
+        horizon_days=picks[0]["horizon_days"],
+        picks=[StockPick(**p) for p in picks],
+    )
 
 
 @app.get("/stock/performance")
