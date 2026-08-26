@@ -535,6 +535,161 @@ def rank_features_per_day(panel: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
     return panel.with_columns(exprs)
 
 
+#: The news-derived feature columns `news_feature_panel` produces.
+NEWS_FEATURE_COLS = [
+    "news_count_1d",
+    "news_count_5d",
+    "news_count_21d",
+    "news_sent_net_1d",
+    "news_sent_net_5d",
+    "news_sent_net_21d",
+]
+
+#: (corpus fingerprint) -> built panel, same discipline as the option
+#: panel's cache: documents are append-only, so any write moves the pair.
+_news_panel_cache: dict[tuple[int, str | None], pl.DataFrame] = {}
+
+
+def _news_effective_day(published_at: pl.Expr) -> pl.Expr:
+    """The trading-calendar date a publication instant belongs to, in New
+    York terms: anything after that session's 16:00 close is the *next*
+    calendar day's news.
+
+    This is the leakage guard for every news feature. A story published
+    at 18:30 ET carries information the 16:00 close could not have priced
+    — stamping it onto its own calendar day would hand the model
+    tomorrow's news wearing today's date, and a backtest built on that
+    leak reports an edge that evaporates the moment it trades. The
+    calendar-day result is then snapped forward to the next actual
+    trading day by the caller (weekend and holiday news belongs to
+    Monday's session).
+    """
+    # Explicit format: without one, polars *infers* it from the column's
+    # first value and a single malformed vendor timestamp aborts the whole
+    # panel build. The corpus stores RFC3339 UTC; anything else nulls out
+    # (strict=False) and the row drops rather than guesses.
+    ts = published_at.str.to_datetime(
+        "%Y-%m-%dT%H:%M:%S%.fZ", time_unit="ms", time_zone="UTC", strict=False
+    )
+    ny = ts.dt.convert_time_zone("America/New_York")
+    after_close = ny.dt.hour() >= 16
+    return (
+        pl.when(after_close)
+        .then(ny.dt.date() + pl.duration(days=1))
+        .otherwise(ny.dt.date())
+        .cast(pl.Date)
+    )
+
+
+def news_feature_panel(trading_days: list[str] | None = None) -> pl.DataFrame:
+    """Per-(symbol, day) news features from the documents corpus.
+
+    Countable signals only — mention counts and the vendor's per-ticker
+    sentiment, rolled over 1/5/21 sessions. Deliberately no text goes
+    anywhere near the model: the LLM's reading of the news lives in the
+    panel layer, per pick, where a human can audit the words; features
+    must be numbers a backtest can recompute bit-for-bit.
+
+    `sent_net` is (positive - negative) / mentions in the window — a
+    share, not a count, so a chatty mega-cap and a quiet mid-cap are on
+    one scale. Null when the window has no mentions: no news is not
+    neutral news, it is *no information*, and the per-day rank transform
+    keeps nulls null.
+    """
+    from .db import prior_trading_day, read_doc_mentions, reading
+
+    with reading() as conn:
+        row = conn.execute("SELECT COUNT(*) n, MAX(ingested_at) m FROM documents").fetchone()
+    fingerprint = (row["n"], row["m"])
+    cached = _news_panel_cache.get(fingerprint)
+    if cached is not None:
+        return cached
+
+    schema = {
+        "symbol": pl.Utf8,
+        "day": pl.Utf8,
+        **{c: pl.Float64 for c in NEWS_FEATURE_COLS},
+    }
+    mentions = read_doc_mentions()
+    if mentions.height == 0:
+        return pl.DataFrame(schema=schema)
+
+    if trading_days is None:
+        with reading() as conn:
+            trading_days = [
+                r["day"] for r in conn.execute("SELECT DISTINCT day FROM equity_bars ORDER BY day")
+            ]
+    if not trading_days:
+        return pl.DataFrame(schema=schema)
+    calendar = pl.DataFrame({"day": trading_days}).with_columns(
+        pl.col("day").str.to_date().alias("_day_date")
+    )
+
+    scored = (
+        mentions.with_columns(_news_effective_day(pl.col("published_at")).alias("_eff"))
+        .filter(pl.col("_eff").is_not_null())
+        .with_columns(
+            pl.when(pl.col("sentiment") == "positive")
+            .then(1.0)
+            .when(pl.col("sentiment") == "negative")
+            .then(-1.0)
+            .when(pl.col("sentiment") == "neutral")
+            .then(0.0)
+            .otherwise(None)
+            .alias("_score"),
+        )
+    )
+    # Snap each effective date forward to the next actual trading day —
+    # weekend and holiday news belongs to the following session.
+    scored = scored.sort("_eff").join_asof(
+        calendar.sort("_day_date"), left_on="_eff", right_on="_day_date", strategy="forward"
+    ).filter(pl.col("day").is_not_null())
+
+    # Two denominators on purpose: every mention counts as *coverage*,
+    # but only mentions the vendor actually scored count toward
+    # *sentiment* — an EDGAR filing has no sentiment, and letting it into
+    # the denominator would dilute "no read" into a fake neutral.
+    daily = scored.group_by(["underlying", "day"]).agg(
+        pl.len().alias("news_count_1d").cast(pl.Float64),
+        pl.col("_score").drop_nulls().len().alias("_scored_1d").cast(pl.Float64),
+        pl.col("_score").sum().alias("_sent_sum"),
+    ).rename({"underlying": "symbol"})
+
+    # Dense per-symbol calendar so the rolling windows count sessions, not
+    # news rows — a symbol with news on Monday and Friday must see a
+    # 5-session window, not a 2-row one.
+    symbols = daily.select("symbol").unique()
+    dense = symbols.join(calendar.select("day"), how="cross").join(
+        daily, on=["symbol", "day"], how="left"
+    ).sort(["symbol", "day"])
+
+    dense = dense.with_columns(
+        pl.col("news_count_1d").fill_null(0.0),
+        pl.col("_scored_1d").fill_null(0.0),
+        pl.col("_sent_sum").fill_null(0.0),
+    )
+    out = dense.with_columns(
+        pl.col("news_count_1d").rolling_sum(5).over("symbol").alias("news_count_5d"),
+        pl.col("news_count_1d").rolling_sum(21).over("symbol").alias("news_count_21d"),
+        pl.col("_scored_1d").rolling_sum(5).over("symbol").alias("_sc5"),
+        pl.col("_scored_1d").rolling_sum(21).over("symbol").alias("_sc21"),
+        pl.col("_sent_sum").rolling_sum(5).over("symbol").alias("_ss5"),
+        pl.col("_sent_sum").rolling_sum(21).over("symbol").alias("_ss21"),
+    ).with_columns(
+        pl.when(pl.col("_scored_1d") > 0)
+        .then(pl.col("_sent_sum") / pl.col("_scored_1d"))
+        .otherwise(None)
+        .alias("news_sent_net_1d"),
+        pl.when(pl.col("_sc5") > 0).then(pl.col("_ss5") / pl.col("_sc5")).otherwise(None).alias("news_sent_net_5d"),
+        pl.when(pl.col("_sc21") > 0).then(pl.col("_ss21") / pl.col("_sc21")).otherwise(None).alias("news_sent_net_21d"),
+    ).select(["symbol", "day", *NEWS_FEATURE_COLS])
+
+    panel = out.cast({c: pl.Float64 for c in NEWS_FEATURE_COLS})
+    _news_panel_cache.clear()
+    _news_panel_cache[fingerprint] = panel
+    return panel
+
+
 # ---------------------------------------------------------------------------
 # Chain surface features — awaiting real captured data to validate against
 # ---------------------------------------------------------------------------

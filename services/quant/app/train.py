@@ -26,6 +26,7 @@ which is not enough to trust.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import subprocess
@@ -38,7 +39,13 @@ import polars as pl
 
 from .cv import purged_walk_forward_splits
 from .db import read_bars
-from .features import build_feature_panel, option_feature_panel, rank_features_per_day
+from .features import (
+    NEWS_FEATURE_COLS,
+    build_feature_panel,
+    news_feature_panel,
+    option_feature_panel,
+    rank_features_per_day,
+)
 from .labels import direction_bucket, forward_return, vol_scaled_forward_return
 from .metrics import ic_summary, information_coefficient, rmse
 from .models import beats_baseline, mean_baseline, train_lgbm_regressor
@@ -82,6 +89,7 @@ def _config_hash(
     early_stopping_rounds: int | None = None,
     label_kind: str = "raw",
     rank_features: bool = False,
+    label_vol_window: int = 21,
 ) -> str:
     """Identifies a training configuration. Anything that changes the
     fitted model must be in here.
@@ -108,6 +116,7 @@ def _config_hash(
             "early_stopping_rounds": early_stopping_rounds,
             "label_kind": label_kind,
             "rank_features": rank_features,
+            "label_vol_window": label_vol_window,
         },
         sort_keys=True,
     )
@@ -131,34 +140,104 @@ LABEL_KIND = "vol_scaled"
 LABEL_VOL_WINDOW = 21
 RANK_FEATURES = True
 
+#: The STOCK engine's feature sets — trials #21 and #22 (see
+#: MODEL_TRIAL_COUNT in apps/server/src/config.ts). Short-horizon leans
+#: on short-window momentum/reversal plus the news pulse; long-horizon on
+#: slow momentum, residual momentum, and liquidity, with the slow news
+#: axis. Both ride the same vol-scaled label and per-day rank transform
+#: as `dir`.
+STOCK_SHORT_COLS = [
+    *FEATURE_COLS,
+    "momentum_5d",
+    "momentum_10d",
+    "reversal_21d",
+    "news_count_1d",
+    "news_count_5d",
+    "news_sent_net_1d",
+    "news_sent_net_5d",
+]
+STOCK_LONG_COLS = [
+    "momentum_21d",
+    "momentum_63d",
+    "residual_momentum_63d",
+    "idio_vol_ratio_21d",
+    "amihud_illiquidity_21d",
+    "volume_zscore_21d",
+    "overnight_ret_21d",
+    "news_count_21d",
+    "news_sent_net_21d",
+]
+
+
+@dataclass(frozen=True)
+class TargetSpec:
+    """Everything that defines one trainable configuration. One spec = one
+    counted trial; editing a spec's fields is a *new* configuration and
+    must bump the trial ledger, which is why every field here feeds
+    `_config_hash`."""
+
+    horizon: int
+    feature_cols: list[str]
+    label_vol_window: int
+    default_n_splits: int
+    include_news: bool
+    #: CV floor. None = the generic len//(n_splits+2) heuristic, which is
+    #: fine until the horizon itself approaches it: at h=126 the purge
+    #: (horizon + embargo = 128 days) exceeds the heuristic's 125 on a
+    #: 2-year corpus and the first fold starves. A long-horizon target
+    #: must state its own floor.
+    min_train_days: int | None = None
+
+
+TARGETS: dict[str, TargetSpec] = {
+    # The original options-direction config, unchanged in substance.
+    "dir": TargetSpec(5, FEATURE_COLS, LABEL_VOL_WINDOW, 4, include_news=False),
+    # Stock engine: ~1-4 week swings.
+    "stk_short": TargetSpec(21, STOCK_SHORT_COLS, 21, 4, include_news=True),
+    # Stock engine: ~6-12 month positions. Two folds until the bar corpus
+    # is deep enough for four (the CV math, not a preference: a 126-day
+    # horizon plus purge eats ~128 training days per fold).
+    "stk_long": TargetSpec(126, STOCK_LONG_COLS, 63, 2, include_news=True, min_train_days=180),
+}
+
 
 def build_panel(target: str, horizon: int) -> pl.DataFrame:
+    if target == "vrp":
+        raise SystemExit(
+            "--target vrp needs a real trailing implied-vol history that does "
+            "not exist yet — capture only started tonight. Use --target dir."
+        )
+    spec = TARGETS.get(target)
+    if spec is None:
+        raise SystemExit(f"Unknown target: {target!r} (expected one of {sorted(TARGETS)})")
+
     bars = read_bars()
     if bars.height == 0:
         raise SystemExit("No bars in market.db — run bars:backfill first.")
 
     # The option-derived columns ride along in the panel from day one so
-    # their history accrues with the corpus, but they are NOT in
-    # FEATURE_COLS yet — see OPTION_FEATURE_COLS in features.py for the
-    # coverage threshold and the trial-count cost of flipping them on.
+    # their history accrues with the corpus, but they are NOT in any
+    # target's feature set yet — see OPTION_FEATURE_COLS in features.py
+    # for the coverage threshold and the trial-count cost.
     features = build_feature_panel(bars, option_panel=option_feature_panel())
-
-    if target == "dir":
-        if LABEL_KIND == "vol_scaled":
-            labels = vol_scaled_forward_return(bars, horizon, vol_window=LABEL_VOL_WINDOW)
+    if spec.include_news:
+        news = news_feature_panel()
+        if news.height > 0:
+            # Left, same reasoning as the option panel: news coverage is
+            # per-symbol sparse and must never shrink the bars panel.
+            features = features.join(news, on=["symbol", "day"], how="left")
         else:
-            labels = forward_return(bars, horizon)
-        label_col = f"fwd_ret_{horizon}d"
-    elif target == "vrp":
-        raise SystemExit(
-            "--target vrp needs a real trailing implied-vol history that does "
-            "not exist yet — capture only started tonight. Use --target dir."
-        )
+            for c in NEWS_FEATURE_COLS:
+                features = features.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
+
+    if LABEL_KIND == "vol_scaled":
+        labels = vol_scaled_forward_return(bars, horizon, vol_window=spec.label_vol_window)
     else:
-        raise SystemExit(f"Unknown target: {target!r} (expected 'dir' or 'vrp')")
+        labels = forward_return(bars, horizon)
+    label_col = f"fwd_ret_{horizon}d"
 
     if RANK_FEATURES:
-        panel_features = rank_features_per_day(features, FEATURE_COLS)
+        panel_features = rank_features_per_day(features, spec.feature_cols)
     else:
         panel_features = features
     panel = panel_features.join(labels, on=["symbol", "day"], how="inner")
@@ -167,14 +246,21 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
 
 def train(
     target: str = "dir",
-    horizon: int = 5,
-    n_splits: int = 4,
+    horizon: int | None = None,
+    n_splits: int | None = None,
     embargo: int = 2,
     min_train_days: int | None = None,
     output_dir: Path | None = None,
     n_trials: int = 1,
     early_stopping_rounds: int | None = None,
 ) -> Path:
+    spec = TARGETS.get(target)
+    if spec is None:
+        raise SystemExit(f"Unknown target: {target!r} (expected one of {sorted(TARGETS)})")
+    horizon = horizon if horizon is not None else spec.horizon
+    n_splits = n_splits if n_splits is not None else spec.default_n_splits
+    feature_cols = spec.feature_cols
+
     panel = build_panel(target, horizon)
     if panel.height < 200:
         raise SystemExit(
@@ -183,12 +269,12 @@ def train(
         )
 
     days = sorted(panel["day"].unique().to_list())
-    min_train = min_train_days or max(60, len(days) // (n_splits + 2))
+    min_train = min_train_days or spec.min_train_days or max(60, len(days) // (n_splits + 2))
     splits = purged_walk_forward_splits(days, n_splits, horizon, embargo, min_train)
 
     model_result = train_lgbm_regressor(
         panel,
-        FEATURE_COLS,
+        feature_cols,
         "label",
         splits,
         record_history=True,
@@ -254,11 +340,12 @@ def train(
         chosen = sorted(model_result.best_rounds.values())
         final_params["n_estimators"] = chosen[len(chosen) // 2]
     final_model = lgb.LGBMRegressor(**final_params)
-    final_model.fit(panel[FEATURE_COLS].to_numpy(), panel["label"].to_numpy())
+    final_model.fit(panel[feature_cols].to_numpy(), panel["label"].to_numpy())
 
     config_hash = _config_hash(
-        target, horizon, FEATURE_COLS, early_stopping_rounds,
+        target, horizon, feature_cols, early_stopping_rounds,
         label_kind=LABEL_KIND, rank_features=RANK_FEATURES,
+        label_vol_window=spec.label_vol_window,
     )
     run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{config_hash}"
     base_dir = output_dir or (Path.home() / ".org" / "market" / "models")
@@ -275,7 +362,7 @@ def train(
         json.dumps({str(fold): curves for fold, curves in model_result.history.items()}, indent=2)
     )
     (run_dir / "features.json").write_text(
-        json.dumps({"feature_cols": FEATURE_COLS, "target": "label", "config_hash": config_hash}, indent=2)
+        json.dumps({"feature_cols": feature_cols, "target": "label", "config_hash": config_hash}, indent=2)
     )
     (run_dir / "manifest.json").write_text(
         json.dumps(
@@ -288,7 +375,7 @@ def train(
                 "train_days": {"first": days[0], "last": days[-1], "count": len(days)},
                 "n_splits": n_splits,
                 "embargo": embargo,
-                "label": {"kind": LABEL_KIND, "vol_window": LABEL_VOL_WINDOW},
+                "label": {"kind": LABEL_KIND, "vol_window": spec.label_vol_window},
                 "rank_features": RANK_FEATURES,
                 "metrics": metrics,
             },
@@ -321,9 +408,9 @@ def train(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a forecasting model against the local corpus.")
-    parser.add_argument("--target", default="dir", choices=["dir", "vrp"])
-    parser.add_argument("--horizon", type=int, default=5)
-    parser.add_argument("--n-splits", type=int, default=4)
+    parser.add_argument("--target", default="dir", choices=sorted([*TARGETS, "vrp"]))
+    parser.add_argument("--horizon", type=int, default=None)
+    parser.add_argument("--n-splits", type=int, default=None)
     parser.add_argument("--embargo", type=int, default=2)
     parser.add_argument("--min-train-days", type=int, default=None)
     parser.add_argument(

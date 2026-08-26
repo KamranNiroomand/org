@@ -347,6 +347,47 @@ def read_all_quotes() -> pl.DataFrame:
     )
 
 
+def read_doc_mentions() -> pl.DataFrame:
+    """Every per-ticker news mention with its document's timestamp and
+    classification — the raw material for the news feature panel.
+
+    One scan, like `read_all_quotes`, because the panel builder wants the
+    whole corpus partitioned its own way. Sentiment is the vendor's
+    per-ticker read (positive/negative/neutral, null for EDGAR filings);
+    `published_at` is the vendor's publication instant in UTC, and what
+    trading day that instant belongs to is deliberately NOT decided here
+    — after-close news belongs to the *next* session, and that stamping
+    (with its leakage consequences) lives with the feature builder that
+    owns the trading calendar.
+    """
+    schema = {
+        "underlying": pl.Utf8,
+        "published_at": pl.Utf8,
+        "sentiment": pl.Utf8,
+        "event_type": pl.Utf8,
+        "source": pl.Utf8,
+    }
+    query = """
+        SELECT m.underlying, d.published_at, m.sentiment, d.event_type, d.source
+        FROM doc_mentions m
+        JOIN documents d ON d.id = m.document_id
+    """
+    with reading() as conn:
+        rows = conn.execute(query).fetchall()
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(
+        {
+            "underlying": [r["underlying"] for r in rows],
+            "published_at": [r["published_at"] for r in rows],
+            "sentiment": [r["sentiment"] for r in rows],
+            "event_type": [r["event_type"] for r in rows],
+            "source": [r["source"] for r in rows],
+        },
+        schema=schema,
+    )
+
+
 def read_risk_free_curve(day: str) -> list[tuple[int, float]]:
     """The published curve on or before `day`, as (tenor_days, rate) pairs.
 
