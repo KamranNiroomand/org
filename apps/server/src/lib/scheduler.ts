@@ -21,6 +21,7 @@ import { snapshotMarketDb } from '../db/market/snapshot.js';
 import { marketDb } from '../db/market/index.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { syncBars } from './options/barsSync.js';
+import { syncFundamentals } from './options/fundamentalsSync.js';
 import { isRunner } from './options/role.js';
 import { markOpenPositions, computeDailyEquity } from './paper.js';
 import { registerModelRun } from './options/modelRegistry.js';
@@ -605,6 +606,17 @@ export async function runOptionsCapture(
       `Options: ${summary.quotesWritten} quotes across ${summary.symbolsDone} symbols, ` +
         `${summary.liquidWritten} tradeable, ${summary.pricedWritten} priced`,
     );
+
+    // Fundamentals accrual — see fundamentalsSync.ts. After the chains,
+    // because the chains are the irreplaceable part and this is a dozen
+    // Yahoo batches; a failure costs one day of a slowly-growing dataset,
+    // never the night.
+    try {
+      const f = await syncFundamentals();
+      log.info(`Fundamentals: ${f.written} snapshots for ${f.day}`);
+    } catch (err) {
+      result.errors.push(`Fundamentals: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     // Right after capture, so a position opened today is marked against
     // tonight's own quotes rather than waiting for tomorrow's job — the
