@@ -53,7 +53,7 @@ from .db import (
     read_quotes,
     read_risk_free_curve,
 )
-from .features import build_feature_panel
+from .features import NEWS_FEATURE_COLS, build_feature_panel
 from .pricing import norm_cdf
 from .screens import screen_quotes
 from .har import InsufficientHistory, forecast_vol_by_symbol
@@ -517,7 +517,15 @@ def resolve_model(base_dir: Path | None = None, target: str = "dir") -> ModelCho
     elif reason is None:
         reason = f"no {target} model is promoted"
 
-    newest = max(candidates, key=lambda d: (d / "manifest.json").stat().st_mtime)
+    # The fallback must stay inside the requested target: run dirs embed
+    # "-{target}-h" in their names, and picking the globally newest
+    # artifact once served a 126-day stock model to a caller that asked
+    # for the 21-day one — same shape as the champion bug PR #53 fixed,
+    # one layer down.
+    of_target = [d for d in candidates if f"-{target}-h" in d.name]
+    if not of_target:
+        raise SystemExit(f"No trained model exists for target {target!r} under {base}.")
+    newest = max(of_target, key=lambda d: (d / "manifest.json").stat().st_mtime)
     return ModelChoice(directory=newest, run_id=newest.name, source="newest", fallback_reason=reason)
 
 
@@ -531,7 +539,7 @@ def _forecast_inputs(
     model_dir: Path,
     vol_window: int,
     force: bool,
-) -> tuple[dict[str, float], dict[str, float], list[tuple[int, float]], dict]:
+) -> tuple[dict[str, float], dict[str, float], list[tuple[int, float]], dict, dict[str, float]]:
     """Everything both `rank_day` (every gate-passing contract) and
     `score_held_contracts` (specific, already-held contracts) need before
     they can price anything: a per-symbol drift forecast, a per-symbol
@@ -567,6 +575,21 @@ def _forecast_inputs(
         raise SystemExit("No bars in market.db.")
 
     all_features = build_feature_panel(bars).filter(pl.col("day") <= trading_day)
+    # A model trained with news columns must be scored with them — the
+    # manifest's feature list is the single statement of what the model
+    # eats, so the join is keyed off it rather than off a target name.
+    if any(c in feature_cols for c in NEWS_FEATURE_COLS):
+        from .features import news_feature_panel
+
+        news = news_feature_panel()
+        if news.height > 0:
+            all_features = all_features.join(news, on=["symbol", "day"], how="left")
+        else:
+            for c in NEWS_FEATURE_COLS:
+                if c in feature_cols:
+                    all_features = all_features.with_columns(
+                        pl.lit(None, dtype=pl.Float64).alias(c)
+                    )
     # Preprocessing must mirror training exactly, and the manifest is the
     # single source of what that was — a model trained on per-day feature
     # ranks scored on raw levels (or vice versa) is garbage that still
@@ -597,18 +620,23 @@ def _forecast_inputs(
             row["symbol"]: row["realized_vol"] * (horizon / TRADING_DAYS_PER_YEAR) ** 0.5
             for row in vols.sort("day").group_by("symbol", maintain_order=True).last().iter_rows(named=True)
         }
-        drift_by_symbol = {
-            row["symbol"]: _annualize_horizon_return(
-                float(pred) * latest_sigma[row["symbol"]], horizon
-            )
+        horizon_ret_by_symbol = {
+            row["symbol"]: float(pred) * latest_sigma[row["symbol"]]
             for row, pred in zip(latest_features.iter_rows(named=True), predicted)
             if row["symbol"] in latest_sigma and latest_sigma[row["symbol"]] > 0
         }
     else:
-        drift_by_symbol = {
-            row["symbol"]: _annualize_horizon_return(float(pred), horizon)
+        horizon_ret_by_symbol = {
+            row["symbol"]: float(pred)
             for row, pred in zip(latest_features.iter_rows(named=True), predicted)
         }
+    # The clamped annualized drift feeds option pricing; the raw horizon
+    # return keeps full resolution for per-symbol *ranking* — the clamp
+    # once flattened a whole stock ranking into ties, and ties sort
+    # alphabetically, which this project has already been burned by.
+    drift_by_symbol = {
+        sym: _annualize_horizon_return(r, horizon) for sym, r in horizon_ret_by_symbol.items()
+    }
 
     # A volatility *forecast*, not a volatility measurement carried flat.
     # See har.py: realized vol mean-reverts, so extrapolating the trailing
@@ -648,7 +676,7 @@ def _forecast_inputs(
     if not rate_curve:
         raise SystemExit(f"No risk-free rate curve on or before {trading_day}.")
 
-    return drift_by_symbol, vol_by_symbol, rate_curve, manifest
+    return drift_by_symbol, vol_by_symbol, rate_curve, manifest, horizon_ret_by_symbol
 
 
 def rank_day(
@@ -683,7 +711,7 @@ def rank_day(
     inclusive; `None` disables that end (the Signal Board wants the whole
     board, unfiltered).
     """
-    drift_by_symbol, vol_by_symbol, rate_curve, _manifest = _forecast_inputs(
+    drift_by_symbol, vol_by_symbol, rate_curve, _manifest, _raw = _forecast_inputs(
         trading_day, model_dir, vol_window, force
     )
 
@@ -1022,7 +1050,7 @@ def score_held_contracts(
     "no current view could be computed" (contract expired, no quote today,
     no rate for its DTE), not "this position is fine".
     """
-    drift_by_symbol, vol_by_symbol, rate_curve, _manifest = _forecast_inputs(
+    drift_by_symbol, vol_by_symbol, rate_curve, _manifest, _raw = _forecast_inputs(
         trading_day, model_dir, vol_window, force
     )
 
@@ -1097,6 +1125,52 @@ def score_held_contracts(
             results[scored.occ_symbol] = scored
 
     return results
+
+
+def stock_rank(
+    trading_day: str,
+    target: str = "stk_short",
+    top: int = 25,
+    model_dir: Path | None = None,
+) -> list[dict]:
+    """Per-SYMBOL forecast ranking — the stock engine's answer to 'what
+    should I buy', before any option ever enters the picture.
+
+    Thin on purpose: `_forecast_inputs` already produces the per-symbol
+    drift and vol dictionaries for whichever champion the registry holds
+    for `target`; this orders them. `score` is the model's raw sigma-unit
+    prediction re-expressed as the horizon return, and `annual_drift` is
+    the same number annualized — the ranking key. Always `force=True`
+    because both stock targets are unproven by construction at this
+    corpus depth (stk_long has ONE independent validation period on two
+    years of bars); the serving gate for stocks is the caller's banner
+    and entry policy, not a refusal here that would leave the dashboard
+    permanently blank.
+    """
+    choice = resolve_model(model_dir, target=target)
+    drift_by_symbol, vol_by_symbol, _curve, manifest, raw_by_symbol = _forecast_inputs(
+        trading_day, choice.directory, DEFAULT_VOL_WINDOW, force=True
+    )
+    # Ranked on the RAW horizon-return prediction, never the clamped
+    # annualized drift: the clamp exists to keep option pricing sane, and
+    # under it a strong day's whole top decile ties — and ties sort
+    # alphabetically.
+    ranked = sorted(raw_by_symbol.items(), key=lambda kv: kv[1], reverse=True)
+    horizon = manifest["horizon"]
+    out = []
+    for rank_pos, (symbol, horizon_return) in enumerate(ranked[: max(1, top)], start=1):
+        out.append(
+            {
+                "symbol": symbol,
+                "rank": rank_pos,
+                "horizon_return": horizon_return,
+                "annual_drift": drift_by_symbol.get(symbol),
+                "forecast_vol": vol_by_symbol.get(symbol),
+                "model_run_id": manifest["run_id"],
+                "horizon_days": horizon,
+            }
+        )
+    return out
 
 
 def main() -> None:

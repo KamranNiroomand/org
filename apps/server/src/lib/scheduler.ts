@@ -706,7 +706,13 @@ export async function runOptionsCapture(
  */
 let retraining = false;
 
-const TARGETS: ReadonlyArray<{ target: string; horizon: number }> = [{ target: 'dir', horizon: 5 }];
+const TARGETS: ReadonlyArray<{ target: string; horizon: number }> = [
+  { target: 'dir', horizon: 5 },
+  // The stock engine's two horizons — see TARGETS in
+  // services/quant/app/train.py for what each configuration is.
+  { target: 'stk_short', horizon: 21 },
+  { target: 'stk_long', horizon: 126 },
+];
 
 const here = dirname(fileURLToPath(import.meta.url));
 // scheduler.ts lives at apps/server/src/lib/ — four levels up is the repo

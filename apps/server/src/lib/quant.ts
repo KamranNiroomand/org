@@ -366,6 +366,69 @@ export interface ModelPerformance {
   loss_curve: Record<string, { train?: number[]; validation?: number[] }>;
 }
 
+export interface StockPick {
+  symbol: string;
+  rank: number;
+  horizonReturn: number;
+  annualDrift: number | null;
+  forecastVol: number | null;
+}
+
+export interface StockRankResult {
+  modelRunId: string;
+  target: string;
+  horizonDays: number;
+  picks: StockPick[];
+}
+
+/** Per-symbol forecast ranking from the stock engine — POST /stock/rank. */
+export async function stockRank(
+  day: string,
+  target: 'stk_short' | 'stk_long',
+  top = 25,
+): Promise<StockRankResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/stock/rank`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ day, target, top }),
+      signal: AbortSignal.timeout(120_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (res.status === 409) {
+    const body = (await res.json()) as { detail: string };
+    throw new QuantRefusal(body.detail);
+  }
+  if (!res.ok) throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  const body = (await res.json()) as {
+    model_run_id: string;
+    target: string;
+    horizon_days: number;
+    picks: Array<{
+      symbol: string;
+      rank: number;
+      horizon_return: number;
+      annual_drift: number | null;
+      forecast_vol: number | null;
+    }>;
+  };
+  return {
+    modelRunId: body.model_run_id,
+    target: body.target,
+    horizonDays: body.horizon_days,
+    picks: body.picks.map((p) => ({
+      symbol: p.symbol,
+      rank: p.rank,
+      horizonReturn: p.horizon_return,
+      annualDrift: p.annual_drift,
+      forecastVol: p.forecast_vol,
+    })),
+  };
+}
+
 export async function modelPerformance(target = 'dir', run?: string): Promise<ModelPerformance> {
   let res: Response;
   const query = new URLSearchParams({ target });

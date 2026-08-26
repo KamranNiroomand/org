@@ -45,7 +45,7 @@ def forward_return(bars: pl.DataFrame, horizon: int) -> pl.DataFrame:
 
 
 def vol_scaled_forward_return(
-    bars: pl.DataFrame, horizon: int, vol_window: int = 21
+    bars: pl.DataFrame, horizon: int, vol_window: int = 21, sigma_clip: float = 10.0
 ) -> pl.DataFrame:
     """`forward_return` divided by the symbol's own trailing volatility over
     the horizon — the return in *sigma units*, stamped on day `t`.
@@ -85,9 +85,22 @@ def vol_scaled_forward_return(
     joined = raw.join(vols, on=["symbol", "day"], how="inner").with_columns(
         (pl.col("realized_vol") * scale).alias("label_sigma_h")
     )
+    # Winsorized at ±sigma_clip. Found live: one near-flat symbol
+    # (trailing sigma 0.03) followed by a ~13x re-listing move produced a
+    # 443-sigma label — a single row contributing ~200,000x a typical
+    # row's squared loss, which the regressor dutifully memorized and
+    # projected onto every symbol resembling it. A genuine 10-sigma
+    # forward move is already beyond anything a direction model can claim
+    # to have predicted; past it, magnitude is noise about data quality,
+    # not about the market. The standard cross-sectional practice
+    # (winsorizing extreme labels) expressed in the label's own units.
     return (
         joined.filter(pl.col("label_sigma_h") > 0)
-        .with_columns((pl.col(label_col) / pl.col("label_sigma_h")).alias(label_col))
+        .with_columns(
+            (pl.col(label_col) / pl.col("label_sigma_h"))
+            .clip(-sigma_clip, sigma_clip)
+            .alias(label_col)
+        )
         .select(["symbol", "day", label_col, "label_sigma_h"])
     )
 
