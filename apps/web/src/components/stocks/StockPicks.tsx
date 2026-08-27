@@ -102,7 +102,10 @@ function PositionRow({ order }: { order: StockOrderRow }) {
         {order.quantity.toFixed(3)} @ {usd(order.entryPriceE4)}
       </span>
       {order.stopPriceE4 !== null && order.status === 'open' && (
-        <span className="tnum text-muted">stop {usd(order.stopPriceE4)}</span>
+        <span className="tnum text-negative">stop {usd(order.stopPriceE4)}</span>
+      )}
+      {order.targetPriceE4 !== null && order.status === 'open' && (
+        <span className="tnum text-positive">target {usd(order.targetPriceE4)}</span>
       )}
       {order.targetExitDate !== null && order.status === 'open' && (
         <span className="text-muted">by {order.targetExitDate}</span>
