@@ -45,6 +45,7 @@ from .features import (
     news_feature_panel,
     option_feature_panel,
     rank_features_per_day,
+    sector_feature_panel,
 )
 from .labels import direction_bucket, forward_return, vol_scaled_forward_return
 from .metrics import ic_summary, information_coefficient, rmse
@@ -221,6 +222,12 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
     # for the coverage threshold and the trial-count cost.
     features = build_feature_panel(bars, option_panel=option_feature_panel())
     if spec.include_news:
+        # Sector spillover rides along with the news panel — same left
+        # join, same not-yet-in-FEATURE_COLS status, same reasoning: see
+        # SECTOR_FEATURE_COLS in features.py.
+        sector = sector_feature_panel(bars)
+        if sector.height > 0:
+            features = features.join(sector, on=["symbol", "day"], how="left")
         news = news_feature_panel()
         if news.height > 0:
             # Left, same reasoning as the option panel: news coverage is

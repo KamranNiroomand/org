@@ -77,3 +77,41 @@ class TestColumns:
             "news_sent_net_5d",
             "news_sent_net_21d",
         ]
+
+
+class TestSectorSpillover:
+    def _bars(self) -> pl.DataFrame:
+        rows = []
+        for sym, drift in (("A1", 0.01), ("A2", 0.03), ("A3", -0.01), ("B1", 0.0)):
+            close = 100.0
+            for i in range(30):
+                close *= 1 + drift
+                rows.append({
+                    "symbol": sym, "day": f"2026-07-{1 + i:02d}",
+                    "open": close, "high": close, "low": close,
+                    "close": close, "adj_close": close, "volume": 1000,
+                })
+        return pl.DataFrame(rows)
+
+    def test_the_aggregate_is_leave_one_out(self, monkeypatch) -> None:
+        import app.features as F
+        import math
+
+        monkeypatch.setattr("app.db.read_symbol_sectors",
+                            lambda: {"A1": "Tech", "A2": "Tech", "A3": "Tech", "B1": "Energy"})
+        monkeypatch.setattr(F, "news_feature_panel", lambda: pl.DataFrame(
+            schema={"symbol": pl.Utf8, "day": pl.Utf8,
+                    **{c: pl.Float64 for c in F.NEWS_FEATURE_COLS}}))
+        F._sector_panel_cache.clear()
+        panel = F.sector_feature_panel(self._bars())
+
+        # A1's sector pulse is the mean of A2 and A3's log returns — its
+        # own +1% drift must not appear in its own neighbourhood.
+        row = panel.filter((pl.col("symbol") == "A1") & (pl.col("day") == "2026-07-30"))
+        expected_daily = (math.log(1.03) + math.log(0.99)) / 2
+        assert row["sector_mom_5d"][0] == pytest.approx(5 * expected_daily, rel=1e-9)
+
+        # B1 is alone in Energy: no neighbourhood, no row — never a
+        # self-referential pulse of one.
+        assert panel.filter(pl.col("symbol") == "B1").height == 0
+        F._sector_panel_cache.clear()

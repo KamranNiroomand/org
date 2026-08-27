@@ -74,6 +74,55 @@ export function buildSymbolContext(symbol: string): SymbolContext | null {
         .limit(MAX_RECENT_DOCUMENTS)
         .all();
 
+  // The sector's largest peers, self excluded. Capped at 40 by market
+  // cap: the IT sector alone holds ~2,000 instruments and an average
+  // over illiquid micro-caps would bury the signal the field exists to
+  // carry — what the names that *set* the sector's tone did today.
+  let sectorPulse: SymbolContext['sectorPulse'] = null;
+  if (row.sector) {
+    const peers = db
+      .select({
+        symbol: instruments.symbol,
+        dayChangePercent: instruments.dayChangePercent,
+        marketCap: instruments.marketCap,
+      })
+      .from(instruments)
+      .where(sql`${instruments.sector} = ${row.sector} and ${instruments.symbol} != ${symbol} and ${instruments.marketCap} is not null`)
+      .orderBy(desc(instruments.marketCap))
+      .limit(40)
+      .all();
+    const moved = peers.filter((p) => p.dayChangePercent !== null);
+    if (moved.length > 0) {
+      const avg = moved.reduce((a, p) => a + p.dayChangePercent!, 0) / moved.length;
+      const biggest = moved.reduce((a, p) =>
+        Math.abs(p.dayChangePercent!) > Math.abs(a.dayChangePercent!) ? p : a,
+      );
+      const cutoff = new Date(Date.now() - 48 * 3_600_000).toISOString();
+      const peerVendor = moved.slice(0, 40).map((p) => toVendorSymbol(p.symbol));
+      const events = marketDb
+        .select({
+          symbol: docMentions.underlying,
+          title: documents.title,
+          eventType: documents.eventType,
+        })
+        .from(docMentions)
+        .innerJoin(documents, eq(docMentions.documentId, documents.id))
+        .where(
+          sql`${docMentions.underlying} in ${peerVendor} and ${documents.publishedAt} >= ${cutoff} and ${documents.eventType} is not null and ${documents.eventType} != 'other'`,
+        )
+        .orderBy(desc(documents.publishedAt))
+        .limit(3)
+        .all();
+      sectorPulse = {
+        sector: row.sector,
+        peerCount: moved.length,
+        avgDayChangePercent: avg,
+        biggestMover: { symbol: biggest.symbol, dayChangePercent: biggest.dayChangePercent! },
+        recentSectorEvents: events,
+      };
+    }
+  }
+
   return {
     symbol: row.symbol,
     name: row.name,
@@ -88,6 +137,7 @@ export function buildSymbolContext(symbol: string): SymbolContext | null {
     fiftyTwoWeekHigh: row.fiftyTwoWeekHigh,
     fiftyTwoWeekLow: row.fiftyTwoWeekLow,
     volume: row.volume,
+    sectorPulse,
     avgVolume10Day: row.avgVolume10Day,
     holding: held ? { quantity: held.quantity, avgCost: held.avgCost, currency: held.currency } : null,
     radar: radarRow

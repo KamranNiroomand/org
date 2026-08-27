@@ -347,6 +347,21 @@ def read_all_quotes() -> pl.DataFrame:
     )
 
 
+def read_symbol_sectors() -> dict[str, str]:
+    """Symbol -> sector for the tracked *companies*. ETF pseudo-sectors
+    ('ETF / broad' and kin) are excluded on purpose: a sector spillover
+    feature asks "what happened to businesses like this one", and a fund
+    is not a business — including SOXL in 'ETF / leveraged' would just
+    hand every leveraged fund the same self-referential pulse.
+    """
+    with reading() as conn:
+        rows = conn.execute(
+            "SELECT symbol, sector FROM tracked_underlyings "
+            "WHERE sector IS NOT NULL AND sector NOT LIKE 'ETF%'"
+        ).fetchall()
+    return {r["symbol"]: r["sector"] for r in rows}
+
+
 def read_doc_mentions() -> pl.DataFrame:
     """Every per-ticker news mention with its document's timestamp and
     classification — the raw material for the news feature panel.
