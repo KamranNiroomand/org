@@ -366,6 +366,21 @@ export async function runStockCycle(
     }
   }
 
+  // Only classified companies reach the panel — the same rule entries
+  // apply. Sending ETFs was paying for four specialist calls and a
+  // synthesis about an instrument the engine would reject anyway, and
+  // it marked every run 'partial' on a failure that was really a
+  // category error ("SOXL: not found in instruments").
+  const classified = new Set(
+    db
+      .select({ symbol: instruments.symbol })
+      .from(instruments)
+      .where(inArray(instruments.symbol, [...shortlist]))
+      .all()
+      .map((r) => r.symbol),
+  );
+  for (const s of [...shortlist]) if (!classified.has(s)) shortlist.delete(s);
+
   if (shortlist.size > 0 && config.anthropic.configured) {
     const runId = startPanelRun({
       trigger: 'stock_picks',
@@ -373,7 +388,13 @@ export async function runStockCycle(
       resolutionMethod: 'model_shortlist',
       symbols: [...shortlist],
     });
-    const deadline = Date.now() + 6 * 60_000;
+    // Twenty minutes, not six. A real run over ~15 symbols takes twelve
+    // to fifteen — four specialists twice plus a synthesis apiece — and
+    // a six-minute deadline meant entries fired on half-formed stances:
+    // ERIE was bought at a placeholder while its finished verdict was
+    // 'not_notable'. The deadline exists so an LLM outage cannot halt
+    // the strategy, not so a healthy panel gets cut off mid-sentence.
+    const deadline = Date.now() + 20 * 60_000;
     for (;;) {
       const row = db.select().from(panelRuns).where(eq(panelRuns.id, runId)).get();
       if (!row || row.status !== 'running') break;
