@@ -1127,6 +1127,15 @@ def score_held_contracts(
     return results
 
 
+#: (trading day, target, champion run id) -> the full ranked board.
+#: Rebuilding it costs ~20s — the whole two-year feature panel is
+#: recomputed from bars — and a board is a *daily* quantity: it cannot
+#: change until either the corpus or the serving model does, both of
+#: which move the key. Without this the picks view spent twenty seconds
+#: on every poll re-deriving a number it had already derived.
+_stock_rank_cache: dict[tuple[str, str, str], list[dict]] = {}
+
+
 def stock_rank(
     trading_day: str,
     target: str = "stk_short",
@@ -1148,6 +1157,11 @@ def stock_rank(
     permanently blank.
     """
     choice = resolve_model(model_dir, target=target)
+    cache_key = (trading_day, target, choice.run_id)
+    cached = _stock_rank_cache.get(cache_key)
+    if cached is not None:
+        return cached[: max(1, top)]
+
     drift_by_symbol, vol_by_symbol, _curve, manifest, raw_by_symbol = _forecast_inputs(
         trading_day, choice.directory, DEFAULT_VOL_WINDOW, force=True
     )
@@ -1165,7 +1179,7 @@ def stock_rank(
     # separately. (The options ranker keeps the return-based drift: an
     # option pricer needs an actual drift, not a z-score.)
     horizon = manifest["horizon"]
-    ranked = sorted(
+    ranked_all = sorted(
         raw_by_symbol.items(),
         key=lambda kv: (
             kv[1] / (vol_by_symbol[kv[0]] * math.sqrt(horizon / 252.0))
@@ -1175,7 +1189,9 @@ def stock_rank(
         reverse=True,
     )
     out = []
-    for rank_pos, (symbol, horizon_return) in enumerate(ranked[: max(1, top)], start=1):
+    # Built and cached whole, sliced per request: a caller asking for the
+    # top 5 must not poison the cache for one asking for 25.
+    for rank_pos, (symbol, horizon_return) in enumerate(ranked_all, start=1):
         vol = vol_by_symbol.get(symbol)
         sigma_h = vol * math.sqrt(horizon / 252.0) if vol else None
         out.append(
@@ -1197,7 +1213,9 @@ def stock_rank(
                 "horizon_days": horizon,
             }
         )
-    return out
+    _stock_rank_cache.clear()  # one board at a time; never an unbounded map
+    _stock_rank_cache[cache_key] = out
+    return out[: max(1, top)]
 
 
 def main() -> None:
