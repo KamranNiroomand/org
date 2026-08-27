@@ -148,6 +148,19 @@ const schema = z.object({
   // to exercise the whole path; a production token makes them real-time.
   TRADIER_API_KEY: z.string().optional(),
   TRADIER_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
+  // The stock paper book's own capital, separate from the options book's.
+  // $50k combined across both horizons: 40% to the short book (faster
+  // turnover, more slots), 60% to the long book (fewer, larger, held
+  // for months).
+  STOCK_PAPER_STARTING_BALANCE_USD: z.coerce.number().positive().default(50_000),
+  STOCK_SHORT_ALLOCATION_PCT: z.coerce.number().min(0).max(1).default(0.4),
+  STOCK_SHORT_MAX_POSITIONS: z.coerce.number().int().positive().default(8),
+  STOCK_LONG_MAX_POSITIONS: z.coerce.number().int().positive().default(6),
+  STOCK_MAX_NEW_PER_DAY: z.coerce.number().int().positive().default(3),
+  // The A/B/C-incident lesson, generalized: a ranked list can be
+  // legitimately full of one sector, and a book that takes it becomes a
+  // single bet wearing eight names.
+  STOCK_MAX_PER_SECTOR: z.coerce.number().int().positive().default(2),
   PAPER_SPREAD_HAIRCUT_PCT: z.coerce.number().min(0).max(0.2).default(0.03),
   PAPER_SPREAD_HAIRCUT_MIN_E4: z.coerce.number().int().min(0).default(500),
   // Artificial starting balance for the paper book, in whole dollars.
@@ -370,6 +383,14 @@ export const config = {
     spreadHaircutMinE4: env.PAPER_SPREAD_HAIRCUT_MIN_E4,
     /** E4 — same unit as every other dollar figure in this database. */
     paperStartingBalanceE4: Math.round(env.PAPER_STARTING_BALANCE_USD * 10_000),
+    stockPaperStartingBalanceE4: Math.round(env.STOCK_PAPER_STARTING_BALANCE_USD * 10_000),
+    stockBook: {
+      shortAllocationPct: env.STOCK_SHORT_ALLOCATION_PCT,
+      shortMaxPositions: env.STOCK_SHORT_MAX_POSITIONS,
+      longMaxPositions: env.STOCK_LONG_MAX_POSITIONS,
+      maxNewPerDay: env.STOCK_MAX_NEW_PER_DAY,
+      maxPerSector: env.STOCK_MAX_PER_SECTOR,
+    },
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
     edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,
     /** See the AUTO_ENTRY_* block above and autoEntry.ts. */

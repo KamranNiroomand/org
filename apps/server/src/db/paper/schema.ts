@@ -50,6 +50,78 @@ import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-or
  * moves directly from `open` to `closed`, and that lifecycle is the entire
  * state that matters.
  */
+/**
+ * The stock paper book — a separate table from `paperOrders`, not a
+ * discriminated column on it.
+ *
+ * A stock position and an option position share almost nothing at the
+ * storage layer: no OCC symbol, no contract multiplier, fractional
+ * quantities rather than whole contracts, and an exit cadence measured
+ * in days-to-months rather than the options engine's fifteen minutes.
+ * Folding them together would make half of every row null and — worse —
+ * would put stock rows in front of the options exit engine's query,
+ * where a 15-minute rulebook written for decaying contracts would start
+ * managing buy-and-hold equity positions. Two tables, two engines, one
+ * shared equity view.
+ *
+ * `book` splits the two horizons: 'short' (~1 month, the stk_short
+ * model) and 'long' (~6 months, stk_long). They differ in sizing, stop
+ * width, and exit rules, and mixing their performance would hide which
+ * horizon is actually working.
+ */
+export const stockOrders = sqliteTable(
+  'stock_orders',
+  {
+    id: text('id').primaryKey(),
+    symbol: text('symbol').notNull(),
+    book: text('book', { enum: ['short', 'long'] }).notNull(),
+    /** Fractional shares are legitimate here, unlike option contracts. */
+    quantity: real('quantity').notNull(),
+    initialQuantity: real('initial_quantity'),
+    entryPriceE4: integer('entry_price_e4').notNull(),
+    entryBasis: text('entry_basis', { enum: ['measured', 'modelled'] }).notNull(),
+    entryDay: text('entry_day').notNull(),
+    /** The model's own forecast at entry, for the horizon time-stop. */
+    entryForecastReturn: real('entry_forecast_return'),
+    modelRunId: text('model_run_id'),
+    /** The panel analysis that argued for this position, if any — the
+     * long book's exit rule reads its stance, so the thesis must be
+     * findable years later. */
+    thesisRef: integer('thesis_ref'),
+    sector: text('sector'),
+    stopPriceE4: integer('stop_price_e4'),
+    targetPriceE4: integer('target_price_e4'),
+    targetExitDate: text('target_exit_date'),
+    status: text('status', { enum: ['open', 'closed'] }).notNull().default('open'),
+    exitPriceE4: integer('exit_price_e4'),
+    exitBasis: text('exit_basis', { enum: ['measured', 'modelled'] }),
+    exitDay: text('exit_day'),
+    exitReason: text('exit_reason'),
+    splitFrom: text('split_from'),
+    notes: text('notes'),
+    openedAt: text('opened_at').notNull(),
+    closedAt: text('closed_at'),
+    exitUpdatedAt: text('exit_updated_at'),
+  },
+  (t) => [index('stock_orders_status_idx').on(t.status), index('stock_orders_book_idx').on(t.book)],
+);
+
+/** Daily marks for stock positions — same shape and purpose as
+ * `paperMarks`, kept separate for the same reason the orders are. */
+export const stockMarks = sqliteTable(
+  'stock_marks',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    orderId: text('order_id').notNull(),
+    asOf: text('as_of').notNull(),
+    tradingDay: text('trading_day').notNull(),
+    markPriceE4: integer('mark_price_e4').notNull(),
+    basis: text('basis', { enum: ['measured', 'modelled'] }).notNull(),
+    unrealizedPlE4: integer('unrealized_pl_e4').notNull(),
+  },
+  (t) => [uniqueIndex('stock_marks_order_day_uq').on(t.orderId, t.tradingDay)],
+);
+
 export const paperOrders = sqliteTable(
   'paper_orders',
   {
