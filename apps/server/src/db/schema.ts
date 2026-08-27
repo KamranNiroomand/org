@@ -565,11 +565,11 @@ export const panelRuns = sqliteTable(
   'panel_runs',
   {
     id: id(),
-    trigger: text('trigger', { enum: ['nightly_radar', 'box_query'] }).notNull(),
+    trigger: text('trigger', { enum: ['nightly_radar', 'box_query', 'stock_picks'] }).notNull(),
     /** Null for a radar-triggered run — there is no free-text question. */
     query: text('query'),
     resolutionMethod: text('resolution_method', {
-      enum: ['ticker_match', 'thematic_match', 'radar_shortlist'],
+      enum: ['ticker_match', 'thematic_match', 'radar_shortlist', 'model_shortlist'],
     }).notNull(),
     symbols: text('symbols', { mode: 'json' }).$type<string[]>().notNull().default([]),
     status: text('status', { enum: ['running', 'done', 'partial', 'failed'] })

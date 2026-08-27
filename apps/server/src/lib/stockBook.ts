@@ -37,7 +37,7 @@ export interface OpenStockInput {
   sector?: string | null;
   forecastReturn?: number | null;
   modelRunId?: string | null;
-  thesisRef?: number | null;
+  thesisRef?: string | null;
   stopPriceE4?: number | null;
   targetPriceE4?: number | null;
   targetExitDate?: string | null;

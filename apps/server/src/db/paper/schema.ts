@@ -87,7 +87,7 @@ export const stockOrders = sqliteTable(
     /** The panel analysis that argued for this position, if any — the
      * long book's exit rule reads its stance, so the thesis must be
      * findable years later. */
-    thesisRef: integer('thesis_ref'),
+    thesisRef: text('thesis_ref'),
     sector: text('sector'),
     stopPriceE4: integer('stop_price_e4'),
     targetPriceE4: integer('target_price_e4'),
