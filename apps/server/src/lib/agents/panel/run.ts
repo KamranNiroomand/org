@@ -128,9 +128,9 @@ function persistTurns(analysisId: string, round: 1 | 2, turns: readonly (Round1T
 }
 
 export interface StartPanelRunParams {
-  trigger: 'nightly_radar' | 'box_query';
+  trigger: 'nightly_radar' | 'box_query' | 'stock_picks';
   query: string | null;
-  resolutionMethod: 'ticker_match' | 'thematic_match' | 'radar_shortlist';
+  resolutionMethod: 'ticker_match' | 'thematic_match' | 'radar_shortlist' | 'model_shortlist';
   symbols: string[];
 }
 

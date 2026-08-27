@@ -22,6 +22,7 @@ import { marketDb } from '../db/market/index.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { syncBars } from './options/barsSync.js';
 import { syncFundamentals } from './options/fundamentalsSync.js';
+import { runStockCycle } from './stockEngine.js';
 import { isRunner } from './options/role.js';
 import { markOpenPositions, computeDailyEquity } from './paper.js';
 import { registerModelRun } from './options/modelRegistry.js';
@@ -222,6 +223,16 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
           }
         } catch (err) {
           result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // The stock engine's own daily cycle — panel reads the news for
+        // the model's best names, then each book enters and manages.
+        // Same placement logic as the options auto-entry above: whichever
+        // machine has the fresh corpus is the one that should trade it.
+        try {
+          await runStockCycle(log, tradingDay);
+        } catch (err) {
+          result.errors.push(`Stock cycle: ${err instanceof Error ? err.message : String(err)}`);
         }
       } else {
         result.errors.push(`Market sync: ${pull.message}`);

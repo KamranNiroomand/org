@@ -5,6 +5,12 @@ import { config } from '../config.js';
 import { paperDb } from '../db/paper/index.js';
 import { paperEquity, paperOrders } from '../db/paper/schema.js';
 import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct , latestMarkByOrder } from '../lib/paper.js';
+import { latestStockMarkByOrder, stockCapacity, stockEquity } from '../lib/stockBook.js';
+import { runStockCycle } from '../lib/stockEngine.js';
+import { QuantRefusal, QuantUnavailable, stockRank } from '../lib/quant.js';
+import { nyToday } from '../lib/options/positionHealth.js';
+import { stockOrders } from '../db/paper/schema.js';
+import { stancesForSymbols } from '../lib/stockEngine.js';
 import { computePositionHealth, latestCapturedTradingDay, latestPositionHealth } from '../lib/options/positionHealth.js';
 import { runExitEngine, revisionsByOrder } from '../lib/options/exitEngine.js';
 
@@ -68,6 +74,44 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
    * order also carries its latest `health` row (null until the nightly job
    * has scored it at least once) — see `positionHealth.ts`.
    */
+  /** The stock book: both horizons' positions, marks, and equity. */
+  app.get('/api/stocks/book', async () => {
+    const orders = paperDb.select().from(stockOrders).orderBy(desc(stockOrders.openedAt)).all();
+    const marks = latestStockMarkByOrder();
+    return {
+      equity: stockEquity(),
+      capacity: { short: stockCapacity('short'), long: stockCapacity('long') },
+      orders: orders.map((o) => {
+        const mark = marks.get(o.id);
+        return {
+          ...o,
+          markPriceE4: mark?.markPriceE4 ?? null,
+          markTradingDay: mark?.tradingDay ?? null,
+        };
+      }),
+    };
+  });
+
+  /** Today's ranked picks per horizon, with the panel's stance where it
+   * has one — the recommendations view, independent of what the book
+   * actually bought (slots and caps mean the two differ, on purpose). */
+  app.get<{ Querystring: { book?: string } }>('/api/stocks/picks', async (req, reply) => {
+    const book = req.query.book === 'long' ? 'long' : 'short';
+    try {
+      const ranked = await stockRank(nyToday(), book === 'long' ? 'stk_long' : 'stk_short', 15);
+      return { book, ...ranked, stances: stancesForSymbols(ranked.picks.map((p) => p.symbol)) };
+    } catch (err) {
+      if (err instanceof QuantRefusal || err instanceof QuantUnavailable) {
+        return reply.code(503).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  /** Manual trigger for the whole stock cycle — the nightly job calls
+   * the same function. */
+  app.post('/api/stocks/cycle', async (req) => runStockCycle(req.log));
+
   app.get('/api/paper/equity', async () => {
     const equity = paperDb.select().from(paperEquity).orderBy(paperEquity.day).all();
     const orders = paperDb.select().from(paperOrders).orderBy(desc(paperOrders.openedAt)).all();
