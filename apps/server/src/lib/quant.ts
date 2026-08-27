@@ -370,6 +370,9 @@ export interface StockPick {
   symbol: string;
   rank: number;
   horizonReturn: number;
+  /** The forecast in the symbol's own volatility units — the model's
+   * native output and the ranking key. See stock_rank in rank.py. */
+  forecastSigmas: number | null;
   annualDrift: number | null;
   forecastVol: number | null;
 }
@@ -411,6 +414,7 @@ export async function stockRank(
       symbol: string;
       rank: number;
       horizon_return: number;
+      forecast_sigmas: number | null;
       annual_drift: number | null;
       forecast_vol: number | null;
     }>;
@@ -423,6 +427,7 @@ export async function stockRank(
       symbol: p.symbol,
       rank: p.rank,
       horizonReturn: p.horizon_return,
+      forecastSigmas: p.forecast_sigmas,
       annualDrift: p.annual_drift,
       forecastVol: p.forecast_vol,
     })),

@@ -408,7 +408,16 @@ class TestRankDayDteBand:
     def _patch_pipeline(self, monkeypatch, contracts) -> None:
         monkeypatch.setattr(
             "app.rank._forecast_inputs",
-            lambda *a, **k: ({"TEST": 0.05}, {"TEST": 0.3}, [(30, 0.04)], {"horizon": 5}),
+            # Five values: _forecast_inputs also hands back the raw
+            # horizon-return dict the stock ranker needs at full
+            # resolution (the clamped drift ties across a strong board).
+            lambda *a, **k: (
+                {"TEST": 0.05},
+                {"TEST": 0.3},
+                [(30, 0.04)],
+                {"horizon": 5},
+                {"TEST": 0.01},
+            ),
         )
         monkeypatch.setattr("app.rank.read_quotes", lambda *a, **k: pl.DataFrame({"x": [1]}))
         # The quote screens run between read_quotes and rank_underlying now;
@@ -1095,10 +1104,23 @@ class TestModelSelection:
 
         monkeypatch.setattr("app.rank.read_champion_run", _champion)
 
-        resolve_model(base, target="vrp")
+        # With no vrp artifact on disk, resolving must *refuse* rather
+        # than fall back to the dir model sitting next to it. The
+        # newest-artifact fallback used to be target-blind, which meant a
+        # caller asking for one quantity could be served a model trained
+        # for another — the same class of bug as the unfiltered champion
+        # query below, one layer down, and now reachable for real since
+        # the stock engine registers three targets side by side.
+        with pytest.raises(SystemExit):
+            resolve_model(base, target="vrp")
 
-        # The target must reach the query; without it the filter cannot work.
+        # The target must still reach the query; without it the filter
+        # cannot work.
         assert seen == ["vrp"]
+
+        # And with an artifact of its own, the same call resolves.
+        self._artifact(base, "2026-08-24-vrp-h5-bbbbbbbbbbbb")
+        assert resolve_model(base, target="vrp").run_id == "2026-08-24-vrp-h5-bbbbbbbbbbbb"
 
     def test_a_fallback_always_says_why(self, tmp_path, monkeypatch) -> None:
         # `source` shows *that* a fallback happened; without the reason an

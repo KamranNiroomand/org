@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { formatMoney, money, parseMoney } from '@org/shared';
 import { AllocationBars, StatTile } from '../components/charts';
 import { MarketMap } from '../components/MarketMap';
+import { StockPicks } from '../components/stocks/StockPicks';
 import { OptionsTab } from '../components/options/OptionsTab';
 import { RealEstateTab } from '../components/realestate/RealEstateTab';
 import { WatchlistTab } from '../components/watchlist/WatchlistTab';
@@ -24,14 +25,6 @@ const TABS: Array<[Tab, string]> = [
 ];
 
 /** Reserved so the shell is right; screener isn't built yet. */
-function Placeholder({ title, hint }: { title: string; hint: string }) {
-  return (
-    <Card className="overflow-hidden">
-      <Empty icon={<TrendingUp className="size-7" />} title={title} hint={hint} />
-    </Card>
-  );
-}
-
 export function InvestmentsPage() {
   const [tab, setTab] = useState<Tab>('market');
   const { baseCurrency } = useSettings();
@@ -125,12 +118,7 @@ export function InvestmentsPage() {
 
         {tab === 'realestate' && <RealEstateTab />}
 
-        {tab === 'screener' && (
-          <Placeholder
-            title="Screener"
-            hint="Reserved for saved filters across the index — value, yield, growth. Not built yet."
-          />
-        )}
+        {tab === 'screener' && <StockPicks />}
 
         {tab === 'portfolio' && (
           <>

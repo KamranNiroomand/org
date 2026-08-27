@@ -222,10 +222,21 @@ export async function runStockEntries(
       modelRunId,
       thesisRef: stance?.id ?? null,
       stopPriceE4: Math.round(priceE4 * (1 - stopPct)),
-      targetPriceE4: Math.round(priceE4 * (1 + Math.max(0.05, pick.horizonReturn))),
+      // The target is a volatility distance, not the model's own
+      // forecast magnitude. At this IC the ordering may carry
+      // information while the magnitude does not — deriving a target
+      // from a 5-sigma outlier prediction once set a 21-day price
+      // objective 2.7x above entry, which then pushed the breakeven
+      // ratchet's halfway mark out of reach. Two sigma up against a
+      // 1.5-sigma stop is the asymmetry the position is actually taken
+      // for.
+      targetPriceE4: Math.round(
+        priceE4 * (1 + (book === 'short' ? 2 : 3) * (pick.forecastVol ?? 0.3) * Math.sqrt(horizonDays / 252)),
+      ),
       targetExitDate: targetExit,
       notes:
-        `Rank ${pick.rank} of the ${target} board: forecast ${(pick.horizonReturn * 100).toFixed(1)}% ` +
+        `Rank ${pick.rank} of the ${target} board: forecast ` +
+        `${pick.forecastSigmas !== null ? `${pick.forecastSigmas.toFixed(2)} sigma` : 'n/a'} ` +
         `over ${horizonDays} trading days, stop ${(stopPct * 100).toFixed(0)}% ` +
         `(${book === 'short' ? 1.5 : 3} sigma). ` +
         (stance ? `Panel: ${stance.stance}.` : 'Panel: no stance today.'),
