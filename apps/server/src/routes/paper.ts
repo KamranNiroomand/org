@@ -6,7 +6,7 @@ import { paperDb } from '../db/paper/index.js';
 import { paperEquity, paperOrders } from '../db/paper/schema.js';
 import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct , latestMarkByOrder } from '../lib/paper.js';
 import { latestStockMarkByOrder, stockCapacity, stockEquity } from '../lib/stockBook.js';
-import { runStockCycle } from '../lib/stockEngine.js';
+import { runStockCycle, runStockExits } from '../lib/stockEngine.js';
 import { QuantRefusal, QuantUnavailable, stockRank } from '../lib/quant.js';
 import { nyToday } from '../lib/options/positionHealth.js';
 import { stockOrders } from '../db/paper/schema.js';
@@ -111,6 +111,12 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
   /** Manual trigger for the whole stock cycle — the nightly job calls
    * the same function. */
   app.post('/api/stocks/cycle', async (req) => runStockCycle(req.log));
+
+  /** The exit pass alone — mark every position and apply the books'
+   * rules, with no panel run and so no LLM cost or wait. The full cycle
+   * calls the same function; this exists because managing open risk
+   * should never be gated on an LLM being available or fast. */
+  app.post('/api/stocks/exits', async (req) => runStockExits(req.log));
 
   app.get('/api/paper/equity', async () => {
     const equity = paperDb.select().from(paperEquity).orderBy(paperEquity.day).all();
