@@ -233,7 +233,20 @@ export interface StockBookResponse {
   orders: StockOrderRow[];
 }
 
+export interface StockDecision {
+  id: number;
+  day: string;
+  book: 'short' | 'long';
+  symbol: string;
+  decision: string;
+  reason: string;
+  detail: Record<string, unknown>;
+  panelStance: string | null;
+  createdAt: string;
+}
+
 export const stocksApi = {
+  decisions: () => api.get<{ day: string; decisions: StockDecision[] }>('/api/stocks/decisions'),
   picks: (book: 'short' | 'long') =>
     api.get<StockPicksResponse>(`/api/stocks/picks?book=${book}`),
   book: () => api.get<StockBookResponse>('/api/stocks/book'),

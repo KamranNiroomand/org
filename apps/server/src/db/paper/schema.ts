@@ -106,6 +106,44 @@ export const stockOrders = sqliteTable(
   (t) => [index('stock_orders_status_idx').on(t.status), index('stock_orders_book_idx').on(t.book)],
 );
 
+/**
+ * Every decision the stock engine reaches, kept.
+ *
+ * The engine already returns its rejections to whoever called it — and
+ * that answer used to die with the HTTP response, which meant the
+ * nightly run's reasoning existed for nobody. The questions this table
+ * answers are the ones a person actually asks days later: why was that
+ * name not bought, was the sector cap or the panel the binding
+ * constraint, how often does the LLM veto the model, was a position sold
+ * on its stop or on a broken thesis.
+ *
+ * `detail` carries the numbers behind the reason — the sector at its
+ * cap, the forecast, the slot count — so a row explains itself without
+ * a reader having to reconstruct that day's state.
+ */
+export const stockDecisions = sqliteTable(
+  'stock_decisions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    day: text('day').notNull(),
+    book: text('book', { enum: ['short', 'long'] }).notNull(),
+    symbol: text('symbol').notNull(),
+    decision: text('decision', {
+      enum: ['opened', 'rejected', 'skipped', 'held', 'exited', 'marked', 'stop_raised'],
+    }).notNull(),
+    reason: text('reason').notNull(),
+    detail: text('detail', { mode: 'json' }).$type<Record<string, unknown>>().notNull().default({}),
+    modelRunId: text('model_run_id'),
+    panelStance: text('panel_stance'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    index('stock_decisions_day_idx').on(t.day),
+    index('stock_decisions_symbol_idx').on(t.symbol),
+    index('stock_decisions_reason_idx').on(t.day, t.reason),
+  ],
+);
+
 /** Daily marks for stock positions — same shape and purpose as
  * `paperMarks`, kept separate for the same reason the orders are. */
 export const stockMarks = sqliteTable(

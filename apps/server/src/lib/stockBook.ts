@@ -1,7 +1,7 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { config } from '../config.js';
 import { paperDb } from '../db/paper/index.js';
-import { stockMarks, stockOrders } from '../db/paper/schema.js';
+import { stockDecisions, stockMarks, stockOrders } from '../db/paper/schema.js';
 import { newId, nowIso } from './util.js';
 import { haircutE4, PaperError } from './paper.js';
 
@@ -183,6 +183,63 @@ export function markStockPosition(
       set: { asOf: at, markPriceE4: priceE4, basis, unrealizedPlE4 },
     })
     .run();
+}
+
+export interface StockDecisionRow {
+  day: string;
+  book: StockBook;
+  symbol: string;
+  decision: 'opened' | 'rejected' | 'skipped' | 'held' | 'exited' | 'marked' | 'stop_raised';
+  reason: string;
+  detail?: Record<string, unknown>;
+  modelRunId?: string | null;
+  panelStance?: string | null;
+}
+
+/**
+ * Persist a batch of decisions. Never throws into the engine: a logging
+ * failure must not cost a trading decision that already happened — the
+ * options book learned this the same way, and the rule is worth
+ * repeating rather than rediscovering.
+ */
+export function logStockDecisions(rows: StockDecisionRow[]): void {
+  if (rows.length === 0) return;
+  const at = nowIso();
+  try {
+    paperDb.transaction((tx) => {
+      // Chunked for SQLite's bound-parameter ceiling — a full rejection
+      // list on a wide board runs to hundreds of rows.
+      for (let i = 0; i < rows.length; i += 200) {
+        tx.insert(stockDecisions)
+          .values(
+            rows.slice(i, i + 200).map((r) => ({
+              day: r.day,
+              book: r.book,
+              symbol: r.symbol,
+              decision: r.decision,
+              reason: r.reason,
+              detail: r.detail ?? {},
+              modelRunId: r.modelRunId ?? null,
+              panelStance: r.panelStance ?? null,
+              createdAt: at,
+            })),
+          )
+          .run();
+      }
+    });
+  } catch {
+    // Deliberately swallowed — see the doc comment.
+  }
+}
+
+/** Everything the engine decided on a day, newest first. */
+export function stockDecisionsForDay(day: string) {
+  return paperDb
+    .select()
+    .from(stockDecisions)
+    .where(eq(stockDecisions.day, day))
+    .orderBy(desc(stockDecisions.id))
+    .all();
 }
 
 export function openStockOrders(book?: StockBook) {

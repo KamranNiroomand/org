@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { paperDb } from '../db/paper/index.js';
 import { paperEquity, paperOrders } from '../db/paper/schema.js';
 import { closeOrder, computeDailyEquity, markOpenPositions, openOrder, PaperError, tradeReturnPct , latestMarkByOrder } from '../lib/paper.js';
-import { latestStockMarkByOrder, stockCapacity, stockEquity } from '../lib/stockBook.js';
+import { latestStockMarkByOrder, stockCapacity, stockDecisionsForDay, stockEquity } from '../lib/stockBook.js';
 import { runStockCycle, runStockExits } from '../lib/stockEngine.js';
 import { QuantRefusal, QuantUnavailable, stockRank } from '../lib/quant.js';
 import { nyToday } from '../lib/options/positionHealth.js';
@@ -117,6 +117,13 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
    * calls the same function; this exists because managing open risk
    * should never be gated on an LLM being available or fast. */
   app.post('/api/stocks/exits', async (req) => runStockExits(req.log));
+
+  /** The engine's own record of a day: what it bought, what it refused,
+   * and which rule was binding — see stockDecisions. */
+  app.get<{ Querystring: { day?: string } }>('/api/stocks/decisions', async (req) => ({
+    day: req.query.day ?? nyToday(),
+    decisions: stockDecisionsForDay(req.query.day ?? nyToday()),
+  }));
 
   app.get('/api/paper/equity', async () => {
     const equity = paperDb.select().from(paperEquity).orderBy(paperEquity.day).all();

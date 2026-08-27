@@ -5,6 +5,7 @@ import { formatMoney, money } from '@org/shared';
 import { Badge, Button, Card, CardHeader, Empty, Skeleton, cn } from '../ui';
 import { StatTile } from '../charts';
 import { e4ToUsd, stocksApi, type StockOrderRow } from '../../lib/optionsApi';
+import { ModelPerformance } from '../options/ModelPerformance';
 
 function usd(e4: number): string {
   return formatMoney(money(Math.round(e4ToUsd(e4) * 100), 'USD'));
@@ -123,6 +124,9 @@ function PositionRow({ order }: { order: StockOrderRow }) {
 export function StockPicks() {
   const qc = useQueryClient();
   const [book, setBook] = useState<'short' | 'long'>('short');
+  // The three questions this tab answers: what does the model like, is
+  // the model any good, and what did the engine actually do about it.
+  const [view, setView] = useState<'picks' | 'model' | 'decisions'>('picks');
   const { data: bookData, isLoading } = useQuery({
     queryKey: ['stock-book'],
     queryFn: () => stocksApi.book(),
@@ -164,10 +168,16 @@ export function StockPicks() {
         </div>
       )}
 
-      <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         {(['short', 'long'] as const).map((b) => (
           <Button key={b} size="sm" variant={book === b ? 'primary' : 'ghost'} onClick={() => setBook(b)}>
             {BOOK_LABEL[b].title}
+          </Button>
+        ))}
+        <span className="mx-1 h-4 w-px bg-border" />
+        {(['picks', 'model', 'decisions'] as const).map((v) => (
+          <Button key={v} size="sm" variant={view === v ? 'primary' : 'ghost'} onClick={() => setView(v)}>
+            {v === 'picks' ? 'Picks & book' : v === 'model' ? 'Model' : 'Decision log'}
           </Button>
         ))}
         <div className="ml-auto">
@@ -177,11 +187,26 @@ export function StockPicks() {
         </div>
       </div>
 
-      <Card>
-        <CardHeader title={`${BOOK_LABEL[book].title} picks`} subtitle={BOOK_LABEL[book].hint} />
-        <PickList book={book} />
-      </Card>
+      {view === 'model' && (
+        <Card className="overflow-hidden">
+          <CardHeader
+            title={`${BOOK_LABEL[book].title} model`}
+            subtitle="Train and validation loss per fold, and whether the run cleared its hurdle"
+          />
+          <ModelPerformance target={book === 'short' ? 'stk_short' : 'stk_long'} />
+        </Card>
+      )}
 
+      {view === 'decisions' && <DecisionLog book={book} />}
+
+      {view === 'picks' && (
+        <Card>
+          <CardHeader title={`${BOOK_LABEL[book].title} picks`} subtitle={BOOK_LABEL[book].hint} />
+          <PickList book={book} />
+        </Card>
+      )}
+
+      {view === 'picks' && (
       <Card>
         <CardHeader
           title="Positions"
@@ -197,6 +222,55 @@ export function StockPicks() {
           </div>
         )}
       </Card>
+      )}
     </div>
+  );
+}
+
+/**
+ * What the engine decided today and which rule was binding. Kept because
+ * the answer to "why wasn't that bought" is only useful if it survives
+ * the run that produced it.
+ */
+function DecisionLog({ book }: { book: 'short' | 'long' }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['stock-decisions'],
+    queryFn: () => stocksApi.decisions(),
+    refetchInterval: 60_000,
+  });
+  if (isLoading) return <Skeleton className="h-48" />;
+  const rows = (data?.decisions ?? []).filter((d) => d.book === book);
+  if (rows.length === 0) {
+    return <Empty title="No decisions logged today" hint="The nightly cycle writes these; “Run cycle” does it now." />;
+  }
+  const counts = rows.reduce<Record<string, number>>((acc, r) => {
+    acc[r.reason] = (acc[r.reason] ?? 0) + 1;
+    return acc;
+  }, {});
+  return (
+    <Card>
+      <CardHeader
+        title={`${BOOK_LABEL[book].title} decision log`}
+        subtitle={`${data?.day} · ${rows.length} decisions · binding rules: ${Object.entries(counts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 4)
+          .map(([r, n]) => `${r.replace(/_/g, ' ')} ${n}`)
+          .join(', ')}`}
+      />
+      <div className="divide-y divide-border">
+        {rows.map((d) => (
+          <div key={d.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2 text-xs">
+            <span className="w-16 font-medium">{d.symbol}</span>
+            <Badge
+              tone={d.decision === 'opened' ? 'positive' : d.decision === 'exited' ? 'negative' : 'neutral'}
+            >
+              {d.decision}
+            </Badge>
+            <span className="text-muted">{d.reason.replace(/_/g, ' ')}</span>
+            {d.panelStance && <span className="text-faint">panel: {d.panelStance.replace('_', ' ')}</span>}
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
