@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { stockStopPct } from './stockEngine.js';
+import { stockStopPct, stockTargetPct } from './stockEngine.js';
 
 describe('stockStopPct', () => {
   it('scales the stop to the symbol’s own volatility', () => {
@@ -15,19 +15,39 @@ describe('stockStopPct', () => {
     expect(long).toBeGreaterThan(short);
   });
 
-  it('clamps into a band a stop can survive in', () => {
+  it('clamps into a band a stock position can survive in', () => {
     // A near-frozen symbol must not get a hair-trigger stop...
-    expect(stockStopPct(0.01, 21, 1.5)).toBe(0.08);
-    // ...and a meme-volatile one must not be allowed to halve first.
-    expect(stockStopPct(5, 21, 1.5)).toBe(0.5);
+    expect(stockStopPct(0.01, 21, 1.5)).toBe(0.05);
+    // ...and a violently volatile one must not be allowed to lose a
+    // fifth of the position before the rule fires. 1.5 sigma of a
+    // 145%-vol name over 21 days computes to 63%: correct arithmetic,
+    // useless risk management on shares, where the whole notional is at
+    // risk rather than an option's premium.
+    expect(stockStopPct(1.45, 21, 1.5)).toBe(0.2);
+    expect(stockStopPct(1.45, 126, 2, 0.3)).toBe(0.3);
   });
 
   it('falls back to a fixed stop when volatility is unknown, never to none', () => {
-    expect(stockStopPct(null, 21, 1.5)).toBe(0.15);
-    expect(stockStopPct(0, 21, 1.5)).toBe(0.15);
+    expect(stockStopPct(null, 21, 1.5)).toBe(0.12);
+    expect(stockStopPct(0, 21, 1.5)).toBe(0.12);
   });
 });
 
+
+describe('stockTargetPct', () => {
+  it('is a multiple of the position’s own stop, so reward-to-risk is fixed', () => {
+    expect(stockTargetPct(0.1, 'short')).toBeCloseTo(0.2);
+    expect(stockTargetPct(0.1, 'long')).toBeCloseTo(0.25);
+  });
+
+  it('stays legible where a sigma extrapolation would not', () => {
+    // The failure it replaces: 3 sigma of a 145%-vol name over 126 days
+    // is a +308% objective, which put the breakeven ratchet's halfway
+    // mark out of reach and quietly disabled it.
+    const stop = stockStopPct(1.45, 126, 2, 0.3);
+    expect(stockTargetPct(stop, 'long')).toBeLessThan(1);
+  });
+});
 
 describe('instrument eligibility', () => {
   // The rules live inside runStockEntries' loop, so these pin the

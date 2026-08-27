@@ -96,10 +96,30 @@ function todaysStances(
 /** Stop distance in percent, scaled to the symbol's own volatility over
  * the book's horizon — the same principle as the options book's
  * sigma-scaled stops, with an equity's elasticity of 1. */
-export function stockStopPct(annualVol: number | null, horizonDays: number, sigmas: number): number {
-  if (annualVol === null || !(annualVol > 0)) return 0.15;
+export function stockStopPct(
+  annualVol: number | null,
+  horizonDays: number,
+  sigmas: number,
+  maxPct = 0.2,
+): number {
+  if (annualVol === null || !(annualVol > 0)) return 0.12;
   const sigmaHorizon = annualVol * Math.sqrt(horizonDays / 252);
-  return Math.min(0.5, Math.max(0.08, sigmas * sigmaHorizon));
+  return Math.min(maxPct, Math.max(0.05, sigmas * sigmaHorizon));
+}
+
+/**
+ * The target, as a distance rather than a forecast.
+ *
+ * Two sigma of a 145%-vol name over 126 days is a +308% price
+ * objective — arithmetically correct and completely useless, and it
+ * pushes the breakeven ratchet's halfway mark somewhere the position
+ * will never reach, which quietly disables the one rule that guarantees
+ * a winner cannot become a loser. Targets are therefore a multiple of
+ * the position's own stop distance: a fixed, legible reward-to-risk
+ * rather than an extrapolation the model cannot support.
+ */
+export function stockTargetPct(stopPct: number, book: StockBook): number {
+  return stopPct * (book === 'short' ? 2 : 2.5);
 }
 
 export async function runStockEntries(
@@ -253,7 +273,19 @@ export async function runStockEntries(
       continue;
     }
 
-    const stopPct = stockStopPct(pick.forecastVol, horizonDays, book === 'short' ? 1.5 : 3);
+    // The ceiling is per book and deliberately tight for equities. A
+    // 1.5-sigma stop on a 145%-vol name computes to 63%, and a stop that
+    // lets half the position evaporate before it fires is not risk
+    // management — it is an options-book parameter (where the premium at
+    // risk is a fraction of exposure) applied to shares, where it is
+    // not. Volatility belongs in position *sizing*; the stop's job is to
+    // bound the loss.
+    const stopPct = stockStopPct(
+      pick.forecastVol,
+      horizonDays,
+      book === 'short' ? 1.5 : 2,
+      book === 'short' ? 0.2 : 0.3,
+    );
     const targetExit = new Date(Date.parse(`${day}T00:00:00Z`) + horizonDays * 1.4 * 86_400_000)
       .toISOString()
       .slice(0, 10);
@@ -269,17 +301,11 @@ export async function runStockEntries(
       modelRunId,
       thesisRef: stance?.id ?? null,
       stopPriceE4: Math.round(priceE4 * (1 - stopPct)),
-      // The target is a volatility distance, not the model's own
-      // forecast magnitude. At this IC the ordering may carry
-      // information while the magnitude does not — deriving a target
-      // from a 5-sigma outlier prediction once set a 21-day price
-      // objective 2.7x above entry, which then pushed the breakeven
-      // ratchet's halfway mark out of reach. Two sigma up against a
-      // 1.5-sigma stop is the asymmetry the position is actually taken
-      // for.
-      targetPriceE4: Math.round(
-        priceE4 * (1 + (book === 'short' ? 2 : 3) * (pick.forecastVol ?? 0.3) * Math.sqrt(horizonDays / 252)),
-      ),
+      // See stockTargetPct: a multiple of this position's own stop, not
+      // a sigma extrapolation. The asymmetry is the point — 2x the risk
+      // on a one-month position, 2.5x on a six-month one — and it stays
+      // legible at any volatility.
+      targetPriceE4: Math.round(priceE4 * (1 + stockTargetPct(stopPct, book))),
       targetExitDate: targetExit,
       notes:
         `Rank ${pick.rank} of the ${target} board: forecast ` +
