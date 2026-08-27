@@ -72,7 +72,12 @@ function todaysStances(
     .from(panelSymbolAnalyses)
     .innerJoin(panelRuns, eq(panelRuns.id, panelSymbolAnalyses.runId))
     .where(inArray(panelSymbolAnalyses.symbol, symbols))
-    .orderBy(desc(panelSymbolAnalyses.id))
+    // By the *run's* start time, not the analysis id: that id is a
+    // random UUID, so ordering on it sorts lexicographically and picks
+    // an arbitrary row. Live consequence — FOX's finished 'not_notable'
+    // was ignored in favour of an earlier 'mixed' from a different run,
+    // and the long book's thesis rule never fired on it.
+    .orderBy(desc(panelRuns.startedAt), desc(panelSymbolAnalyses.id))
     .all();
   for (const r of rows) {
     // Today's completed synthesis only. A stale stance is worse than no
