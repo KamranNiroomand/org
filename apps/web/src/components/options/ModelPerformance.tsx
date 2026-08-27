@@ -295,16 +295,25 @@ function LossCurves({ curve }: { curve: Performance['loss_curve'] }) {
   );
 }
 
-export function ModelPerformance() {
+/**
+ * `target` selects which model family's runs are shown — 'dir' for the
+ * options direction model, 'stk_short'/'stk_long' for the two stock
+ * horizons. One component rather than three, because the questions a
+ * reader asks of a training run — did validation turn up, how far past
+ * its bottom did it keep going, did it clear its hurdle — do not change
+ * with the quantity being predicted.
+ */
+export function ModelPerformance({ target = 'dir' }: { target?: string } = {}) {
   // Which run's curves to show. Null means "whatever the server features",
   // which is the champion — the model actually being served.
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data, isLoading, error } = useQuery({
-    queryKey: ['quant', 'performance', selectedRun],
-    queryFn: () =>
-      api.get<Performance>(
-        selectedRun ? `/api/quant/performance?run=${encodeURIComponent(selectedRun)}` : '/api/quant/performance',
-      ),
+    queryKey: ['quant', 'performance', target, selectedRun],
+    queryFn: () => {
+      const params = new URLSearchParams({ target });
+      if (selectedRun) params.set('run', selectedRun);
+      return api.get<Performance>(`/api/quant/performance?${params.toString()}`);
+    },
   });
 
   if (isLoading) return <div className="p-6 text-sm text-muted">Loading model performance…</div>;

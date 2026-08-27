@@ -10,6 +10,8 @@ import { fetchQuotes } from './quotes.js';
 import { nyToday } from './options/positionHealth.js';
 import {
   closeStockPosition,
+  logStockDecisions,
+  type StockDecisionRow,
   markStockPosition,
   openStockPosition,
   openStockOrders,
@@ -118,10 +120,21 @@ export async function runStockEntries(
     Math.max(0, cfg.maxNewPerDay - alreadyToday),
   );
   if (slots <= 0) {
+    const reason = alreadyToday >= cfg.maxNewPerDay ? 'daily_cap_spent' : 'no_slots';
     result.skippedReason =
-      alreadyToday >= cfg.maxNewPerDay
+      reason === 'daily_cap_spent'
         ? `daily_cap_spent: ${alreadyToday} ${book}-book entries already opened for ${day}`
         : `no_slots: ${capacity.openCount}/${maxPositions} ${book}-book positions already open`;
+    logStockDecisions([
+      {
+        day,
+        book,
+        symbol: '-',
+        decision: 'skipped',
+        reason,
+        detail: { alreadyToday, openCount: capacity.openCount, maxPositions },
+      },
+    ]);
     return result;
   }
 
@@ -176,6 +189,11 @@ export async function runStockEntries(
     if (!sectors.get(row.symbol) && row.sector) sectors.set(row.symbol, row.sector);
   }
 
+  const decisions: StockDecisionRow[] = [];
+  const pushRejection = (symbol: string, reason: string, detail: Record<string, unknown> = {}) => {
+    result.rejections.push({ symbol, reason });
+    decisions.push({ day, book, symbol, decision: 'rejected', reason, detail, modelRunId });
+  };
   const sectorCounts = { ...capacity.sectorCounts };
   const held = new Set(capacity.heldSymbols);
   let remainingCashE4 = capacity.freeCashE4;
@@ -183,16 +201,16 @@ export async function runStockEntries(
 
   for (const pick of picks.slice(0, PANEL_CANDIDATES)) {
     if (result.opened.length >= slots) {
-      result.rejections.push({ symbol: pick.symbol, reason: 'slots_full' });
+      pushRejection(pick.symbol, 'slots_full');
       continue;
     }
     if (held.has(pick.symbol)) {
-      result.rejections.push({ symbol: pick.symbol, reason: 'already_held' });
+      pushRejection(pick.symbol, 'already_held');
       continue;
     }
     const stance = stances.get(pick.symbol);
     if (stance?.stance === 'not_notable') {
-      result.rejections.push({ symbol: pick.symbol, reason: 'panel_not_notable' });
+      pushRejection(pick.symbol, 'panel_not_notable');
       continue;
     }
     // A pick must be *classified* — placed in a sector by the universe
@@ -201,7 +219,7 @@ export async function runStockEntries(
     // symbols share one would let a book fill up with them.
     const sector = sectors.get(pick.symbol) ?? null;
     if (sector === null) {
-      result.rejections.push({ symbol: pick.symbol, reason: 'unclassified_symbol' });
+      pushRejection(pick.symbol, 'unclassified_symbol');
       continue;
     }
     // Leveraged funds are barred from the long book only, and the reason
@@ -214,7 +232,7 @@ export async function runStockEntries(
     // enough to pay it. The engine bought SOXL into a six-month book on
     // its first live cycle, which is what made the rule necessary.
     if (book === 'long' && sector === 'ETF / leveraged') {
-      result.rejections.push({ symbol: pick.symbol, reason: 'leveraged_etf_in_long_book' });
+      pushRejection(pick.symbol, 'leveraged_etf_in_long_book');
       continue;
     }
     if ((sectorCounts[sector] ?? 0) >= cfg.maxPerSector) {
@@ -223,7 +241,7 @@ export async function runStockEntries(
     }
     const quote = quotes.get(pick.symbol);
     if (!quote || !(quote.price > 0)) {
-      result.rejections.push({ symbol: pick.symbol, reason: 'no_quote' });
+      pushRejection(pick.symbol, 'no_quote');
       continue;
     }
     // quotes.ts prices are minor units (cents); the book stores E4.
@@ -231,7 +249,7 @@ export async function runStockEntries(
     const budgetE4 = Math.min(perPositionE4, remainingCashE4);
     const quantity = Math.floor((budgetE4 / priceE4) * 1000) / 1000; // fractional, 3dp
     if (quantity <= 0) {
-      result.rejections.push({ symbol: pick.symbol, reason: 'unaffordable' });
+      pushRejection(pick.symbol, 'unaffordable');
       continue;
     }
 
@@ -271,10 +289,28 @@ export async function runStockEntries(
         (stance ? `Panel: ${stance.stance}.` : 'Panel: no stance today.'),
     });
     result.opened.push({ symbol: pick.symbol, quantity, orderId });
+    decisions.push({
+      day,
+      book,
+      symbol: pick.symbol,
+      decision: 'opened',
+      reason: 'cleared_all_rules',
+      detail: {
+        rank: pick.rank,
+        forecastSigmas: pick.forecastSigmas,
+        quantity,
+        priceE4,
+        stopPct,
+        sector,
+      },
+      modelRunId,
+      panelStance: stance?.stance ?? null,
+    });
     held.add(pick.symbol);
     sectorCounts[sector] = (sectorCounts[sector] ?? 0) + 1;
     remainingCashE4 -= Math.round(priceE4 * quantity);
   }
+  logStockDecisions(decisions);
   return result;
 }
 
@@ -299,6 +335,7 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
   const result: StockExitResult = { day, checked: 0, closed: 0, marked: 0, errors: [] };
   const orders = openStockOrders();
   if (orders.length === 0) return result;
+  const decisions: StockDecisionRow[] = [];
 
   const quotes = await fetchQuotes([...new Set(orders.map((o) => o.symbol))]);
   const stanceCache = todaysStances(day, [...new Set(orders.map((o) => o.symbol))]);
@@ -308,6 +345,15 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
     const quote = quotes.get(order.symbol);
     if (!quote || !(quote.price > 0)) {
       result.errors.push(`${order.symbol}: no quote — position left unmanaged this pass`);
+      decisions.push({
+        day,
+        book: order.book,
+        symbol: order.symbol,
+        decision: 'skipped',
+        reason: 'no_quote',
+        detail: {},
+        modelRunId: order.modelRunId,
+      });
       continue;
     }
     const priceE4 = quote.price * 100;
@@ -320,6 +366,15 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
     if (order.stopPriceE4 !== null && priceE4 <= order.stopPriceE4) {
       closeStockPosition(order.id, priceE4, 'measured', day, 'stop_loss');
       result.closed += 1;
+      decisions.push({
+        day,
+        book: order.book,
+        symbol: order.symbol,
+        decision: 'exited',
+        reason: 'stop_loss',
+        detail: { priceE4, entryPriceE4: order.entryPriceE4, stopPriceE4: order.stopPriceE4 },
+        modelRunId: order.modelRunId,
+      });
       continue;
     }
 
@@ -331,6 +386,15 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
     if (pastHorizon && order.book === 'short') {
       closeStockPosition(order.id, priceE4, 'measured', day, 'horizon_spent');
       result.closed += 1;
+      decisions.push({
+        day,
+        book: order.book,
+        symbol: order.symbol,
+        decision: 'exited',
+        reason: 'horizon_spent',
+        detail: { priceE4, entryPriceE4: order.entryPriceE4, stopPriceE4: order.stopPriceE4 },
+        modelRunId: order.modelRunId,
+      });
       continue;
     }
 
@@ -359,9 +423,19 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
           .where(eq(stockOrders.id, order.id))
           .run();
         log.info(`Stock exits: ${order.symbol} stop ratcheted to breakeven`);
+        decisions.push({
+          day,
+          book: order.book,
+          symbol: order.symbol,
+          decision: 'stop_raised',
+          reason: 'breakeven_ratchet',
+          detail: { from: order.stopPriceE4, to: order.entryPriceE4, priceE4 },
+          modelRunId: order.modelRunId,
+        });
       }
     }
   }
+  logStockDecisions(decisions);
   return result;
 }
 
