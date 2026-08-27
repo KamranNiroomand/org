@@ -27,3 +27,34 @@ describe('stockStopPct', () => {
     expect(stockStopPct(0, 21, 1.5)).toBe(0.15);
   });
 });
+
+
+describe('instrument eligibility', () => {
+  // The rules live inside runStockEntries' loop, so these pin the
+  // *policy* the loop encodes rather than re-running the whole engine:
+  // ETFs are eligible positions in both books, leveraged funds only in
+  // the short one, and an unclassified symbol is eligible nowhere.
+  const eligible = (book: 'short' | 'long', sector: string | null): string | null => {
+    if (sector === null) return 'unclassified_symbol';
+    if (book === 'long' && sector === 'ETF / leveraged') return 'leveraged_etf_in_long_book';
+    return null;
+  };
+
+  it('holds plain ETFs in both books, alongside stocks', () => {
+    for (const sector of ['ETF / broad', 'ETF / sector', 'ETF / commodity']) {
+      expect(eligible('short', sector)).toBeNull();
+      expect(eligible('long', sector)).toBeNull();
+    }
+    expect(eligible('long', 'Information Technology')).toBeNull();
+  });
+
+  it('keeps leveraged funds out of the six-month book but not the one-month one', () => {
+    expect(eligible('short', 'ETF / leveraged')).toBeNull();
+    expect(eligible('long', 'ETF / leveraged')).toBe('leveraged_etf_in_long_book');
+  });
+
+  it('refuses a symbol with no classification at all', () => {
+    expect(eligible('short', null)).toBe('unclassified_symbol');
+    expect(eligible('long', null)).toBe('unclassified_symbol');
+  });
+});
