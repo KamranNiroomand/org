@@ -690,6 +690,127 @@ def news_feature_panel(trading_days: list[str] | None = None) -> pl.DataFrame:
     return panel
 
 
+#: Sector spillover columns `sector_feature_panel` produces. Ride-along
+#: like the option and news panels: they join the stock panels from day
+#: one so their behaviour is observable, and enter a target's
+#: FEATURE_COLS only as a deliberate, counted trial. The prior is strong
+#: — industry momentum (Moskowitz & Grinblatt 1999) is among the most
+#: robust documented cross-sectional factors, and one large peer's
+#: earnings measurably moves its neighbours for weeks — but a strong
+#: prior is an argument for running the trial, not for skipping the
+#: count.
+SECTOR_FEATURE_COLS = [
+    "sector_mom_5d",
+    "sector_mom_21d",
+    "sector_news_count_1d",
+    "sector_sent_net_1d",
+]
+
+_sector_panel_cache: dict[tuple[int, str | None, int], pl.DataFrame] = {}
+
+
+def sector_feature_panel(bars: pl.DataFrame) -> pl.DataFrame:
+    """Per-(symbol, day): what the rest of the symbol's sector did.
+
+    All four columns are **leave-one-out** — the symbol's own return and
+    its own news are excluded from its sector aggregate. The feature must
+    measure the *neighbourhood*, and with own-symbol included, every
+    sector column becomes partially a copy of features the panel already
+    has, which teaches the model nothing and double-counts what it knew.
+
+    Point-in-time by construction: day t's sector return uses day t's
+    closes (known at the close the label starts from), and the news side
+    inherits the next-session stamping of `news_feature_panel`.
+    """
+    from .db import read_symbol_sectors, reading
+
+    with reading() as conn:
+        row = conn.execute("SELECT COUNT(*) n, MAX(day) m FROM equity_bars").fetchone()
+    sectors = read_symbol_sectors()
+    fingerprint = (row["n"], row["m"], len(sectors))
+    cached = _sector_panel_cache.get(fingerprint)
+    if cached is not None:
+        return cached
+
+    schema = {
+        "symbol": pl.Utf8,
+        "day": pl.Utf8,
+        **{c: pl.Float64 for c in SECTOR_FEATURE_COLS},
+    }
+    if bars.height == 0 or not sectors:
+        return pl.DataFrame(schema=schema)
+
+    sector_map = pl.DataFrame(
+        {"symbol": list(sectors.keys()), "sector": list(sectors.values())}
+    )
+    rets = (
+        bars.sort(["symbol", "day"])
+        .with_columns(
+            (pl.col("close") / pl.col("close").shift(1).over("symbol")).log().alias("_r")
+        )
+        .select(["symbol", "day", "_r"])
+        .join(sector_map, on="symbol", how="inner")
+        .filter(pl.col("_r").is_not_null())
+    )
+
+    # Leave-one-out mean return per (sector, day): (sum - own) / (n - 1).
+    grp = rets.group_by(["sector", "day"]).agg(
+        pl.col("_r").sum().alias("_sum"), pl.len().alias("_n")
+    )
+    daily = (
+        rets.join(grp, on=["sector", "day"])
+        .filter(pl.col("_n") > 1)
+        .with_columns(((pl.col("_sum") - pl.col("_r")) / (pl.col("_n") - 1)).alias("_loo"))
+        .select(["symbol", "day", "_loo"])
+        .sort(["symbol", "day"])
+    )
+    mom = daily.with_columns(
+        pl.col("_loo").rolling_sum(5).over("symbol").alias("sector_mom_5d"),
+        pl.col("_loo").rolling_sum(21).over("symbol").alias("sector_mom_21d"),
+    )
+
+    news = news_feature_panel()
+    if news.height > 0:
+        n = news.select(["symbol", "day", "news_count_1d", "news_sent_net_1d"]).join(
+            sector_map, on="symbol", how="inner"
+        ).with_columns(
+            (pl.col("news_count_1d") * pl.col("news_sent_net_1d")).fill_null(0.0).alias("_ssum"),
+            pl.col("news_sent_net_1d").is_not_null().cast(pl.Float64).alias("_scored"),
+        )
+        ngrp = n.group_by(["sector", "day"]).agg(
+            pl.col("news_count_1d").sum().alias("_csum"),
+            pl.col("_ssum").sum().alias("_sssum"),
+            (pl.col("news_count_1d") * pl.col("_scored")).sum().alias("_scored_sum"),
+        )
+        nloo = (
+            n.join(ngrp, on=["sector", "day"])
+            .with_columns(
+                (pl.col("_csum") - pl.col("news_count_1d")).alias("sector_news_count_1d"),
+                pl.when((pl.col("_scored_sum") - pl.col("news_count_1d") * pl.col("_scored")) > 0)
+                .then(
+                    (pl.col("_sssum") - pl.col("_ssum"))
+                    / (pl.col("_scored_sum") - pl.col("news_count_1d") * pl.col("_scored"))
+                )
+                .otherwise(None)
+                .alias("sector_sent_net_1d"),
+            )
+            .select(["symbol", "day", "sector_news_count_1d", "sector_sent_net_1d"])
+        )
+        out = mom.join(nloo, on=["symbol", "day"], how="left")
+    else:
+        out = mom.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("sector_news_count_1d"),
+            pl.lit(None, dtype=pl.Float64).alias("sector_sent_net_1d"),
+        )
+
+    panel = out.select(["symbol", "day", *SECTOR_FEATURE_COLS]).cast(
+        {c: pl.Float64 for c in SECTOR_FEATURE_COLS}
+    )
+    _sector_panel_cache.clear()
+    _sector_panel_cache[fingerprint] = panel
+    return panel
+
+
 # ---------------------------------------------------------------------------
 # Chain surface features — awaiting real captured data to validate against
 # ---------------------------------------------------------------------------

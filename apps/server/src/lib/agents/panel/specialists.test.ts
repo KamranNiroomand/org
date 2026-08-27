@@ -30,6 +30,7 @@ const CTX = {
   volume: 1_000_000,
   avgVolume10Day: 900_000,
   holding: null,
+  sectorPulse: null,
   radar: null,
   recentDocuments: [],
 };

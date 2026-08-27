@@ -66,6 +66,27 @@ export interface SymbolContext {
     sentimentZ: number | null;
     inputsUsed: string[];
   } | null;
+  /**
+   * What the symbol's own sector did today, because no company trades in
+   * a vacuum: an NVDA earnings report moves every AI-adjacent name
+   * whether or not an article tags them. Built from the same sector's
+   * largest peers (by market cap) so a specialist can distinguish "this
+   * stock moved" from "everything like it moved" — the difference
+   * between idiosyncratic news and a sector tide, which changes what a
+   * move means. Null when the symbol has no sector or no peers.
+   */
+  sectorPulse: {
+    sector: string;
+    /** How many peers the averages below are computed over. */
+    peerCount: number;
+    avgDayChangePercent: number | null;
+    /** The single largest absolute mover among those peers today. */
+    biggestMover: { symbol: string; dayChangePercent: number } | null;
+    /** Sector-mates' news from the last 48h that carries a classified
+     * event (earnings, M&A, regulatory...) — the "something happened in
+     * this neighbourhood" signal, capped at 3 headlines. */
+    recentSectorEvents: Array<{ symbol: string; title: string; eventType: string | null }>;
+  } | null;
   /** Newest first, capped at 10 — see context.ts for the cap's reasoning. */
   recentDocuments: Array<{
     title: string;
