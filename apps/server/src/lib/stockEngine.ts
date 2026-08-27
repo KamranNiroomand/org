@@ -3,6 +3,8 @@ import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { instruments, panelRuns, panelSymbolAnalyses } from '../db/schema.js';
+import { marketDb } from '../db/market/index.js';
+import { trackedUnderlyings } from '../db/market/schema.js';
 import { QuantRefusal, QuantUnavailable, stockRank, type StockPick } from './quant.js';
 import { fetchQuotes } from './quotes.js';
 import { nyToday } from './options/positionHealth.js';
@@ -151,7 +153,14 @@ export async function runStockEntries(
   // live quote, so there is no honest reason to model one.
   const shortlist = picks.slice(0, PANEL_CANDIDATES).map((p) => p.symbol);
   const quotes = await fetchQuotes(shortlist);
-  const sectors = new Map(
+  // Sector comes from `instruments` for companies and from
+  // `tracked_underlyings` for funds, which already classifies them as
+  // "ETF / broad", "ETF / sector", "ETF / commodity" or "ETF /
+  // leveraged". Both books hold stocks and ETFs side by side — a sector
+  // fund or a commodity fund is a legitimate expression of a
+  // cross-sectional forecast, and the model ranks them on the same bar
+  // features it ranks anything else.
+  const sectors = new Map<string, string | null>(
     db
       .select({ symbol: instruments.symbol, sector: instruments.sector })
       .from(instruments)
@@ -159,6 +168,13 @@ export async function runStockEntries(
       .all()
       .map((r) => [r.symbol, r.sector]),
   );
+  for (const row of marketDb
+    .select({ symbol: trackedUnderlyings.symbol, sector: trackedUnderlyings.sector })
+    .from(trackedUnderlyings)
+    .where(inArray(trackedUnderlyings.symbol, shortlist))
+    .all()) {
+    if (!sectors.get(row.symbol) && row.sector) sectors.set(row.symbol, row.sector);
+  }
 
   const sectorCounts = { ...capacity.sectorCounts };
   const held = new Set(capacity.heldSymbols);
@@ -179,18 +195,26 @@ export async function runStockEntries(
       result.rejections.push({ symbol: pick.symbol, reason: 'panel_not_notable' });
       continue;
     }
-    // A pick must be a *company* — a symbol the universe classifier
-    // placed in a sector. Everything else in the tracked universe is an
-    // ETF, and the engine bought SOXL (a 3x leveraged semiconductor
-    // fund) into a six-month book on its first live cycle: the most
-    // concentrated possible sector bet, wearing "unknown" as its
-    // diversification bucket, and a structural loser to volatility decay
-    // over that horizon. The features and the panel both reason about
-    // businesses; an instrument with no business behind it is out of
-    // scope for this engine, not merely unclassified.
+    // A pick must be *classified* — placed in a sector by the universe
+    // classifier or labelled a fund by the tracked universe. An entirely
+    // unknown symbol has no diversification bucket, and letting such
+    // symbols share one would let a book fill up with them.
     const sector = sectors.get(pick.symbol) ?? null;
     if (sector === null) {
-      result.rejections.push({ symbol: pick.symbol, reason: 'not_a_classified_company' });
+      result.rejections.push({ symbol: pick.symbol, reason: 'unclassified_symbol' });
+      continue;
+    }
+    // Leveraged funds are barred from the long book only, and the reason
+    // is arithmetic rather than taste: a daily-rebalanced 3x fund tracks
+    // 3x the *daily* return, so over months its path decays against the
+    // index in any choppy tape — the well-documented volatility drag.
+    // Over twenty-one days that drag is second-order and the short book
+    // may hold them; over a hundred and twenty-six it is the dominant
+    // term, and no directional forecast this model produces is strong
+    // enough to pay it. The engine bought SOXL into a six-month book on
+    // its first live cycle, which is what made the rule necessary.
+    if (book === 'long' && sector === 'ETF / leveraged') {
+      result.rejections.push({ symbol: pick.symbol, reason: 'leveraged_etf_in_long_book' });
       continue;
     }
     if ((sectorCounts[sector] ?? 0) >= cfg.maxPerSector) {
@@ -371,11 +395,14 @@ export async function runStockCycle(
     }
   }
 
-  // Only classified companies reach the panel — the same rule entries
-  // apply. Sending ETFs was paying for four specialist calls and a
-  // synthesis about an instrument the engine would reject anyway, and
-  // it marked every run 'partial' on a failure that was really a
-  // category error ("SOXL: not found in instruments").
+  // Only companies reach the panel. ETFs are eligible *positions* — the
+  // books hold them alongside stocks — but they are not eligible
+  // *subjects*: the four specialists reason about a business (its
+  // fundamentals, its news, the bear case against it), and a fund has
+  // none of those. Asking anyway paid for five LLM calls to conclude
+  // "not found in instruments", which is also what marked every run
+  // 'partial'. An ETF simply enters on the quant signal with no stance,
+  // which the entry rules already tolerate.
   const classified = new Set(
     db
       .select({ symbol: instruments.symbol })
