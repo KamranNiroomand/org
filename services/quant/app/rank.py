@@ -1151,21 +1151,48 @@ def stock_rank(
     drift_by_symbol, vol_by_symbol, _curve, manifest, raw_by_symbol = _forecast_inputs(
         trading_day, choice.directory, DEFAULT_VOL_WINDOW, force=True
     )
-    # Ranked on the RAW horizon-return prediction, never the clamped
-    # annualized drift: the clamp exists to keep option pricing sane, and
-    # under it a strong day's whole top decile ties — and ties sort
-    # alphabetically.
-    ranked = sorted(raw_by_symbol.items(), key=lambda kv: kv[1], reverse=True)
+    # Ranked on the model's SIGMA-UNIT forecast — its native output —
+    # not on the return that forecast implies.
+    #
+    # The two orderings are not the same, and the difference matters: the
+    # return is prediction x that symbol's own volatility, so ordering by
+    # it hands the top of the board to whatever is most volatile, which
+    # is precisely the nuisance axis vol-scaling the label removed in the
+    # first place. Verified on a live board: ranking by return produced a
+    # top five whose forecast vols ran 111-184% while the universe median
+    # is 37%. A stock picker compares risk-adjusted expectations across
+    # names — the expected Sharpe, not the expected move — and sizes
+    # separately. (The options ranker keeps the return-based drift: an
+    # option pricer needs an actual drift, not a z-score.)
     horizon = manifest["horizon"]
+    ranked = sorted(
+        raw_by_symbol.items(),
+        key=lambda kv: (
+            kv[1] / (vol_by_symbol[kv[0]] * math.sqrt(horizon / 252.0))
+            if vol_by_symbol.get(kv[0])
+            else kv[1]
+        ),
+        reverse=True,
+    )
     out = []
     for rank_pos, (symbol, horizon_return) in enumerate(ranked[: max(1, top)], start=1):
+        vol = vol_by_symbol.get(symbol)
+        sigma_h = vol * math.sqrt(horizon / 252.0) if vol else None
         out.append(
             {
                 "symbol": symbol,
                 "rank": rank_pos,
                 "horizon_return": horizon_return,
+                # The model's native output: the forecast in the symbol's
+                # own volatility units. This — not the return it implies —
+                # is the honest number to show and to reason with. At an
+                # IC around 0.02 the *ordering* may carry information
+                # while the *magnitude* does not, and a 21-day board whose
+                # top name reads "+170%" is a weak model's noise wearing
+                # a precise-looking percentage.
+                "forecast_sigmas": (horizon_return / sigma_h) if sigma_h else None,
                 "annual_drift": drift_by_symbol.get(symbol),
-                "forecast_vol": vol_by_symbol.get(symbol),
+                "forecast_vol": vol,
                 "model_run_id": manifest["run_id"],
                 "horizon_days": horizon,
             }

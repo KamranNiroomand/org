@@ -372,6 +372,9 @@ class StockPick(BaseModel):
     #: The model's raw forecast return over its own horizon — the ranking
     #: key, at full resolution (never the clamped annualized drift).
     horizon_return: float
+    #: The forecast in the symbol's own volatility units — the model's
+    #: native output, and the only magnitude worth showing at this IC.
+    forecast_sigmas: float | None
     annual_drift: float | None
     forecast_vol: float | None
     model_run_id: str

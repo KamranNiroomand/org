@@ -187,6 +187,59 @@ export interface RankResponse {
   contracts: RankedContract[];
 }
 
+export interface StockPickRow {
+  symbol: string;
+  rank: number;
+  horizonReturn: number;
+  forecastSigmas: number | null;
+  forecastVol: number | null;
+}
+
+export interface StockPicksResponse {
+  book: 'short' | 'long';
+  modelRunId: string;
+  horizonDays: number;
+  picks: StockPickRow[];
+  stances: Record<string, { stance: string; summary: string }>;
+}
+
+export interface StockOrderRow {
+  id: string;
+  symbol: string;
+  book: 'short' | 'long';
+  quantity: number;
+  entryPriceE4: number;
+  entryDay: string;
+  sector: string | null;
+  stopPriceE4: number | null;
+  targetPriceE4: number | null;
+  targetExitDate: string | null;
+  status: 'open' | 'closed';
+  exitPriceE4: number | null;
+  exitReason: string | null;
+  notes: string | null;
+  markPriceE4: number | null;
+  markTradingDay: string | null;
+}
+
+export interface StockBookResponse {
+  equity: {
+    startingBalanceE4: number;
+    cashE4: number;
+    positionsValueE4: number;
+    totalEquityE4: number;
+    realizedPlE4: number;
+  };
+  orders: StockOrderRow[];
+}
+
+export const stocksApi = {
+  picks: (book: 'short' | 'long') =>
+    api.get<StockPicksResponse>(`/api/stocks/picks?book=${book}`),
+  book: () => api.get<StockBookResponse>('/api/stocks/book'),
+  runCycle: () => api.post<unknown>('/api/stocks/cycle', {}),
+};
+
 export const optionsApi = {
   status: () => api.get<OptionsStatus>('/api/options/status'),
   triggerCapture: () => api.post<CaptureJobResult>('/api/options/capture'),
