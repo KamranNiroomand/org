@@ -1,13 +1,14 @@
-import { desc, eq, inArray } from 'drizzle-orm';
+import { desc, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { instruments, panelRuns, panelSymbolAnalyses } from '../db/schema.js';
 import { marketDb } from '../db/market/index.js';
-import { trackedUnderlyings } from '../db/market/schema.js';
+import { docMentions, documents, trackedUnderlyings } from '../db/market/schema.js';
 import { QuantRefusal, QuantUnavailable, stockRank, type StockPick } from './quant.js';
 import { fetchQuotes } from './quotes.js';
 import { nyToday } from './options/positionHealth.js';
+import { toVendorSymbol } from './options/universe.js';
 import {
   closeStockPosition,
   logStockDecisions,
@@ -16,6 +17,7 @@ import {
   openStockPosition,
   openStockOrders,
   stockCapacity,
+  stockDecisionsForDay,
   stockEntriesOpenedOn,
   type StockBook,
 } from './stockBook.js';
@@ -131,6 +133,36 @@ function latestThesisVerdicts(symbol: string, limit = 2): Array<'intact' | 'weak
 }
 
 /**
+ * Deterministic intraday distress signals for one open position — the
+ * "a stock can be fine at the open and gross by noon" problem. Pure and
+ * price-anchored: each signal is defined against the position's OWN stop
+ * budget, so a volatile name isn't flagged for a move that is ordinary
+ * for it while a quiet name gets flagged for the same percentage.
+ * Returns the strongest signal or null. News distress is checked
+ * separately (it needs a database, this needs arithmetic).
+ *
+ * - 'near_stop': more than 65% of the entry→stop distance is spent. The
+ *   stop will still bound the loss, but by the time it fires the panel
+ *   was never asked whether the reason for owning it died first.
+ * - 'sharp_day_drop': a single session consumed 40%+ of the total stop
+ *   budget — the shape of an event, not a drift.
+ */
+export function priceDistress(input: {
+  priceE4: number;
+  entryPriceE4: number;
+  stopPriceE4: number | null;
+  dayChangePercent: number | null;
+}): 'near_stop' | 'sharp_day_drop' | null {
+  const { priceE4, entryPriceE4, stopPriceE4, dayChangePercent } = input;
+  if (stopPriceE4 === null || stopPriceE4 >= entryPriceE4) return null;
+  const budget = entryPriceE4 - stopPriceE4;
+  if (priceE4 < entryPriceE4 && (priceE4 - stopPriceE4) / budget < 0.35) return 'near_stop';
+  const stopPct = budget / entryPriceE4;
+  if (dayChangePercent !== null && dayChangePercent / 100 <= -0.4 * stopPct) return 'sharp_day_drop';
+  return null;
+}
+
+/**
  * What the long book does with a position given the panel's last thesis
  * verdicts, newest first. Pure on purpose — this is the rule that decides
  * whether a six-month position dies, and it must be testable without a
@@ -144,6 +176,56 @@ export function thesisExitAction(
   if (verdicts[0] === 'broken') return verdicts[1] === 'broken' ? 'exit' : 'unconfirmed';
   if (verdicts[0] === 'weakened') return 'weakened';
   return 'none';
+}
+
+/**
+ * Fresh, affirmatively bad news on a symbol — the distress trigger price
+ * alone can't see: a mid-day guidance cut or regulatory action lands in
+ * the corpus (text sync runs every 20 minutes in market hours) well
+ * before the price finishes reacting. Only a classified event with
+ * negative sentiment counts; ordinary chatter and neutral coverage never
+ * summon a review.
+ */
+function freshNegativeNews(symbol: string, sinceHours = 12): { title: string; eventType: string | null } | null {
+  const isUnsafeToConvert = symbol.includes('-') && symbol.includes('.');
+  if (isUnsafeToConvert) return null;
+  const cutoff = new Date(Date.now() - sinceHours * 3_600_000).toISOString();
+  const row = marketDb
+    .select({ title: documents.title, eventType: documents.eventType })
+    .from(docMentions)
+    .innerJoin(documents, eq(docMentions.documentId, documents.id))
+    .where(
+      sql`${docMentions.underlying} = ${toVendorSymbol(symbol)} and ${docMentions.sentiment} = 'negative' and ${documents.publishedAt} >= ${cutoff} and ${documents.eventType} is not null and ${documents.eventType} != 'other'`,
+    )
+    .orderBy(desc(documents.publishedAt))
+    .limit(1)
+    .get();
+  return row ?? null;
+}
+
+/** Today's thesis verdicts per symbol — completed syntheses from today's
+ * runs only, newest run first, same staleness discipline as
+ * `todaysStances` and for the same reason. */
+function todaysThesisVerdicts(day: string, symbols: string[]): Map<string, 'intact' | 'weakened' | 'broken'> {
+  const out = new Map<string, 'intact' | 'weakened' | 'broken'>();
+  if (symbols.length === 0) return out;
+  const rows = db
+    .select({
+      symbol: panelSymbolAnalyses.symbol,
+      verdict: panelSymbolAnalyses.thesisVerdict,
+      complete: panelSymbolAnalyses.synthesisComplete,
+      startedAt: panelRuns.startedAt,
+    })
+    .from(panelSymbolAnalyses)
+    .innerJoin(panelRuns, eq(panelRuns.id, panelSymbolAnalyses.runId))
+    .where(inArray(panelSymbolAnalyses.symbol, symbols))
+    .orderBy(desc(panelRuns.startedAt), desc(panelSymbolAnalyses.id))
+    .all();
+  for (const r of rows) {
+    if (!r.complete || r.verdict === null || !r.startedAt?.startsWith(day)) continue;
+    if (!out.has(r.symbol)) out.set(r.symbol, r.verdict);
+  }
+  return out;
 }
 
 /** Stop distance in percent, scaled to the symbol's own volatility over
@@ -418,6 +500,32 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
 
   const quotes = await fetchQuotes([...new Set(orders.map((o) => o.symbol))]);
 
+  // The intraday distress ledger: which held symbols already got an
+  // event-triggered panel review today (this pass or an earlier one),
+  // and what those reviews concluded. Persisted in the decision log, so
+  // the cap and the dedupe survive restarts — a symbol is reviewed at
+  // most once per day, and at most `maxReviews` symbols per day, because
+  // each review costs nine LLM calls and a panicky tape must not be able
+  // to spend the whole budget re-asking the same question.
+  const distressReviewed = new Set(
+    stockDecisionsForDay(day)
+      .filter((d) => d.reason === 'distress_review')
+      .map((d) => d.symbol),
+  );
+  const maxDistressReviews = config.market.stockBook.distressMaxReviewsPerDay;
+  const eventVerdicts = todaysThesisVerdicts(day, [...distressReviewed]);
+  const panelable =
+    distressReviewed.size >= maxDistressReviews || !config.anthropic.configured
+      ? new Set<string>()
+      : new Set(
+          db
+            .select({ symbol: instruments.symbol })
+            .from(instruments)
+            .where(inArray(instruments.symbol, [...new Set(orders.map((o) => o.symbol))]))
+            .all()
+            .map((r) => r.symbol),
+        );
+
   for (const order of orders) {
     result.checked += 1;
     const quote = quotes.get(order.symbol);
@@ -512,6 +620,90 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
           decision: 'held',
           reason: action === 'unconfirmed' ? 'thesis_broken_unconfirmed' : 'thesis_weakened',
           detail: { priceE4, verdicts },
+          modelRunId: order.modelRunId,
+        });
+      }
+    }
+
+    // 3.5 Intraday distress — the mechanism for "fine at the open,
+    //    gross by noon". Deterministic triggers watch every pass: price
+    //    signals scaled to the position's own stop budget, and fresh
+    //    negative classified news (the text sync lands new stories every
+    //    20 minutes in market hours). A trigger summons a focused panel
+    //    review of that one symbol immediately instead of waiting for
+    //    tonight's cycle; a later pass acts on the verdict. An
+    //    event-triggered 'broken' closes SAME-DAY, without the two-day
+    //    confirmation — that rule guards against noise on quiet days,
+    //    and this path only ever fires on affirmative adverse evidence.
+    //    'weakened' tightens the stop to halfway between where it was
+    //    and the current price: keep the position, cut the tail.
+    if (distressReviewed.has(order.symbol)) {
+      const verdict = eventVerdicts.get(order.symbol);
+      if (verdict === 'broken') {
+        closeStockPosition(order.id, priceE4, 'measured', day, 'thesis_broken_event');
+        result.closed += 1;
+        decisions.push({
+          day,
+          book: order.book,
+          symbol: order.symbol,
+          decision: 'exited',
+          reason: 'thesis_broken_event',
+          detail: { priceE4, entryPriceE4: order.entryPriceE4 },
+          modelRunId: order.modelRunId,
+        });
+        continue;
+      }
+      if (verdict === 'weakened' && order.stopPriceE4 !== null && priceE4 > order.stopPriceE4) {
+        const tightened = Math.round((order.stopPriceE4 + priceE4) / 2);
+        if (tightened > order.stopPriceE4) {
+          const { paperDb } = await import('../db/paper/index.js');
+          const { stockOrders } = await import('../db/paper/schema.js');
+          paperDb
+            .update(stockOrders)
+            .set({ stopPriceE4: tightened, exitUpdatedAt: new Date().toISOString() })
+            .where(eq(stockOrders.id, order.id))
+            .run();
+          log.info(`Stock exits: ${order.symbol} stop tightened after weakened event review`);
+          decisions.push({
+            day,
+            book: order.book,
+            symbol: order.symbol,
+            decision: 'stop_raised',
+            reason: 'distress_stop_tighten',
+            detail: { from: order.stopPriceE4, to: tightened, priceE4 },
+            modelRunId: order.modelRunId,
+          });
+          order.stopPriceE4 = tightened;
+        }
+      }
+    } else if (panelable.has(order.symbol) && distressReviewed.size < maxDistressReviews) {
+      const signal =
+        priceDistress({
+          priceE4,
+          entryPriceE4: order.entryPriceE4,
+          stopPriceE4: order.stopPriceE4,
+          dayChangePercent: quote.dayChangePercent,
+        }) ?? (freshNegativeNews(order.symbol) ? 'fresh_negative_news' : null);
+      if (signal !== null) {
+        const { startPanelRun } = await import('./agents/panel/run.js');
+        const runId = startPanelRun({
+          trigger: 'stock_picks',
+          query: null,
+          resolutionMethod: 'model_shortlist',
+          symbols: [order.symbol],
+        });
+        // Not awaited: this pass's job is to raise the alarm, and the
+        // next pass (15 minutes) acts on the verdict. Blocking every
+        // position check behind a 3-minute panel would gut the cadence.
+        distressReviewed.add(order.symbol);
+        log.info(`Stock exits: ${order.symbol} distress review started (${signal})`);
+        decisions.push({
+          day,
+          book: order.book,
+          symbol: order.symbol,
+          decision: 'held',
+          reason: 'distress_review',
+          detail: { signal, runId, priceE4, stopPriceE4: order.stopPriceE4 },
           modelRunId: order.modelRunId,
         });
       }
