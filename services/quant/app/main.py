@@ -404,6 +404,24 @@ def stock_rank_endpoint(request: StockRankRequest) -> StockRankResponse:
     )
 
 
+class StockRegimeRequest(BaseModel):
+    day: str
+
+
+@app.post("/stock/regime")
+def stock_regime(request: StockRegimeRequest) -> dict:
+    """Market regime as of a day, from SPY — see regime.py for the
+    evidence and the three-state rule. The engine spends the exposure
+    number on how many new positions a day may open."""
+    from .db import read_bars
+    from .regime import market_regime
+
+    bars = read_bars(symbols=["SPY"])
+    if bars.height == 0:
+        raise HTTPException(status_code=409, detail="No SPY bars in the corpus — regime unavailable.")
+    return market_regime(bars, request.day)
+
+
 @app.get("/stock/performance")
 def stock_performance(target: str = "dir", run: str | None = None) -> dict:
     """The model-performance dashboard's data, computed in Python.

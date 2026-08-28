@@ -690,6 +690,131 @@ def news_feature_panel(trading_days: list[str] | None = None) -> pl.DataFrame:
     return panel
 
 
+#: Post-earnings-drift columns `earnings_feature_panel` produces.
+#: Ride-along like the news and sector panels: joined to the stock
+#: panels from day one, entering FEATURE_COLS only as a counted trial.
+#: The prior is post-earnings-announcement drift (Ball & Brown 1968 and
+#: fifty years of replications): the market underreacts to earnings
+#: news, and the direction of the surprise keeps predicting returns for
+#: roughly a quarter. The surprise proxy here is the vendor's sentiment
+#: on earnings-day coverage — not a consensus-estimate comparison, which
+#: this corpus doesn't carry — so the columns are a coarse version of
+#: the classic signal, priced accordingly by the model's own weights.
+EARNINGS_FEATURE_COLS = [
+    "days_since_earnings",
+    "last_earnings_sent",
+]
+
+#: Sessions after which an earnings event stops being information — the
+#: drift literature's persistence horizon is about one quarter.
+EARNINGS_HORIZON = 63
+
+_earnings_panel_cache: dict[tuple[int, str | None], pl.DataFrame] = {}
+
+
+def earnings_feature_panel(trading_days: list[str] | None = None) -> pl.DataFrame:
+    """Per-(symbol, day): the most recent earnings event within 63
+    sessions — how long ago (`days_since_earnings`, in sessions) and the
+    net sentiment of that day's coverage (`last_earnings_sent`, in
+    [-1, 1]). Both null when there is no event in the window: "no recent
+    earnings" is no information, not a zero.
+
+    Same leakage guard as every news feature: after-close publication
+    stamps the NEXT session (`_news_effective_day`), weekend events snap
+    forward to Monday.
+    """
+    from .db import read_doc_mentions, reading
+
+    with reading() as conn:
+        row = conn.execute("SELECT COUNT(*) n, MAX(ingested_at) m FROM documents").fetchone()
+    fingerprint = (row["n"], row["m"])
+    cached = _earnings_panel_cache.get(fingerprint)
+    if cached is not None:
+        return cached
+
+    schema = {
+        "symbol": pl.Utf8,
+        "day": pl.Utf8,
+        **{c: pl.Float64 for c in EARNINGS_FEATURE_COLS},
+    }
+    mentions = read_doc_mentions().filter(pl.col("event_type") == "earnings")
+    if mentions.height == 0:
+        return pl.DataFrame(schema=schema)
+
+    if trading_days is None:
+        with reading() as conn:
+            trading_days = [
+                r["day"] for r in conn.execute("SELECT DISTINCT day FROM equity_bars ORDER BY day")
+            ]
+    if not trading_days:
+        return pl.DataFrame(schema=schema)
+    calendar = (
+        pl.DataFrame({"day": trading_days})
+        .sort("day")
+        .with_columns(
+            pl.col("day").str.to_date().alias("_day_date"),
+            pl.int_range(pl.len()).alias("_idx"),
+        )
+    )
+
+    scored = (
+        mentions.with_columns(_news_effective_day(pl.col("published_at")).alias("_eff"))
+        .filter(pl.col("_eff").is_not_null())
+        .with_columns(
+            pl.when(pl.col("sentiment") == "positive")
+            .then(1.0)
+            .when(pl.col("sentiment") == "negative")
+            .then(-1.0)
+            .when(pl.col("sentiment") == "neutral")
+            .then(0.0)
+            .otherwise(None)
+            .alias("_score"),
+        )
+    )
+    scored = (
+        scored.sort("_eff")
+        .join_asof(calendar.sort("_day_date"), left_on="_eff", right_on="_day_date", strategy="forward")
+        .filter(pl.col("day").is_not_null())
+    )
+    # One event row per (symbol, session): the day's mean scored
+    # sentiment. Multiple wire pickups of one report collapse here.
+    events = (
+        scored.group_by(["underlying", "day"])
+        .agg(pl.col("_score").drop_nulls().mean().alias("_event_sent"))
+        .rename({"underlying": "symbol", "day": "_event_day"})
+        .join(calendar.select(pl.col("day").alias("_event_day"), pl.col("_idx").alias("_event_idx")), on="_event_day")
+        .sort(["symbol", "_event_idx"])
+    )
+
+    dense = (
+        events.select("symbol").unique()
+        .join(calendar.select("day", "_idx"), how="cross")
+        .sort(["symbol", "_idx"])
+    )
+    out = dense.join_asof(
+        events.sort("_event_idx"),
+        left_on="_idx",
+        right_on="_event_idx",
+        by="symbol",
+        strategy="backward",
+    ).with_columns((pl.col("_idx") - pl.col("_event_idx")).alias("_since"))
+    out = out.with_columns(
+        pl.when(pl.col("_since").is_between(0, EARNINGS_HORIZON))
+        .then(pl.col("_since").cast(pl.Float64))
+        .otherwise(None)
+        .alias("days_since_earnings"),
+        pl.when(pl.col("_since").is_between(0, EARNINGS_HORIZON))
+        .then(pl.col("_event_sent"))
+        .otherwise(None)
+        .alias("last_earnings_sent"),
+    ).select(["symbol", "day", *EARNINGS_FEATURE_COLS])
+
+    panel = out.cast({c: pl.Float64 for c in EARNINGS_FEATURE_COLS})
+    _earnings_panel_cache.clear()
+    _earnings_panel_cache[fingerprint] = panel
+    return panel
+
+
 #: Sector spillover columns `sector_feature_panel` produces. Ride-along
 #: like the option and news panels: they join the stock panels from day
 #: one so their behaviour is observable, and enter a target's

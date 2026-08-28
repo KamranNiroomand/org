@@ -5,7 +5,7 @@ import { db } from '../db/index.js';
 import { instruments, panelRuns, panelSymbolAnalyses } from '../db/schema.js';
 import { marketDb } from '../db/market/index.js';
 import { docMentions, documents, trackedUnderlyings } from '../db/market/schema.js';
-import { QuantRefusal, QuantUnavailable, stockRank, type StockPick } from './quant.js';
+import { QuantRefusal, QuantUnavailable, stockRank, stockRegime, type StockPick } from './quant.js';
 import { fetchQuotes } from './quotes.js';
 import { nyToday } from './options/positionHealth.js';
 import { toVendorSymbol } from './options/universe.js';
@@ -228,6 +228,24 @@ function todaysThesisVerdicts(day: string, symbols: string[]): Map<string, 'inta
   return out;
 }
 
+/**
+ * How many new positions a day may open under a market regime — the
+ * vol-management evidence applied at the only safe altitude: entries.
+ * Existing positions are never touched (their exits have their own
+ * rules); the throttle only slows the rate at which new risk goes on
+ * when the tape is in the historically toxic quadrant. 'unknown' — a
+ * missing quant sidecar or thin index history — spends the full budget:
+ * do no harm must not fail closed into never trading.
+ */
+export function regimeEntryCap(
+  maxNewPerDay: number,
+  regime: 'risk_on' | 'neutral' | 'risk_off' | 'unknown',
+): number {
+  if (regime === 'risk_off') return 1;
+  if (regime === 'neutral') return Math.max(1, Math.floor(maxNewPerDay * 0.75));
+  return maxNewPerDay;
+}
+
 /** Stop distance in percent, scaled to the symbol's own volatility over
  * the book's horizon — the same principle as the options book's
  * sigma-scaled stops, with an equity's elasticity of 1. */
@@ -270,16 +288,49 @@ export async function runStockEntries(
 
   const capacity = stockCapacity(book);
   const alreadyToday = stockEntriesOpenedOn(day, book);
+
+  // The market's own state gates how fast new risk goes on. Fail-open:
+  // a down sidecar reads as 'unknown' and the full budget applies — the
+  // regime layer is an overlay, exactly like the panel.
+  let regime: Awaited<ReturnType<typeof stockRegime>> | null = null;
+  try {
+    regime = await stockRegime(day);
+  } catch (err) {
+    log.warn(`Stock entries: regime unavailable — ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const dailyCap = regimeEntryCap(cfg.maxNewPerDay, regime?.regime ?? 'unknown');
   const slots = Math.min(
     Math.max(0, maxPositions - capacity.openCount),
-    Math.max(0, cfg.maxNewPerDay - alreadyToday),
+    Math.max(0, dailyCap - alreadyToday),
   );
+  if (slots < Math.max(0, Math.min(maxPositions - capacity.openCount, cfg.maxNewPerDay - alreadyToday))) {
+    // The regime actually bit today — say so in the log, or a throttled
+    // day is indistinguishable from an uneventful one.
+    logStockDecisions([
+      {
+        day,
+        book,
+        symbol: '*',
+        decision: 'skipped',
+        reason: 'regime_throttle',
+        detail: { regime: regime?.regime, exposure: regime?.exposure, dailyCap, maxNewPerDay: cfg.maxNewPerDay },
+        modelRunId: null,
+      },
+    ]);
+  }
   if (slots <= 0) {
-    const reason = alreadyToday >= cfg.maxNewPerDay ? 'daily_cap_spent' : 'no_slots';
+    const reason =
+      alreadyToday >= cfg.maxNewPerDay
+        ? 'daily_cap_spent'
+        : alreadyToday >= dailyCap
+          ? 'regime_throttle'
+          : 'no_slots';
     result.skippedReason =
       reason === 'daily_cap_spent'
         ? `daily_cap_spent: ${alreadyToday} ${book}-book entries already opened for ${day}`
-        : `no_slots: ${capacity.openCount}/${maxPositions} ${book}-book positions already open`;
+        : reason === 'regime_throttle'
+          ? `regime_throttle: ${regime?.regime ?? 'unknown'} regime caps new entries at ${dailyCap}/day (${alreadyToday} opened)`
+          : `no_slots: ${capacity.openCount}/${maxPositions} ${book}-book positions already open`;
     logStockDecisions([
       {
         day,

@@ -385,6 +385,35 @@ export interface StockRankResult {
 }
 
 /** Per-symbol forecast ranking from the stock engine — POST /stock/rank. */
+export interface StockRegime {
+  day: string;
+  regime: 'risk_on' | 'neutral' | 'risk_off' | 'unknown';
+  exposure: number;
+}
+
+/** Market regime as of a day — see the quant sidecar's regime.py for
+ * the rule and the evidence. Throws the same pair as its siblings so
+ * callers can distinguish "quant said no" from "quant is down". */
+export async function stockRegime(day: string): Promise<StockRegime> {
+  let res: Response;
+  try {
+    res = await fetch(`${config.market.quantUrl}/stock/regime`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ day }),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (err) {
+    throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (res.status === 409) {
+    const body = (await res.json()) as { detail: string };
+    throw new QuantRefusal(body.detail);
+  }
+  if (!res.ok) throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  return (await res.json()) as StockRegime;
+}
+
 export async function stockRank(
   day: string,
   target: 'stk_short' | 'stk_long',
