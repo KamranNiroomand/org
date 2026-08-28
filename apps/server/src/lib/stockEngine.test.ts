@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { stockStopPct, stockTargetPct, thesisExitAction } from './stockEngine.js';
+import { priceDistress, stockStopPct, stockTargetPct, thesisExitAction } from './stockEngine.js';
 
 describe('stockStopPct', () => {
   it('scales the stop to the symbol’s own volatility', () => {
@@ -104,5 +104,41 @@ describe('thesisExitAction', () => {
   it('no verdicts at all holds quietly — absence of review is not evidence', () => {
     expect(thesisExitAction([])).toBe('none');
     expect(thesisExitAction(['intact'])).toBe('none');
+  });
+});
+
+describe('priceDistress', () => {
+  const base = { entryPriceE4: 100_0000, stopPriceE4: 80_0000 }; // 20% stop budget
+
+  it('flags a position that has spent most of its stop budget', () => {
+    // 65%+ consumed: price below entry - 0.65 * budget = 87.0
+    expect(priceDistress({ ...base, priceE4: 86_0000, dayChangePercent: -1 })).toBe('near_stop');
+  });
+
+  it('holds quietly while the budget is mostly intact', () => {
+    expect(priceDistress({ ...base, priceE4: 95_0000, dayChangePercent: -1 })).toBeNull();
+  });
+
+  it('flags a single-session drop that eats 40% of the budget', () => {
+    // budget 20% of entry; -9% day is past the 40% threshold
+    expect(priceDistress({ ...base, priceE4: 92_0000, dayChangePercent: -9 })).toBe('sharp_day_drop');
+  });
+
+  it('scales the day-drop threshold to the position, not a flat percent', () => {
+    // A 30%-budget position shrugs off the same -8% day
+    expect(
+      priceDistress({ entryPriceE4: 100_0000, stopPriceE4: 70_0000, priceE4: 92_0000, dayChangePercent: -8 }),
+    ).toBeNull();
+  });
+
+  it('never fires without a stop, or once ratcheted to breakeven', () => {
+    expect(priceDistress({ ...base, stopPriceE4: null, priceE4: 50_0000, dayChangePercent: -20 })).toBeNull();
+    expect(
+      priceDistress({ entryPriceE4: 100_0000, stopPriceE4: 100_0000, priceE4: 90_0000, dayChangePercent: -10 }),
+    ).toBeNull();
+  });
+
+  it('a gain never reads as near_stop', () => {
+    expect(priceDistress({ ...base, priceE4: 120_0000, dayChangePercent: 3 })).toBeNull();
   });
 });

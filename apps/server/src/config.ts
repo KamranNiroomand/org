@@ -167,6 +167,10 @@ const schema = z.object({
   // let a whole session's move through, and a book marked once a day
   // shows yesterday's prices all afternoon.
   STOCK_EXIT_RECHECK_CRON: z.string().default('*/15 9-16 * * 1-5'),
+  // Hard daily ceiling on event-triggered panel reviews of held stock
+  // positions (nine LLM calls each) — a broadly red tape must not be able
+  // to spend the whole budget re-asking whether every position is fine.
+  STOCK_DISTRESS_MAX_REVIEWS_PER_DAY: z.coerce.number().int().min(0).default(3),
   PAPER_SPREAD_HAIRCUT_PCT: z.coerce.number().min(0).max(0.2).default(0.03),
   PAPER_SPREAD_HAIRCUT_MIN_E4: z.coerce.number().int().min(0).default(500),
   // Artificial starting balance for the paper book, in whole dollars.
@@ -397,6 +401,7 @@ export const config = {
       maxNewPerDay: env.STOCK_MAX_NEW_PER_DAY,
       maxPerSector: env.STOCK_MAX_PER_SECTOR,
       exitRecheckCron: env.STOCK_EXIT_RECHECK_CRON,
+      distressMaxReviewsPerDay: env.STOCK_DISTRESS_MAX_REVIEWS_PER_DAY,
     },
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
     edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,
