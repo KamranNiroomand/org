@@ -54,7 +54,7 @@ from .db import (
     read_risk_free_curve,
 )
 from .features import NEWS_FEATURE_COLS, build_feature_panel
-from .pricing import norm_cdf
+from .pricing import bsm_price, norm_cdf
 from .screens import screen_quotes
 from .har import InsufficientHistory, forecast_vol_by_symbol
 from .vol import rolling_realized_vol
@@ -173,6 +173,65 @@ def forecast_value(
     else:
         undiscounted = strike * norm_cdf(-d2) - spot * growth * norm_cdf(-d1)
     return discount * max(undiscounted, 0.0)
+
+
+def horizon_value_and_prob(
+    spot: float,
+    strike: float,
+    years: float,
+    horizon_years: float,
+    drift: float,
+    rate: float,
+    div_yield: float,
+    vol: float,
+    is_call: bool,
+    breakeven: float,
+) -> tuple[float, float] | None:
+    """Expected option VALUE at the model's own horizon, not payoff at expiry
+    — with P(that value clears `breakeven`) from the same integral.
+
+    `forecast_value` compounds the model's drift over the contract's whole
+    remaining life, which prices a plan nobody has: the engine's target
+    exit date is the model's horizon (~5 trading days out), not expiry.
+    Extrapolating a 5-day edge across 52 days is how a $24.50 GWW call
+    printed EV $12,859/contract, got sized to 8 contracts by EV-greedy
+    selection, and led the book's losers within a day — the same
+    magnitude-worship the stock board banned when it switched to sigma
+    units. Here the drift is applied ONLY over the horizon the model was
+    trained on; the value at that point is the market's own risk-neutral
+    price for the remaining life (edge beyond your horizon is not yours
+    to book).
+
+    Gauss-Hermite quadrature over the lognormal horizon spot — exact for
+    this integrand family at 41 nodes, no sampling noise. Returns None
+    when the horizon reaches past the contract's life or vol is
+    degenerate; the caller falls back to terminal valuation, which is
+    then honest (drift over DTE <= drift over horizon).
+
+    The probability is capped at 0.995: a printed "P(profit) 100%" is a
+    calibration bug wearing a suit (found live: a COST put entered at
+    exactly that number), and no five-day equity forecast earns three
+    nines.
+    """
+    h = min(horizon_years, years)
+    remaining = years - h
+    if h <= 0.0 or remaining <= 1.0 / 3650.0 or vol <= _MIN_VOL:
+        return None
+    from numpy.polynomial.hermite_e import hermegauss
+
+    z, w = hermegauss(41)
+    w = w / w.sum()
+    m = math.log(spot) + (drift - div_yield - 0.5 * vol * vol) * h
+    scale = vol * math.sqrt(h)
+    ev_acc = 0.0
+    p_acc = 0.0
+    for zi, wi in zip(z, w):
+        s_h = math.exp(m + scale * zi)
+        v = bsm_price(s_h, strike, remaining, rate, div_yield, vol, is_call)
+        ev_acc += wi * v
+        if v > breakeven:
+            p_acc += wi
+    return math.exp(-rate * h) * ev_acc, min(p_acc, 0.995)
 
 
 def probability_above(
@@ -326,6 +385,7 @@ def rank_underlying(
     forecast_drift: float,
     vol_ratio: float,
     rate_curve: list[tuple[int, float]],
+    horizon_years: float | None = None,
     dividend_yield: float = 0.0,
     round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
     multiplier: int = DEFAULT_MULTIPLIER,
@@ -374,10 +434,28 @@ def rank_underlying(
             continue
         forecast_vol = row["iv"] * vol_ratio
 
-        value = forecast_value(spot, strike, years, forecast_drift, rate, dividend_yield, forecast_vol, is_call)
         cost_per_share = round_trip_cost / multiplier
+        # Horizon-consistent by default: drift over the model's own
+        # horizon, market pricing for the rest — see horizon_value_and_prob.
+        # Terminal valuation remains only as the short-DTE fallback, where
+        # it is the same statement.
+        hv = (
+            horizon_value_and_prob(
+                spot, strike, years, horizon_years, forecast_drift, rate,
+                dividend_yield, forecast_vol, is_call, price + cost_per_share,
+            )
+            if horizon_years is not None
+            else None
+        )
+        if hv is not None:
+            value, prob = hv
+        else:
+            value = forecast_value(spot, strike, years, forecast_drift, rate, dividend_yield, forecast_vol, is_call)
+            prob = min(
+                probability_of_profit(spot, strike, price, years, forecast_drift, dividend_yield, forecast_vol, is_call),
+                0.995,
+            )
         ev = (value - price - cost_per_share) * multiplier
-        prob = probability_of_profit(spot, strike, price, years, forecast_drift, dividend_yield, forecast_vol, is_call)
 
         out.append(
             RankedContract(
@@ -784,6 +862,7 @@ def rank_day(
                 drift,
                 vol_ratio,
                 rate_curve,
+                horizon_years=_manifest["horizon"] * 1.4 / 365.0,
                 dividend_yield=dividend_yield,
                 round_trip_cost=round_trip_cost,
                 max_capital=max_capital,
@@ -1119,6 +1198,7 @@ def score_held_contracts(
             drift,
             vol_ratio,
             rate_curve,
+            horizon_years=_manifest["horizon"] * 1.4 / 365.0,
             dividend_yield=dividend_yield,
             round_trip_cost=round_trip_cost,
         ):
