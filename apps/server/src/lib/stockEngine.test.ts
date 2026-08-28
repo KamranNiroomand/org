@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { priceDistress, stockStopPct, stockTargetPct, thesisExitAction } from './stockEngine.js';
+import { priceDistress, regimeEntryCap, stockStopPct, stockTargetPct, thesisExitAction } from './stockEngine.js';
 
 describe('stockStopPct', () => {
   it('scales the stop to the symbol’s own volatility', () => {
@@ -140,5 +140,18 @@ describe('priceDistress', () => {
 
   it('a gain never reads as near_stop', () => {
     expect(priceDistress({ ...base, priceE4: 120_0000, dayChangePercent: 3 })).toBeNull();
+  });
+});
+
+describe('regimeEntryCap', () => {
+  it('spends the full budget in a calm uptrend and when the regime is unknown', () => {
+    expect(regimeEntryCap(3, 'risk_on')).toBe(3);
+    expect(regimeEntryCap(3, 'unknown')).toBe(3);
+  });
+
+  it('throttles mixed and toxic regimes without ever reaching zero', () => {
+    expect(regimeEntryCap(3, 'neutral')).toBe(2);
+    expect(regimeEntryCap(3, 'risk_off')).toBe(1);
+    expect(regimeEntryCap(1, 'neutral')).toBe(1);
   });
 });

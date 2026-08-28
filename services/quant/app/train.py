@@ -42,6 +42,7 @@ from .db import read_bars
 from .features import (
     NEWS_FEATURE_COLS,
     build_feature_panel,
+    earnings_feature_panel,
     news_feature_panel,
     option_feature_panel,
     rank_features_per_day,
@@ -236,6 +237,10 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
         else:
             for c in NEWS_FEATURE_COLS:
                 features = features.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
+        # Post-earnings drift, ride-along — see EARNINGS_FEATURE_COLS.
+        earnings = earnings_feature_panel()
+        if earnings.height > 0:
+            features = features.join(earnings, on=["symbol", "day"], how="left")
 
     if LABEL_KIND == "vol_scaled":
         labels = vol_scaled_forward_return(bars, horizon, vol_window=spec.label_vol_window)
