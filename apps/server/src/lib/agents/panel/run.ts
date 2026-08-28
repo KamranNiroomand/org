@@ -100,6 +100,7 @@ async function runPanelForSymbol(callBudgeted: CallBudgeted, runId: string, symb
       agreements: synthesis.agreements,
       disagreements: synthesis.disagreements,
       openQuestions: synthesis.openQuestions,
+      thesisVerdict: synthesis.thesisVerdict,
       synthesisComplete: true,
     })
     .where(eq(panelSymbolAnalyses.id, analysisId))

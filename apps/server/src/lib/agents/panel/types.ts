@@ -87,6 +87,28 @@ export interface SymbolContext {
      * this neighbourhood" signal, capped at 3 headlines. */
     recentSectorEvents: Array<{ symbol: string; title: string; eventType: string | null }>;
   } | null;
+  /**
+   * Present only when the stock paper book holds this symbol. This is what
+   * turns a daily news read into a position review: the specialists see
+   * the thesis the book bought under, how the position has done since, and
+   * what the panel said about it last time — so a verdict can be anchored
+   * to "has anything changed since we bought" instead of re-rolled from
+   * scratch on each day's noise. A quiet day is NOT evidence against a
+   * held thesis, and the prompts say so explicitly.
+   */
+  heldThesis: {
+    book: 'short' | 'long';
+    entryDay: string;
+    entryPrice: number;
+    daysHeld: number;
+    currentReturnPct: number | null;
+    /** The panel synthesis the entry was made under (thesis_ref), verbatim.
+     * Null when the entry predates thesis recording or was quant-only. */
+    originalThesis: string | null;
+    /** The panel's most recent completed read of this symbol before today —
+     * the stability anchor. Changing away from it should take evidence. */
+    priorStance: { stance: SynthesisStance; day: string; summary: string } | null;
+  } | null;
   /** Newest first, capped at 10 — see context.ts for the cap's reasoning. */
   recentDocuments: Array<{
     title: string;
@@ -132,10 +154,18 @@ export type SynthesisStance = 'notable' | 'mixed' | 'not_notable';
  * bullish/bearish axis (see synthesize.ts), and never a fifth opinion:
  * every field here must trace back to something the four specialists
  * actually said across both rounds. */
+export type ThesisVerdict = 'intact' | 'weakened' | 'broken';
+
 export interface SynthesisResult {
   stance: SynthesisStance;
   summary: string;
   agreements: string[];
   disagreements: string[];
   openQuestions: string[];
+  /** Only when the context carried a heldThesis: the panel's judgment of
+   * the ORIGINAL entry thesis, on its own axis. `stance` above answers
+   * "was today notable" and re-rolls daily; this answers "does the reason
+   * we own it still hold", which should only move on evidence. Null when
+   * the symbol isn't held. */
+  thesisVerdict: ThesisVerdict | null;
 }

@@ -22,7 +22,7 @@ import { marketDb } from '../db/market/index.js';
 import { optionContracts, optionQuotes } from '../db/market/schema.js';
 import { syncBars } from './options/barsSync.js';
 import { syncFundamentals } from './options/fundamentalsSync.js';
-import { runStockCycle } from './stockEngine.js';
+import { runStockCycle, runStockExits } from './stockEngine.js';
 import { isRunner } from './options/role.js';
 import { markOpenPositions, computeDailyEquity } from './paper.js';
 import { registerModelRun } from './options/modelRegistry.js';
@@ -894,6 +894,7 @@ let watchlistTextSyncTask: ReturnType<typeof cron.schedule> | null = null;
 let radarTask: ReturnType<typeof cron.schedule> | null = null;
 let panelTask: ReturnType<typeof cron.schedule> | null = null;
 let exitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
+let stockExitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
 let lastRetrainResult: RetrainJobResult | null = null;
@@ -1039,6 +1040,34 @@ export function startScheduler(log: FastifyBaseLogger): void {
     log.info(
       `Exit recheck scheduled (${config.market.exitRecheck.cron} ` +
         `${config.market.captureTimezone}), next run ${getNextExitRecheckRun() ?? 'unknown'}`,
+    );
+  }
+
+  // The stock book's own intraday pass — marks every open position at a
+  // live quote and applies the deterministic exit rules (stop, ratchet,
+  // confirmed-thesis check). Same reasoning as the options exit recheck
+  // above: managing open risk is never gated on a nightly job, and a
+  // book marked once a day shows yesterday's prices all afternoon. No
+  // LLM call anywhere on this path.
+  if (!config.market.configured) {
+    log.info('Stock exit recheck not scheduled — POLYGON_API_KEY is not set.');
+  } else if (!cron.validate(config.market.stockBook.exitRecheckCron)) {
+    log.error(
+      `STOCK_EXIT_RECHECK_CRON is not valid: "${config.market.stockBook.exitRecheckCron}" — stock exit recheck disabled`,
+    );
+  } else {
+    stockExitRecheckTask = cron.schedule(
+      config.market.stockBook.exitRecheckCron,
+      () => {
+        void runStockExits(log).catch((err) =>
+          log.error({ err }, 'Stock exit recheck failed'),
+        );
+      },
+      { timezone: config.market.captureTimezone },
+    );
+    log.info(
+      `Stock exit recheck scheduled (${config.market.stockBook.exitRecheckCron} ` +
+        `${config.market.captureTimezone})`,
     );
   }
 
@@ -1223,4 +1252,6 @@ export function stopScheduler(): void {
   panelTask = null;
   exitRecheckTask?.stop();
   exitRecheckTask = null;
+  stockExitRecheckTask?.stop();
+  stockExitRecheckTask = null;
 }

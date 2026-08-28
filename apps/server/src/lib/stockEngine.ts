@@ -93,6 +93,52 @@ function todaysStances(
   return out;
 }
 
+/**
+ * The panel's last two thesis verdicts for a held symbol, newest first —
+ * only real, completed reviews (thesisVerdict is written exclusively when
+ * the panel saw a heldThesis in context). The exit rule requires TWO
+ * consecutive 'broken' reads before the long book closes: one LLM read on
+ * one day is exactly the noise source that used to close positions on
+ * quiet days, and a thesis that is genuinely dead will still be dead
+ * tomorrow — the confirmation costs one day of exposure and buys immunity
+ * to a single bad sample.
+ */
+function latestThesisVerdicts(symbol: string, limit = 2): Array<'intact' | 'weakened' | 'broken'> {
+  const rows = db
+    .select({ verdict: panelSymbolAnalyses.thesisVerdict, startedAt: panelRuns.startedAt })
+    .from(panelSymbolAnalyses)
+    .innerJoin(panelRuns, eq(panelRuns.id, panelSymbolAnalyses.runId))
+    .where(
+      eq(panelSymbolAnalyses.symbol, symbol),
+    )
+    .orderBy(desc(panelRuns.startedAt), desc(panelSymbolAnalyses.id))
+    .limit(20)
+    .all();
+  const verdicts: Array<'intact' | 'weakened' | 'broken'> = [];
+  for (const r of rows) {
+    if (r.verdict === null) continue;
+    verdicts.push(r.verdict);
+    if (verdicts.length >= limit) break;
+  }
+  return verdicts;
+}
+
+/**
+ * What the long book does with a position given the panel's last thesis
+ * verdicts, newest first. Pure on purpose — this is the rule that decides
+ * whether a six-month position dies, and it must be testable without a
+ * database: 'exit' only on two consecutive 'broken' reads (one LLM read
+ * on one day is a sample, not a verdict), 'unconfirmed'/'weakened' put a
+ * warning in the decision log, 'none' holds quietly.
+ */
+export function thesisExitAction(
+  verdicts: Array<'intact' | 'weakened' | 'broken'>,
+): 'exit' | 'unconfirmed' | 'weakened' | 'none' {
+  if (verdicts[0] === 'broken') return verdicts[1] === 'broken' ? 'exit' : 'unconfirmed';
+  if (verdicts[0] === 'weakened') return 'weakened';
+  return 'none';
+}
+
 /** Stop distance in percent, scaled to the symbol's own volatility over
  * the book's horizon — the same principle as the options book's
  * sigma-scaled stops, with an equity's elasticity of 1. */
@@ -364,7 +410,6 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
   const decisions: StockDecisionRow[] = [];
 
   const quotes = await fetchQuotes([...new Set(orders.map((o) => o.symbol))]);
-  const stanceCache = todaysStances(day, [...new Set(orders.map((o) => o.symbol))]);
 
   for (const order of orders) {
     result.checked += 1;
@@ -424,15 +469,44 @@ export async function runStockExits(log: FastifyBaseLogger, day = nyToday()): Pr
       continue;
     }
 
-    // 3. The long book's thesis check: the panel turning outright
-    //    negative on a name is the closest thing this system has to
-    //    "the reason we owned it stopped being true".
+    // 3. The long book's thesis check. This used to key on the panel's
+    //    daily stance, and `not_notable` — "a quiet day" — closed
+    //    positions whose thesis nobody had actually examined (ERIE died
+    //    this way). The stance answers "was today notable" and re-rolls
+    //    with every news cycle; a six-month position needs the panel's
+    //    judgment of its ORIGINAL thesis (`thesisVerdict`, written only
+    //    when the panel reviewed the held position), and it needs it
+    //    twice: only two consecutive 'broken' reads close the book, so a
+    //    single noisy LLM sample can never end a position on its own.
     if (order.book === 'long') {
-      const stance = stanceCache.get(order.symbol);
-      if (stance?.stance === 'not_notable') {
+      const verdicts = latestThesisVerdicts(order.symbol);
+      const action = thesisExitAction(verdicts);
+      if (action === 'exit') {
         closeStockPosition(order.id, priceE4, 'measured', day, 'thesis_broken');
         result.closed += 1;
+        decisions.push({
+          day,
+          book: order.book,
+          symbol: order.symbol,
+          decision: 'exited',
+          reason: 'thesis_broken',
+          detail: { priceE4, entryPriceE4: order.entryPriceE4, verdicts },
+          modelRunId: order.modelRunId,
+        });
         continue;
+      }
+      if (action === 'unconfirmed' || action === 'weakened') {
+        // Not an exit yet — but silent tolerance would be indistinguishable
+        // from never having checked. The decision log carries the warning.
+        decisions.push({
+          day,
+          book: order.book,
+          symbol: order.symbol,
+          decision: 'held',
+          reason: action === 'unconfirmed' ? 'thesis_broken_unconfirmed' : 'thesis_weakened',
+          detail: { priceE4, verdicts },
+          modelRunId: order.modelRunId,
+        });
       }
     }
 

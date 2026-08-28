@@ -38,7 +38,18 @@ Rules:
   hold the position, e.g. "momentum and skeptic agree the volume spike lacks
   a clear catalyst" rather than an unattributed claim.
 - Never use "buy", "sell", "should", or investment-advice language, for the
-  same reason the specialists themselves don't.`;
+  same reason the specialists themselves don't.
+- "thesisVerdict" exists only when the SymbolContext carries a heldThesis
+  (the paper book owns this symbol). It judges the ORIGINAL thesis quoted
+  there — not today's news cycle — on its own axis: "intact" (the reasons
+  in the original thesis still hold), "weakened" (specialists surfaced
+  concrete evidence cutting against it, but not decisively), "broken"
+  (specialists surfaced concrete evidence that the core of the thesis no
+  longer holds). Two hard rules: a quiet day is NOT evidence against a
+  thesis — "nothing notable happened" means "intact", never "weakened" or
+  "broken"; and "broken" requires you to point at the specific specialist
+  statement that contradicts the original thesis. When the context has no
+  heldThesis, answer "not_applicable".`;
 
 const SYNTHESIS_SCHEMA = {
   type: 'object' as const,
@@ -52,8 +63,15 @@ const SYNTHESIS_SCHEMA = {
       items: { type: 'string' as const },
       description: 'What the panel could not resolve from the data it had — a real gap, not a rhetorical flourish.',
     },
+    thesisVerdict: {
+      type: 'string' as const,
+      enum: ['intact', 'weakened', 'broken', 'not_applicable'],
+      description:
+        'Only when the context carries a heldThesis: does the ORIGINAL entry thesis still hold? ' +
+        'A quiet day is intact, never weakened/broken. not_applicable when the symbol is not held.',
+    },
   },
-  required: ['stance', 'summary', 'agreements', 'disagreements', 'openQuestions'],
+  required: ['stance', 'summary', 'agreements', 'disagreements', 'openQuestions', 'thesisVerdict'],
   additionalProperties: false,
 };
 
@@ -86,6 +104,21 @@ export async function runSynthesis(
           role: 'user',
           content:
             `Panel discussion of ${ctx.symbol} (${ctx.name}):\n\n` +
+            // The synthesizer never sees the full SymbolContext — its rule
+            // is "nothing not in the transcript". The held thesis is the
+            // one exception, because thesisVerdict is defined AGAINST it:
+            // judging whether a thesis still holds requires reading the
+            // thesis. It is quoted verbatim, clearly fenced, and the
+            // system prompt still forbids importing its claims as facts.
+            (ctx.heldThesis
+              ? `=== HELD POSITION (for thesisVerdict only) ===\n` +
+                `The paper book has held this symbol (${ctx.heldThesis.book} book) since ` +
+                `${ctx.heldThesis.entryDay} (${ctx.heldThesis.daysHeld} days, ` +
+                `${ctx.heldThesis.currentReturnPct !== null ? `${ctx.heldThesis.currentReturnPct.toFixed(1)}% return` : 'unmarked'}).\n` +
+                `Original entry thesis: ${ctx.heldThesis.originalThesis ?? '(none recorded — judge against the prior panel read below)'}\n` +
+                `Prior panel read${ctx.heldThesis.priorStance ? ` (${ctx.heldThesis.priorStance.day}, ${ctx.heldThesis.priorStance.stance})` : ''}: ` +
+                `${ctx.heldThesis.priorStance?.summary ?? '(none)'}\n\n`
+              : '') +
             `=== ROUND 1 ===\n${formatRound1Transcript(round1)}\n\n` +
             `=== ROUND 2 ===\n${round2Text}`,
         },
@@ -98,5 +131,16 @@ export async function runSynthesis(
   if (!block || block.type !== 'text') {
     throw new Error('Claude returned no content for the synthesis');
   }
-  return JSON.parse(block.text) as SynthesisResult;
+  const raw = JSON.parse(block.text) as Omit<SynthesisResult, 'thesisVerdict'> & {
+    thesisVerdict: 'intact' | 'weakened' | 'broken' | 'not_applicable';
+  };
+  return {
+    ...raw,
+    // 'not_applicable' exists only because a JSON-schema enum cannot be
+    // conditionally required; a verdict for an unheld symbol is not a
+    // fact worth storing, and a fabricated one must never reach the exit
+    // engine — hence null, enforced here rather than trusted from the
+    // model.
+    thesisVerdict: ctx.heldThesis && raw.thesisVerdict !== 'not_applicable' ? raw.thesisVerdict : null,
+  };
 }
