@@ -129,6 +129,16 @@ export interface Round1Turn {
   agent: Specialist;
   stance: AgentStance;
   confidence: Confidence;
+  /** The specialist's probability that the symbol outperforms its own
+   * sector over the next 21 sessions — the scoreable number behind the
+   * words. Persisted so calibration (Brier scores per specialist) can be
+   * measured against outcomes once enough history accrues. */
+  probUp: number;
+  /** The one concrete observation that would most change this stance —
+   * required because a view with no falsifier is a mood, and because
+   * "what would change your mind" is the discipline that separates
+   * forecasters from narrators. */
+  falsifier: string;
   reasoning: string;
   /** The specific SymbolContext fields this reasoning actually rests on —
    * required so a claim can be checked against the input it came from,

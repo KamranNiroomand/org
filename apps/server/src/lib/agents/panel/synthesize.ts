@@ -88,8 +88,8 @@ export async function runSynthesis(
     .map(
       (t) =>
         `--- ${t.agent} (round 2, responding to ${t.respondingTo.join(', ') || 'no one directly'}) ---\n` +
-        `Stance: ${t.stance} (confidence: ${t.confidence})${t.revisedPosition ? ' [revised from round 1]' : ''}\n` +
-        `Reasoning: ${t.reasoning}\nCited: ${t.citedInputs.join(', ')}`,
+        `Stance: ${t.stance} (confidence: ${t.confidence}, P(outperform sector, 21 sessions): ${t.probUp.toFixed(2)})${t.revisedPosition ? ' [revised from round 1]' : ''}\n` +
+        `Reasoning: ${t.reasoning}\nWould change my mind: ${t.falsifier}\nCited: ${t.citedInputs.join(', ')}`,
     )
     .join('\n\n');
 

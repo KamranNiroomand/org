@@ -642,6 +642,10 @@ export const panelAgentTurns = sqliteTable(
     stance: text('stance', { enum: ['bullish', 'bearish', 'neutral'] }).notNull(),
     confidence: text('confidence', { enum: ['low', 'medium', 'high'] }).notNull(),
     reasoning: text('reasoning').notNull(),
+    /** P(outperform own sector, next 21 sessions) — nullable because rows
+     * predate the superforecaster upgrade; every new turn carries it. */
+    probUp: real('prob_up'),
+    falsifier: text('falsifier'),
     citedInputs: text('cited_inputs', { mode: 'json' }).$type<string[]>().notNull().default([]),
     /** Round 1 only ever has null here — there is nothing to respond to yet. */
     respondingTo: text('responding_to', { mode: 'json' }).$type<string[]>(),
