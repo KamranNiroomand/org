@@ -30,7 +30,29 @@ const SHARED_RULES = `Rules every specialist follows, regardless of persona:
   catalyst, or a news event not present in the input.
 - If the data genuinely doesn't support a strong view, say so in low
   confidence rather than manufacturing conviction — a confident wrong take
-  is worse than an honest "not enough here to tell".`;
+  is worse than an honest "not enough here to tell".
+
+Forecast like a superforecaster, not a pundit:
+
+- OUTSIDE VIEW FIRST. Before reasoning about this specific company, ask
+  what usually happens in situations shaped like this one — most stocks
+  near a 52-week high stay volatile but trend-follow for weeks; most
+  single-day spikes without news mean-revert; most earnings drifts run
+  for about a quarter. Anchor on that base rate, then adjust for what is
+  genuinely specific here. An inside-view story with no base rate behind
+  it is the classic way confident forecasts go wrong.
+- probUp is your probability, as a number, that this symbol OUTPERFORMS
+  its own sector over the next 21 trading sessions. Commit to a number
+  between 0.05 and 0.95 — never 0.5 as a reflex (0.5 means you judged
+  the evidence balanced, not that you skipped judging), and never the
+  extremes (certainty about a three-week stock move is miscalibration by
+  definition). Your probabilities will be scored against what actually
+  happens, so state the number you would want to be graded on.
+- falsifier: name the single concrete, observable thing that would most
+  change your stance — a specific price level breaking, a filing, a
+  metric crossing a line, coverage flipping direction. "New information
+  could change things" is not a falsifier; it is an evasion. A view you
+  cannot say what would falsify is not a view, it is a mood.`;
 
 const PERSONAS: Record<Specialist, string> = {
   momentum: `You are the momentum specialist on a four-person panel reviewing
@@ -84,14 +106,24 @@ const CITED_INPUTS_SCHEMA = {
 const SHARED_TURN_PROPERTIES = {
   stance: { type: 'string' as const, enum: ['bullish', 'bearish', 'neutral'] },
   confidence: { type: 'string' as const, enum: ['low', 'medium', 'high'] },
-  reasoning: { type: 'string' as const, description: 'Two to four sentences, from your persona\'s lens only.' },
+  probUp: {
+    type: 'number' as const,
+    minimum: 0.05,
+    maximum: 0.95,
+    description: 'Your probability that this symbol outperforms its own sector over the next 21 trading sessions. A committed number, not a reflex 0.5 — it will be scored against outcomes.',
+  },
+  falsifier: {
+    type: 'string' as const,
+    description: 'The single concrete, observable thing that would most change your stance. Specific — a level, a filing, a metric — never "new information".',
+  },
+  reasoning: { type: 'string' as const, description: 'Two to four sentences, from your persona\'s lens only. Outside view (base rate) first, then the case-specific adjustment.' },
   citedInputs: CITED_INPUTS_SCHEMA,
 };
 
 const ROUND1_SCHEMA = {
   type: 'object' as const,
   properties: SHARED_TURN_PROPERTIES,
-  required: ['stance', 'confidence', 'reasoning', 'citedInputs'],
+  required: ['stance', 'confidence', 'probUp', 'falsifier', 'reasoning', 'citedInputs'],
   additionalProperties: false,
 };
 
@@ -101,7 +133,7 @@ const ROUND2_SCHEMA = {
     ...SHARED_TURN_PROPERTIES,
     reasoning: {
       type: 'string' as const,
-      description: 'Two to four sentences. Must engage directly with at least one other panelist\'s specific point.',
+      description: 'Two to four sentences. Engage the STRONGEST opposing point on the table — steelman it, then answer it or concede to it. Rebutting the weakest objection is the failure mode this round exists to prevent.',
     },
     respondingTo: {
       type: 'array' as const,
@@ -113,7 +145,7 @@ const ROUND2_SCHEMA = {
       description: 'True only if your stance or confidence actually changed from round 1.',
     },
   },
-  required: ['stance', 'confidence', 'reasoning', 'citedInputs', 'respondingTo', 'revisedPosition'],
+  required: ['stance', 'confidence', 'probUp', 'falsifier', 'reasoning', 'citedInputs', 'respondingTo', 'revisedPosition'],
   additionalProperties: false,
 };
 
@@ -132,8 +164,8 @@ export function formatRound1Transcript(turns: Round1Turn[]): string {
   return turns
     .map(
       (t) =>
-        `--- ${t.agent} (round 1) ---\nStance: ${t.stance} (confidence: ${t.confidence})\n` +
-        `Reasoning: ${t.reasoning}\nCited: ${t.citedInputs.join(', ')}`,
+        `--- ${t.agent} (round 1) ---\nStance: ${t.stance} (confidence: ${t.confidence}, P(outperform sector, 21 sessions): ${t.probUp.toFixed(2)})\n` +
+        `Reasoning: ${t.reasoning}\nWould change my mind: ${t.falsifier}\nCited: ${t.citedInputs.join(', ')}`,
     )
     .join('\n\n');
 }

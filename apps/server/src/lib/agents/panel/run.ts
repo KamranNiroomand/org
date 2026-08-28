@@ -118,6 +118,8 @@ function persistTurns(analysisId: string, round: 1 | 2, turns: readonly (Round1T
         agent: t.agent,
         stance: t.stance,
         confidence: t.confidence,
+        probUp: t.probUp,
+        falsifier: t.falsifier,
         reasoning: t.reasoning,
         citedInputs: t.citedInputs,
         respondingTo: 'respondingTo' in t ? t.respondingTo : null,
