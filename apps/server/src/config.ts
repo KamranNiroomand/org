@@ -171,6 +171,11 @@ const schema = z.object({
   // positions (nine LLM calls each) — a broadly red tape must not be able
   // to spend the whole budget re-asking whether every position is fine.
   STOCK_DISTRESS_MAX_REVIEWS_PER_DAY: z.coerce.number().int().min(0).default(3),
+  // A candidate whose daily returns average above this correlation with
+  // the names already held is the same bet wearing a new ticker — the
+  // sector cap's blind spot (an AI book spread across three GICS sectors
+  // passes every sector check and still moves as one position).
+  STOCK_MAX_BOOK_CORRELATION: z.coerce.number().min(0).max(1).default(0.7),
   PAPER_SPREAD_HAIRCUT_PCT: z.coerce.number().min(0).max(0.2).default(0.03),
   PAPER_SPREAD_HAIRCUT_MIN_E4: z.coerce.number().int().min(0).default(500),
   // Artificial starting balance for the paper book, in whole dollars.
@@ -402,6 +407,7 @@ export const config = {
       maxPerSector: env.STOCK_MAX_PER_SECTOR,
       exitRecheckCron: env.STOCK_EXIT_RECHECK_CRON,
       distressMaxReviewsPerDay: env.STOCK_DISTRESS_MAX_REVIEWS_PER_DAY,
+      maxBookCorrelation: env.STOCK_MAX_BOOK_CORRELATION,
     },
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
     edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,

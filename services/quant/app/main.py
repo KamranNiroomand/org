@@ -422,6 +422,41 @@ def stock_regime(request: StockRegimeRequest) -> dict:
     return market_regime(bars, request.day)
 
 
+class StockSizeRequest(BaseModel):
+    book_capital_e4: int
+    max_positions: int
+    picks: list[dict]
+
+
+@app.post("/stock/size")
+def stock_size(request: StockSizeRequest) -> dict:
+    """Equal-risk capital per candidate — see sizing.py. Pure arithmetic
+    on the stops the engine intends to use; no market access."""
+    from .sizing import equal_risk_capital
+
+    return {
+        "sizes": equal_risk_capital(request.book_capital_e4, request.max_positions, request.picks)
+    }
+
+
+class StockCrowdingRequest(BaseModel):
+    held: list[str]
+    candidates: list[str]
+
+
+@app.post("/stock/crowding")
+def stock_crowding(request: StockCrowdingRequest) -> dict:
+    """Average return correlation of each candidate against the held
+    book — see crowding.py for why the sector cap alone is not
+    diversification."""
+    from .db import read_bars
+    from .crowding import crowding_scores
+
+    symbols = sorted(set(request.held) | set(request.candidates))
+    bars = read_bars(symbols=symbols)
+    return {"scores": crowding_scores(bars, request.held, request.candidates)}
+
+
 @app.get("/stock/performance")
 def stock_performance(target: str = "dir", run: str | None = None) -> dict:
     """The model-performance dashboard's data, computed in Python.

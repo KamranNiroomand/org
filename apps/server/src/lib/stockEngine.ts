@@ -5,7 +5,7 @@ import { db } from '../db/index.js';
 import { instruments, panelRuns, panelSymbolAnalyses } from '../db/schema.js';
 import { marketDb } from '../db/market/index.js';
 import { docMentions, documents, trackedUnderlyings } from '../db/market/schema.js';
-import { QuantRefusal, QuantUnavailable, stockRank, stockRegime, type StockPick } from './quant.js';
+import { QuantRefusal, QuantUnavailable, stockCrowding, stockRank, stockRegime, stockSizes, type StockPick } from './quant.js';
 import { fetchQuotes } from './quotes.js';
 import { nyToday } from './options/positionHealth.js';
 import { toVendorSymbol } from './options/universe.js';
@@ -405,6 +405,39 @@ export async function runStockEntries(
   let remainingCashE4 = capacity.freeCashE4;
   const perPositionE4 = Math.floor(capacity.bookCapitalE4 / maxPositions);
 
+  // The stop each candidate would actually get, computed once: sizing is
+  // a function of the stop (equal dollars at every stop — sizing.py),
+  // and computing it twice invites the two to disagree about the risk.
+  const stopPctBySymbol = new Map(
+    picks
+      .slice(0, PANEL_CANDIDATES)
+      .map((p) => [
+        p.symbol,
+        stockStopPct(p.forecastVol, horizonDays, book === 'short' ? 1.5 : 2, book === 'short' ? 0.2 : 0.3),
+      ]),
+  );
+  // Both quant overlays fail open: a down sidecar means equal-slice
+  // sizing and no crowding veto, never a halted entry pass.
+  let sizeBySymbol = new Map<string, number>();
+  try {
+    sizeBySymbol = await stockSizes(
+      capacity.bookCapitalE4,
+      maxPositions,
+      [...stopPctBySymbol].map(([symbol, stopPct]) => ({ symbol, stop_pct: stopPct })),
+    );
+  } catch (err) {
+    log.warn(`Stock entries: sizing unavailable, equal slices — ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let crowding = new Map<string, { avgCorr: number; nHeldUsed: number }>();
+  const allHeld = [...new Set([...stockCapacity('short').heldSymbols, ...stockCapacity('long').heldSymbols])];
+  if (allHeld.length >= 3) {
+    try {
+      crowding = await stockCrowding(allHeld, [...stopPctBySymbol.keys()]);
+    } catch (err) {
+      log.warn(`Stock entries: crowding unavailable — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   for (const pick of picks.slice(0, PANEL_CANDIDATES)) {
     if (result.opened.length >= slots) {
       pushRejection(pick.symbol, 'slots_full');
@@ -445,6 +478,15 @@ export async function runStockEntries(
       result.rejections.push({ symbol: pick.symbol, reason: `sector_cap:${sector}` });
       continue;
     }
+    const crowd = crowding.get(pick.symbol);
+    if (crowd && crowd.avgCorr > cfg.maxBookCorrelation) {
+      pushRejection(pick.symbol, `crowded:${crowd.avgCorr.toFixed(2)}`, {
+        avgCorr: crowd.avgCorr,
+        nHeldUsed: crowd.nHeldUsed,
+        threshold: cfg.maxBookCorrelation,
+      });
+      continue;
+    }
     const quote = quotes.get(pick.symbol);
     if (!quote || !(quote.price > 0)) {
       pushRejection(pick.symbol, 'no_quote');
@@ -452,7 +494,7 @@ export async function runStockEntries(
     }
     // quotes.ts prices are minor units (cents); the book stores E4.
     const priceE4 = quote.price * 100;
-    const budgetE4 = Math.min(perPositionE4, remainingCashE4);
+    const budgetE4 = Math.min(sizeBySymbol.get(pick.symbol) ?? perPositionE4, remainingCashE4);
     const quantity = Math.floor((budgetE4 / priceE4) * 1000) / 1000; // fractional, 3dp
     if (quantity <= 0) {
       pushRejection(pick.symbol, 'unaffordable');
@@ -466,12 +508,7 @@ export async function runStockEntries(
     // risk is a fraction of exposure) applied to shares, where it is
     // not. Volatility belongs in position *sizing*; the stop's job is to
     // bound the loss.
-    const stopPct = stockStopPct(
-      pick.forecastVol,
-      horizonDays,
-      book === 'short' ? 1.5 : 2,
-      book === 'short' ? 0.2 : 0.3,
-    );
+    const stopPct = stopPctBySymbol.get(pick.symbol)!;
     const targetExit = new Date(Date.parse(`${day}T00:00:00Z`) + horizonDays * 1.4 * 86_400_000)
       .toISOString()
       .slice(0, 10);

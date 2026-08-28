@@ -414,6 +414,43 @@ export async function stockRegime(day: string): Promise<StockRegime> {
   return (await res.json()) as StockRegime;
 }
 
+/** Equal-risk capital per candidate — sizing.py owns the arithmetic so
+ * sizing and Python-side analytics can never drift apart. */
+export async function stockSizes(
+  bookCapitalE4: number,
+  maxPositions: number,
+  picks: Array<{ symbol: string; stop_pct: number | null }>,
+): Promise<Map<string, number>> {
+  const res = await fetch(`${config.market.quantUrl}/stock/size`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ book_capital_e4: bookCapitalE4, max_positions: maxPositions, picks }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  const body = (await res.json()) as { sizes: Record<string, number> };
+  return new Map(Object.entries(body.sizes));
+}
+
+/** Average return correlation of each candidate against the held book —
+ * crowding.py explains why the sector cap alone is not diversification. */
+export async function stockCrowding(
+  held: string[],
+  candidates: string[],
+): Promise<Map<string, { avgCorr: number; nHeldUsed: number }>> {
+  const res = await fetch(`${config.market.quantUrl}/stock/crowding`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ held, candidates }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new QuantUnavailable(`HTTP ${res.status} ${res.statusText}`);
+  const body = (await res.json()) as { scores: Record<string, { avg_corr: number; n_held_used: number }> };
+  return new Map(
+    Object.entries(body.scores).map(([k, v]) => [k, { avgCorr: v.avg_corr, nHeldUsed: v.n_held_used }]),
+  );
+}
+
 export async function stockRank(
   day: string,
   target: 'stk_short' | 'stk_long',
