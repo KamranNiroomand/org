@@ -1,0 +1,1 @@
+ALTER TABLE `panel_symbol_analyses` ADD `thesis_verdict` text;

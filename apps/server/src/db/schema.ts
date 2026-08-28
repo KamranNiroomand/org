@@ -603,6 +603,14 @@ export const panelSymbolAnalyses = sqliteTable(
     agreements: text('agreements', { mode: 'json' }).$type<string[]>().notNull().default([]),
     disagreements: text('disagreements', { mode: 'json' }).$type<string[]>().notNull().default([]),
     openQuestions: text('open_questions', { mode: 'json' }).$type<string[]>().notNull().default([]),
+    /** Only for symbols the stock book already held when the panel ran, and
+     * judged against the ORIGINAL entry thesis, not the day's news: did the
+     * reason we own this still hold? Null for everything else — `stance`
+     * answers "was today notable", which re-rolls with every news cycle and
+     * must never be read as a verdict on a position (the long book once
+     * closed ERIE because `not_notable` — a quiet day — was treated as a
+     * broken thesis). */
+    thesisVerdict: text('thesis_verdict', { enum: ['intact', 'weakened', 'broken'] }),
     /** False from insert until the real synthesis lands. Without this, a run
      * that crashes between the placeholder insert and the final update
      * (budget exhaustion, a network failure) leaves a row with

@@ -161,6 +161,12 @@ const schema = z.object({
   // legitimately full of one sector, and a book that takes it becomes a
   // single bet wearing eight names.
   STOCK_MAX_PER_SECTOR: z.coerce.number().int().positive().default(2),
+  // Intraday cadence for the stock exit pass (marks + stop/ratchet/thesis
+  // rules) — same market-hours rhythm as EXIT_RECHECK_CRON below, and for
+  // the same reason: a stop only checked once a day is a stop that can
+  // let a whole session's move through, and a book marked once a day
+  // shows yesterday's prices all afternoon.
+  STOCK_EXIT_RECHECK_CRON: z.string().default('*/15 9-16 * * 1-5'),
   PAPER_SPREAD_HAIRCUT_PCT: z.coerce.number().min(0).max(0.2).default(0.03),
   PAPER_SPREAD_HAIRCUT_MIN_E4: z.coerce.number().int().min(0).default(500),
   // Artificial starting balance for the paper book, in whole dollars.
@@ -390,6 +396,7 @@ export const config = {
       longMaxPositions: env.STOCK_LONG_MAX_POSITIONS,
       maxNewPerDay: env.STOCK_MAX_NEW_PER_DAY,
       maxPerSector: env.STOCK_MAX_PER_SECTOR,
+      exitRecheckCron: env.STOCK_EXIT_RECHECK_CRON,
     },
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
     edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,

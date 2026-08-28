@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { stockStopPct, stockTargetPct } from './stockEngine.js';
+import { stockStopPct, stockTargetPct, thesisExitAction } from './stockEngine.js';
 
 describe('stockStopPct', () => {
   it('scales the stop to the symbol’s own volatility', () => {
@@ -76,5 +76,33 @@ describe('instrument eligibility', () => {
   it('refuses a symbol with no classification at all', () => {
     expect(eligible('short', null)).toBe('unclassified_symbol');
     expect(eligible('long', null)).toBe('unclassified_symbol');
+  });
+});
+
+describe('thesisExitAction', () => {
+  it('exits only on two consecutive broken verdicts', () => {
+    expect(thesisExitAction(['broken', 'broken'])).toBe('exit');
+  });
+
+  it('a single broken read is unconfirmed, never an exit', () => {
+    expect(thesisExitAction(['broken'])).toBe('unconfirmed');
+    expect(thesisExitAction(['broken', 'intact'])).toBe('unconfirmed');
+    expect(thesisExitAction(['broken', 'weakened'])).toBe('unconfirmed');
+  });
+
+  it('a broken read followed by recovery does not exit', () => {
+    // The order is newest-first: today intact, yesterday broken — the
+    // panel walked it back, and the position lives.
+    expect(thesisExitAction(['intact', 'broken'])).toBe('none');
+    expect(thesisExitAction(['weakened', 'broken'])).toBe('weakened');
+  });
+
+  it('weakened warns without exiting', () => {
+    expect(thesisExitAction(['weakened', 'weakened'])).toBe('weakened');
+  });
+
+  it('no verdicts at all holds quietly — absence of review is not evidence', () => {
+    expect(thesisExitAction([])).toBe('none');
+    expect(thesisExitAction(['intact'])).toBe('none');
   });
 });

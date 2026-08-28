@@ -31,6 +31,7 @@ const CTX = {
   avgVolume10Day: 900_000,
   holding: null,
   sectorPulse: null,
+  heldThesis: null,
   radar: null,
   recentDocuments: [],
 };

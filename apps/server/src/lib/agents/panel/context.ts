@@ -1,8 +1,10 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import { db } from '../../../db/index.js';
-import { holdings, instruments, radarScores } from '../../../db/schema.js';
+import { holdings, instruments, panelRuns, panelSymbolAnalyses, radarScores } from '../../../db/schema.js';
 import { marketDb } from '../../../db/market/index.js';
 import { documents, docMentions } from '../../../db/market/schema.js';
+import { paperDb } from '../../../db/paper/index.js';
+import { stockMarks, stockOrders } from '../../../db/paper/schema.js';
 import { toVendorSymbol } from '../../options/universe.js';
 import type { SymbolContext } from './types.js';
 
@@ -11,6 +13,77 @@ import type { SymbolContext } from './types.js';
  * that news_sentiment ends up re-reading the same event three different
  * ways from three different wire pickups. */
 const MAX_RECENT_DOCUMENTS = 10;
+
+/**
+ * The stock book's stake in this symbol, if it has one — what turns the
+ * panel's daily news read into a position review. Judging a held name from
+ * a blank slate every day is why stances used to flap notable → mixed →
+ * not_notable on ordinary quiet days: the specialists had no idea the book
+ * owned the name, what thesis it was bought under, or what they themselves
+ * said yesterday. Prefers the long-book position when both books hold the
+ * symbol (the long book is the one whose exits hang on this review).
+ *
+ * Reads paper.db (stock_orders/stock_marks) and org.db (the entry's panel
+ * synthesis via thesis_ref, and the latest completed prior analysis).
+ * Returns null when the book doesn't hold the symbol — never a fabricated
+ * "not held" on a failed lookup, same contract as `holding`.
+ */
+function buildHeldThesis(symbol: string): SymbolContext['heldThesis'] {
+  const order = paperDb
+    .select()
+    .from(stockOrders)
+    .where(sql`${stockOrders.symbol} = ${symbol} and ${stockOrders.status} = 'open'`)
+    .orderBy(sql`case ${stockOrders.book} when 'long' then 0 else 1 end`)
+    .limit(1)
+    .get();
+  if (!order) return null;
+
+  const mark = paperDb
+    .select()
+    .from(stockMarks)
+    .where(eq(stockMarks.orderId, order.id))
+    .orderBy(desc(stockMarks.tradingDay))
+    .limit(1)
+    .get();
+
+  const originalThesis = order.thesisRef
+    ? (db
+        .select({ summary: panelSymbolAnalyses.summary })
+        .from(panelSymbolAnalyses)
+        .where(eq(panelSymbolAnalyses.id, order.thesisRef))
+        .get()?.summary ?? null)
+    : null;
+
+  const prior = db
+    .select({
+      stance: panelSymbolAnalyses.stance,
+      summary: panelSymbolAnalyses.summary,
+      startedAt: panelRuns.startedAt,
+    })
+    .from(panelSymbolAnalyses)
+    .innerJoin(panelRuns, eq(panelSymbolAnalyses.runId, panelRuns.id))
+    .where(sql`${panelSymbolAnalyses.symbol} = ${symbol} and ${panelSymbolAnalyses.synthesisComplete} = 1`)
+    .orderBy(desc(panelRuns.startedAt))
+    .limit(1)
+    .get();
+
+  const daysHeld = Math.max(
+    0,
+    Math.round((Date.now() - Date.parse(`${order.entryDay}T00:00:00Z`)) / 86_400_000),
+  );
+  const entryPrice = order.entryPriceE4 / 10_000;
+  return {
+    book: order.book,
+    entryDay: order.entryDay,
+    entryPrice,
+    daysHeld,
+    currentReturnPct: mark ? ((mark.markPriceE4 - order.entryPriceE4) / order.entryPriceE4) * 100 : null,
+    originalThesis,
+    priorStance: prior
+      ? { stance: prior.stance, day: prior.startedAt.slice(0, 10), summary: prior.summary }
+      : null,
+  };
+}
 
 /**
  * Builds the one shared picture of a symbol every specialist reasons from.
@@ -126,6 +199,7 @@ export function buildSymbolContext(symbol: string): SymbolContext | null {
   return {
     symbol: row.symbol,
     name: row.name,
+    heldThesis: buildHeldThesis(symbol),
     price: row.price,
     dayChangePercent: row.dayChangePercent,
     marketCap: row.marketCap,
