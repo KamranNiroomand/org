@@ -115,8 +115,15 @@ function latestThesisVerdicts(symbol: string, limit = 2): Array<'intact' | 'weak
     .limit(20)
     .all();
   const verdicts: Array<'intact' | 'weakened' | 'broken'> = [];
+  let lastDay: string | null = null;
   for (const r of rows) {
     if (r.verdict === null) continue;
+    // One verdict per calendar day, the newest: "two consecutive broken
+    // reads" must mean two different days' evidence, or a user clicking
+    // Run cycle twice on one bad afternoon would self-confirm an exit.
+    const runDay = r.startedAt?.slice(0, 10) ?? null;
+    if (runDay !== null && runDay === lastDay) continue;
+    lastDay = runDay;
     verdicts.push(r.verdict);
     if (verdicts.length >= limit) break;
   }
