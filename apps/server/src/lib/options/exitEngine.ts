@@ -22,7 +22,7 @@ import { readDocumentsSince } from '../text/news.js';
 import { nowIso, todayKey } from '../util.js';
 import { PolygonProvider } from './polygon.js';
 import { operatingTradingDay } from './positionHealth.js';
-import { fetchTradierQuotes } from './tradier.js';
+import { fetchLiveNbbo } from './liveQuotes.js';
 import type { OptionsProvider } from './provider.js';
 
 /**
@@ -41,9 +41,10 @@ export interface ExitEngineDeps {
    * without fighting `config`'s deliberate read-only typing. */
   anthropicConfigured: boolean;
   maxCallsPerRun: number;
-  /** The Tradier realism overlay — see lib/options/tradier.ts. Injected
-   * so tests exercise both the measured and print-basis paths. */
-  fetchTradierQuotes: typeof fetchTradierQuotes;
+  /** The live-NBBO realism overlay — see lib/options/liveQuotes.ts for
+   * the provider dispatch (IBKR, then Tradier). Injected so tests
+   * exercise both the measured and print-basis paths. */
+  fetchLiveNbbo: typeof fetchLiveNbbo;
   computeExitTarget: typeof computeExitTarget;
 }
 
@@ -54,7 +55,7 @@ const defaultDeps: ExitEngineDeps = {
   anthropicConfigured: config.anthropic.configured,
   maxCallsPerRun: config.market.exitRecheck.maxCallsPerRun,
   computeExitTarget,
-  fetchTradierQuotes,
+  fetchLiveNbbo,
 };
 
 /**
@@ -332,7 +333,7 @@ export async function runExitEngine(
     // deliberately leaves untouched: a bid IS the touchable number);
     // where it doesn't, each position falls back to the print-basis path
     // below, exactly as before the overlay existed.
-    const liveQuotes = await deps.fetchTradierQuotes(orders.map((o) => o.occSymbol));
+    const liveQuotes = await deps.fetchLiveNbbo(orders.map((o) => o.occSymbol));
 
     for (const order of orders) {
       summary.checked += 1;

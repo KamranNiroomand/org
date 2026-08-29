@@ -8,7 +8,7 @@ import { accountCapacity, contractMultiplier, logDecisions, modelEntriesOpenedOn
 import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
-import { fetchTradierQuotes } from './tradier.js';
+import { fetchLiveNbbo } from './liveQuotes.js';
 import { selectEntries, QuantRefusal, QuantUnavailable, type RejectedEntry, type ScreenedOutEntry, type SelectedEntry } from '../quant.js';
 
 /**
@@ -182,7 +182,7 @@ export async function runAutoEntry(
   // answers with a real ask, the fill is that ask, basis 'measured', and
   // the modelled-fill haircut stays out of it; where it doesn't, the
   // print-derived price pays the buy-side haircut in openOrder as before.
-  const liveAsks = await fetchTradierQuotes(selected.map((s) => s.contract.occ_symbol));
+  const liveAsks = await fetchLiveNbbo(selected.map((s) => s.contract.occ_symbol));
 
   for (const { contract: candidate, quantity } of selected) {
     try {

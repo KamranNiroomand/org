@@ -102,7 +102,7 @@ function liveQuote(bidE4: number | null): ChainQuote {
 const NEVER_REVIEW_DEPS: ExitEngineDeps = {
   // No overlay in the default fixture: every test's price arrives through
   // the print-basis path unless a test injects live quotes itself.
-  fetchTradierQuotes: async () => new Map(),
+  fetchLiveNbbo: async () => new Map(),
   evaluateExit: async () => ({
     action: 'hold',
     newTargetExitPriceE4: toE4(1.5),
@@ -444,7 +444,7 @@ describe('runExitEngine', () => {
     const id = openManagedPosition();
     const deps: ExitEngineDeps = {
       ...NEVER_REVIEW_DEPS,
-      fetchTradierQuotes: async () =>
+      fetchLiveNbbo: async () =>
         new Map([[OCC, { bidE4: toE4(0.4), askE4: toE4(0.45), lastE4: toE4(0.42) }]]),
       evaluateExit: async (input) => {
         // The live bid outranks the chain's print-basis prices.
