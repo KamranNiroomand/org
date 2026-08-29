@@ -1,3 +1,4 @@
+import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { config } from '../../config.js';
 import type { TradierQuote } from './tradier.js';
@@ -88,7 +89,15 @@ export function gatewayGet(base: string, path: string): Promise<unknown> {
       return;
     }
     const isLoopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-    const req = httpsRequest(
+    // Plain http is permitted for the gateway on loopback only (its
+    // listenSsl:false mode — traffic never leaves the machine); any
+    // remote gateway URL must be https, full verification.
+    if (url.protocol === 'http:' && !isLoopback) {
+      resolve(null);
+      return;
+    }
+    const makeRequest = url.protocol === 'http:' ? httpRequest : httpsRequest;
+    const req = makeRequest(
       url,
       {
         method: 'GET',
