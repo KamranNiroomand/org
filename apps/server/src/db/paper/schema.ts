@@ -436,3 +436,28 @@ export const paperPositionHealth = sqliteTable(
     index('paper_position_health_day_idx').on(t.day),
   ],
 );
+
+/**
+ * Every day's model forecast per symbol, written at cycle time — the
+ * raw material for meta-labeling (a second model asking "when is the
+ * first model right?"), which needs exactly this: what was predicted,
+ * by which artifact, on which day, so it can later be joined against
+ * what actually happened. Nothing reads it yet; the dataset has to
+ * exist before the model that learns from it can.
+ */
+export const stockForecasts = sqliteTable(
+  'stock_forecasts',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    day: text('day').notNull(),
+    target: text('target').notNull(),
+    symbol: text('symbol').notNull(),
+    modelRunId: text('model_run_id').notNull(),
+    rank: integer('rank').notNull(),
+    forecastSigmas: real('forecast_sigmas'),
+    horizonReturn: real('horizon_return'),
+    forecastVol: real('forecast_vol'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('stock_forecasts_day_target_symbol_uq').on(t.day, t.target, t.symbol)],
+);

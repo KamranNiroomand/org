@@ -17,6 +17,7 @@ import {
   openStockPosition,
   openStockOrders,
   stockCapacity,
+  persistStockForecasts,
   stockDecisionsForDay,
   stockEntriesOpenedOn,
   type StockBook,
@@ -907,8 +908,13 @@ export async function runStockCycle(
   const shortlist = new Set<string>();
   for (const target of [SHORT_TARGET, LONG_TARGET] as const) {
     try {
-      const ranked = await stockRank(day, target, PANEL_CANDIDATES);
-      for (const p of ranked.picks) shortlist.add(p.symbol);
+      // The full board, not just the panel's slice: the top 100 get
+      // persisted as the meta-labeling dataset (what was predicted, by
+      // which artifact, on which day — joinable later against what
+      // happened), and the rank cache makes the wider ask free.
+      const ranked = await stockRank(day, target, 100);
+      persistStockForecasts(day, target, ranked.modelRunId, ranked.picks);
+      for (const p of ranked.picks.slice(0, PANEL_CANDIDATES)) shortlist.add(p.symbol);
     } catch (err) {
       log.warn(`Stock cycle: ${target} rank unavailable — ${err instanceof Error ? err.message : String(err)}`);
     }

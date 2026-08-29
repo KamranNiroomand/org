@@ -108,6 +108,47 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  /** Specialist calibration — every probUp the panel has committed,
+   * Brier-scored in the quant sidecar against sector-relative outcomes.
+   * Mostly "pending" until late September; wired now so maturation is
+   * automatic. */
+  app.get('/api/stocks/calibration', async (_req, reply) => {
+    const { db } = await import('../db/index.js');
+    const { panelAgentTurns, panelRuns, panelSymbolAnalyses } = await import('../db/schema.js');
+    const { eq, isNotNull } = await import('drizzle-orm');
+    const turns = db
+      .select({
+        specialist: panelAgentTurns.agent,
+        probUp: panelAgentTurns.probUp,
+        symbol: panelSymbolAnalyses.symbol,
+        startedAt: panelRuns.startedAt,
+      })
+      .from(panelAgentTurns)
+      .innerJoin(panelSymbolAnalyses, eq(panelAgentTurns.analysisId, panelSymbolAnalyses.id))
+      .innerJoin(panelRuns, eq(panelSymbolAnalyses.runId, panelRuns.id))
+      .where(isNotNull(panelAgentTurns.probUp))
+      .all();
+    try {
+      const res = await fetch(`${config.market.quantUrl}/stock/calibration`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          turns: turns.map((t) => ({
+            specialist: t.specialist,
+            symbol: t.symbol,
+            day: t.startedAt.slice(0, 10),
+            prob_up: t.probUp,
+          })),
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!res.ok) return reply.code(503).send({ error: `quant ${res.status}` });
+      return await res.json();
+    } catch (err) {
+      return reply.code(503).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   /** Manual trigger for the whole stock cycle — the nightly job calls
    * the same function. */
   app.post('/api/stocks/cycle', async (req) => runStockCycle(req.log));
