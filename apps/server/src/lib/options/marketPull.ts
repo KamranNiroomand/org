@@ -114,7 +114,10 @@ export function marketCorpusIsStale(): boolean {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
-    hour12: false,
+    // h23, not hour12:false — some ICU versions render midnight as "24"
+    // under the latter, which would read as "after 20:00" and spend the
+    // day's heal attempts on a snapshot that cannot exist yet.
+    hourCycle: 'h23',
   }).formatToParts(new Date());
   const get = (t: string) => nyParts.find((p) => p.type === t)?.value ?? '00';
   const today = `${get('year')}-${get('month')}-${get('day')}`;
