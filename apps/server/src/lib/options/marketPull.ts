@@ -76,6 +76,31 @@ export async function pullMarketSnapshot(): Promise<PullResult> {
     return { ok: false, message: `rsync failed: ${detail}` };
   }
 
+  // The model artifacts ride along with the corpus, additively. The
+  // runner trains daily; the reader runs the stock cycle — and an
+  // ensemble of "the last five refits" served from a reader that only
+  // ever received one hand-copied artifact silently degenerates to the
+  // single-model behavior it exists to improve on (found live: the
+  // first ensemble board answered with a bare champion id). --update
+  // only adds and refreshes; a failed models sync degrades the ensemble,
+  // never the pull.
+  const modelsSync = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+    const child = spawn('rsync', [
+      '-az',
+      '--update',
+      `${config.market.runnerSshHost}:${remoteDir}/models/`,
+      `${config.market.dataDir}/models/`,
+    ]);
+    let stderrOutput = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrOutput += chunk.toString();
+    });
+    child.on('error', (err) => resolve({ status: null, stderr: err.message }));
+    child.on('close', (code) => resolve({ status: code, stderr: stderrOutput }));
+  });
+  const modelsNote =
+    modelsSync.status === 0 ? ' (+models)' : ` (models sync failed: ${modelsSync.stderr.trim() || modelsSync.status})`;
+
   try {
     reopenMarketDb();
   } catch (err) {
@@ -85,7 +110,7 @@ export async function pullMarketSnapshot(): Promise<PullResult> {
       message: `Pulled ${remoteSnapshot} → ${config.market.dbPath}, but reopening the database connection failed: ${detail}`,
     };
   }
-  return { ok: true, message: `Pulled ${remoteSnapshot} → ${config.market.dbPath}` };
+  return { ok: true, message: `Pulled ${remoteSnapshot} → ${config.market.dbPath}${modelsNote}` };
 }
 
 
