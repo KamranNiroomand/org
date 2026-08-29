@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The stale-board guard compares the board's day to the real calendar;
+// these fixtures live on a fixed day, so pin "today" to it. The guard's
+// own behavior gets its own test below with the mock overridden.
+vi.mock('./positionHealth.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./positionHealth.js')>()),
+  nyToday: vi.fn(() => '2026-08-18'),
+}));
 import { formatOccSymbol, toE4 } from '@org/shared';
 import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
@@ -340,5 +348,18 @@ describe('runAutoEntry', () => {
     const result = await runAutoEntry('2026-08-18');
     expect(result.opened).toEqual([]);
     expect(result.skippedReason).toBeTruthy();
+  });
+});
+
+
+describe('the stale-board guard', () => {
+  it('refuses to open entries against a board from another session', async () => {
+    const { nyToday } = await import('./positionHealth.js');
+    vi.mocked(nyToday).mockReturnValueOnce('2026-08-20');
+    const result = await runAutoEntry('2026-08-18', async () => {
+      throw new Error('the allocator must never be consulted for a stale board');
+    });
+    expect(result.opened).toHaveLength(0);
+    expect(result.skippedReason).toContain('stale_board');
   });
 });
