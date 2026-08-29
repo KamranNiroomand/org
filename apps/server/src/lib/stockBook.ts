@@ -1,7 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { config } from '../config.js';
 import { paperDb } from '../db/paper/index.js';
-import { stockDecisions, stockMarks, stockOrders } from '../db/paper/schema.js';
+import { stockDecisions, stockMarks, stockOrders , stockForecasts } from '../db/paper/schema.js';
 import { newId, nowIso } from './util.js';
 import { haircutE4, PaperError } from './paper.js';
 
@@ -233,6 +233,49 @@ export function logStockDecisions(rows: StockDecisionRow[]): void {
 }
 
 /** Everything the engine decided on a day, newest first. */
+/**
+ * The forecast ledger — every day's board persisted at cycle time, the
+ * raw material meta-labeling will need (what was predicted, by which
+ * artifact, on which day, joinable later against what happened).
+ * Idempotent per (day, target, symbol); never throws — an accrual that
+ * can take the cycle down is worse than a day's gap in it.
+ */
+export function persistStockForecasts(
+  day: string,
+  target: string,
+  modelRunId: string,
+  picks: Array<{
+    symbol: string;
+    rank: number;
+    horizonReturn: number;
+    forecastSigmas: number | null;
+    forecastVol: number | null;
+  }>,
+): void {
+  try {
+    const now = new Date().toISOString();
+    for (const p of picks) {
+      paperDb
+        .insert(stockForecasts)
+        .values({
+          day,
+          target,
+          symbol: p.symbol,
+          modelRunId,
+          rank: p.rank,
+          forecastSigmas: p.forecastSigmas,
+          horizonReturn: p.horizonReturn,
+          forecastVol: p.forecastVol,
+          createdAt: now,
+        })
+        .onConflictDoNothing()
+        .run();
+    }
+  } catch {
+    /* accrual, never a dependency */
+  }
+}
+
 export function stockDecisionsForDay(day: string) {
   return paperDb
     .select()

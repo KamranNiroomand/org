@@ -457,6 +457,20 @@ def stock_crowding(request: StockCrowdingRequest) -> dict:
     return {"scores": crowding_scores(bars, request.held, request.candidates)}
 
 
+class StockCalibrationRequest(BaseModel):
+    turns: list[dict]
+
+
+@app.post("/stock/calibration")
+def stock_calibration(request: StockCalibrationRequest) -> dict:
+    """Brier scores for the panel's probUp probabilities — see
+    calibration.py. Reports pending counts until outcomes mature."""
+    from .calibration import brier_scores
+    from .db import read_bars, read_symbol_sectors
+
+    return brier_scores(request.turns, read_bars(), read_symbol_sectors())
+
+
 @app.get("/stock/performance")
 def stock_performance(target: str = "dir", run: str | None = None) -> dict:
     """The model-performance dashboard's data, computed in Python.

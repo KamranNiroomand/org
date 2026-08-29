@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -1231,6 +1232,48 @@ def score_held_contracts(
 _stock_rank_cache: dict[tuple[str, str, str], list[dict]] = {}
 
 
+#: How many of the target's most recent model artifacts vote in the
+#: stock board's forecast. Daily refits of one configuration differ
+#: only by their training window's trailing edge, and averaging them is
+#: the cheapest known variance reduction for exactly that noise — a
+#: name that tops the board under five consecutive fits is a steadier
+#: signal than one that tops today's fit alone. Counted as trial #23 in
+#: MODEL_TRIAL_COUNT's ledger (config.ts): serving an average is a new
+#: configuration whose performance will be judged, and the hurdle must
+#: know it exists. 1 disables ensembling.
+STOCK_ENSEMBLE_N = int(os.environ.get("STOCK_ENSEMBLE_N", "5"))
+
+
+def resolve_stock_ensemble(
+    base_dir: Path | None, target: str, n: int
+) -> tuple[ModelChoice, list[Path]]:
+    """The champion plus the target's newest other artifacts, up to `n`.
+
+    The champion is always a member — the ensemble refines the promoted
+    choice, it never quietly replaces it — and the rest are the newest
+    same-target runs by artifact mtime, which for a daily-retrained
+    target means the last few days' refits.
+    """
+    primary = resolve_model(base_dir, target=target)
+    base = base_dir or (Path.home() / ".org" / "market" / "models")
+    of_target = sorted(
+        (
+            d
+            for d in (base.iterdir() if base.exists() else [])
+            if d.is_dir() and (d / "manifest.json").exists() and f"-{target}-h" in d.name
+        ),
+        key=lambda d: (d / "manifest.json").stat().st_mtime,
+        reverse=True,
+    )
+    members = [primary.directory]
+    for d in of_target:
+        if len(members) >= max(1, n):
+            break
+        if d != primary.directory:
+            members.append(d)
+    return primary, members
+
+
 def stock_rank(
     trading_day: str,
     target: str = "stk_short",
@@ -1251,15 +1294,42 @@ def stock_rank(
     and entry policy, not a refusal here that would leave the dashboard
     permanently blank.
     """
-    choice = resolve_model(model_dir, target=target)
-    cache_key = (trading_day, target, choice.run_id)
+    choice, members = resolve_stock_ensemble(model_dir, target, STOCK_ENSEMBLE_N)
+    ensemble_id = (
+        choice.run_id
+        if len(members) == 1
+        else f"ens{len(members)}:{choice.run_id}"
+    )
+    cache_key = (trading_day, target, ensemble_id, tuple(d.name for d in members))
     cached = _stock_rank_cache.get(cache_key)
     if cached is not None:
         return cached[: max(1, top)]
 
+    # Every member votes with its own full forecast pass; the board is
+    # ranked on the MEAN sigma-unit prediction per symbol. Volatility and
+    # the annualized drift are re-derived from the averaged forecast (the
+    # vol floor is realized, identical across members by construction).
     drift_by_symbol, vol_by_symbol, _curve, manifest, raw_by_symbol = _forecast_inputs(
         trading_day, choice.directory, DEFAULT_VOL_WINDOW, force=True
     )
+    if len(members) > 1:
+        sums: dict[str, float] = dict(raw_by_symbol)
+        counts: dict[str, int] = {k: 1 for k in raw_by_symbol}
+        for member in members[1:]:
+            try:
+                _d, _v, _c, _m, member_raw = _forecast_inputs(
+                    trading_day, member, DEFAULT_VOL_WINDOW, force=True
+                )
+            except SystemExit:
+                continue  # a member that cannot score simply loses its vote
+            for sym, val in member_raw.items():
+                sums[sym] = sums.get(sym, 0.0) + val
+                counts[sym] = counts.get(sym, 0) + 1
+        raw_by_symbol = {sym: sums[sym] / counts[sym] for sym in sums}
+        drift_by_symbol = {
+            sym: _annualize_horizon_return(ret, manifest["horizon"])
+            for sym, ret in raw_by_symbol.items()
+        }
     # Ranked on the model's SIGMA-UNIT forecast — its native output —
     # not on the return that forecast implies.
     #
@@ -1304,7 +1374,7 @@ def stock_rank(
                 "forecast_sigmas": (horizon_return / sigma_h) if sigma_h else None,
                 "annual_drift": drift_by_symbol.get(symbol),
                 "forecast_vol": vol,
-                "model_run_id": manifest["run_id"],
+                "model_run_id": ensemble_id,
                 "horizon_days": horizon,
             }
         )
