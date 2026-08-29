@@ -852,6 +852,20 @@ export async function runStockCycle(
   log: FastifyBaseLogger,
   day = nyToday(),
 ): Promise<{ day: string; entries: StockEntryResult[]; exits: StockExitResult }> {
+  // The whole cycle sits out non-sessions, not just the entry step: a
+  // weekend run still costs a full panel read (nine LLM calls per
+  // symbol) and rank calls, to produce stances about a market that is
+  // not open — found live when a Saturday catch-up burned two panel-run
+  // attempts before the entry guard even got a say.
+  const weekday = new Date(`${day}T12:00:00Z`).getUTCDay();
+  if (weekday === 0 || weekday === 6) {
+    log.info(`Stock cycle: ${day} is not a trading session — skipping entirely`);
+    return {
+      day,
+      entries: [],
+      exits: { day, checked: 0, closed: 0, marked: 0, errors: [] },
+    };
+  }
   const { startPanelRun } = await import('./agents/panel/run.js');
   const { panelRuns } = await import('../db/schema.js');
 
