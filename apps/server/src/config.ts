@@ -146,6 +146,9 @@ const schema = z.object({
   // which the spread haircut deliberately leaves untouched. Sandbox
   // tokens (free, no brokerage account) serve delayed quotes — enough
   // to exercise the whole path; a production token makes them real-time.
+  // Reader-side Client Portal Gateway for IBKR live quotes, e.g.
+  // "https://localhost:5000/v1/api". Dormant until set — see ibkr.ts.
+  IBKR_GATEWAY_URL: z.string().url().optional(),
   TRADIER_API_KEY: z.string().optional(),
   TRADIER_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
   // The stock paper book's own capital, separate from the options book's.
@@ -394,6 +397,7 @@ export const config = {
     modelTrialCount: env.MODEL_TRIAL_COUNT,
     spreadHaircutPct: env.PAPER_SPREAD_HAIRCUT_PCT,
     tradierApiKey: env.TRADIER_API_KEY ?? null,
+    ibkrGatewayUrl: env.IBKR_GATEWAY_URL ?? null,
     tradierEnv: env.TRADIER_ENV,
     spreadHaircutMinE4: env.PAPER_SPREAD_HAIRCUT_MIN_E4,
     /** E4 — same unit as every other dollar figure in this database. */
