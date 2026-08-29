@@ -54,10 +54,43 @@ export interface StockEntryResult {
   rejections: Array<{ symbol: string; reason: string }>;
 }
 
-/** The stance the panel reached for each symbol today, if it ran. */
-export function stancesForSymbols(symbols: string[]): Record<string, { stance: string; summary: string }> {
-  const map = todaysStances(nyToday(), symbols);
-  return Object.fromEntries([...map].map(([k, v]) => [k, { stance: v.stance, summary: v.summary }]));
+/**
+ * The stance the panel most recently reached for each symbol, with the
+ * day it was reached. The ENGINE only ever acts on today's stances
+ * (`todaysStances` — a stale stance wearing a current face is how
+ * positions get mismanaged); the DISPLAY may show a dated one, because
+ * "mixed, as of Friday" is honest in a way a blank "no panel read" on
+ * every weekend is not. Capped at 5 calendar days: a week-old read is
+ * archaeology, not context.
+ */
+export function stancesForSymbols(
+  symbols: string[],
+): Record<string, { stance: string; summary: string; day: string; isToday: boolean }> {
+  const today = nyToday();
+  const cutoff = new Date(Date.parse(`${today}T00:00:00Z`) - 5 * 86_400_000).toISOString().slice(0, 10);
+  const out: Record<string, { stance: string; summary: string; day: string; isToday: boolean }> = {};
+  if (symbols.length === 0) return out;
+  const rows = db
+    .select({
+      symbol: panelSymbolAnalyses.symbol,
+      stance: panelSymbolAnalyses.stance,
+      summary: panelSymbolAnalyses.summary,
+      complete: panelSymbolAnalyses.synthesisComplete,
+      startedAt: panelRuns.startedAt,
+    })
+    .from(panelSymbolAnalyses)
+    .innerJoin(panelRuns, eq(panelRuns.id, panelSymbolAnalyses.runId))
+    .where(inArray(panelSymbolAnalyses.symbol, symbols))
+    .orderBy(desc(panelRuns.startedAt), desc(panelSymbolAnalyses.id))
+    .all();
+  for (const r of rows) {
+    const day = r.startedAt?.slice(0, 10) ?? '';
+    if (!r.complete || day < cutoff) continue;
+    if (!(r.symbol in out)) {
+      out[r.symbol] = { stance: r.stance, summary: r.summary, day, isToday: day === today };
+    }
+  }
+  return out;
 }
 
 function todaysStances(
