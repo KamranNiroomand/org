@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { config } from '../../config.js';
-import { reopenMarketDb } from '../../db/market/index.js';
+import { sql } from 'drizzle-orm';
+import { marketDb, reopenMarketDb } from '../../db/market/index.js';
+import { optionQuotes } from '../../db/market/schema.js';
 
 export interface PullResult {
   ok: boolean;
@@ -84,4 +86,45 @@ export async function pullMarketSnapshot(): Promise<PullResult> {
     };
   }
   return { ok: true, message: `Pulled ${remoteSnapshot} → ${config.market.dbPath}` };
+}
+
+
+/**
+ * Is the local corpus older than the most recent session whose snapshot
+ * should already exist on the runner?
+ *
+ * "Should exist" walks back from now in New York time: a weekday counts
+ * as available only after 20:00 ET (capture at 16:45, then processing
+ * and the snapshot's own VACUUM); before that, and on weekends, the
+ * expected day is the previous weekday. Holidays make a weekday with no
+ * session, so the corpus legitimately never reaches it — the caller
+ * caps its attempts per day for exactly that case rather than this
+ * function trying to carry a holiday calendar it would let drift.
+ */
+export function marketCorpusIsStale(): boolean {
+  const latest = marketDb
+    .select({ d: sql<string | null>`max(${optionQuotes.tradingDay})` })
+    .from(optionQuotes)
+    .get()?.d;
+  if (!latest) return false; // an empty corpus is a setup problem, not staleness
+
+  const nyParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (t: string) => nyParts.find((p) => p.type === t)?.value ?? '00';
+  const today = `${get('year')}-${get('month')}-${get('day')}`;
+  const hour = Number(get('hour'));
+
+  const expected = new Date(`${today}T12:00:00Z`);
+  if (expected.getUTCDay() === 0 || expected.getUTCDay() === 6 || hour < 20) {
+    do {
+      expected.setUTCDate(expected.getUTCDate() - 1);
+    } while (expected.getUTCDay() === 0 || expected.getUTCDay() === 6);
+  }
+  return latest < expected.toISOString().slice(0, 10);
 }
