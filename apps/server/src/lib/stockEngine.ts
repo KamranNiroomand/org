@@ -281,6 +281,17 @@ export async function runStockEntries(
   day = nyToday(),
 ): Promise<StockEntryResult> {
   const result: StockEntryResult = { day, book, opened: [], skippedReason: null, rejections: [] };
+  // No entries when the market is not open: a weekend or holiday "Run
+  // cycle" would buy at the previous session's close — a fill nobody
+  // could get (the options book learned this on a Saturday, with FICO).
+  const weekday = new Date(`${day}T12:00:00Z`).getUTCDay();
+  if (weekday === 0 || weekday === 6) {
+    result.skippedReason = `market_closed: ${day} is not a trading session`;
+    logStockDecisions([
+      { day, book, symbol: '-', decision: 'skipped', reason: 'market_closed', detail: { day } },
+    ]);
+    return result;
+  }
   const target = book === 'short' ? SHORT_TARGET : LONG_TARGET;
   const cfg = config.market.stockBook;
   const maxPositions = book === 'short' ? cfg.shortMaxPositions : cfg.longMaxPositions;

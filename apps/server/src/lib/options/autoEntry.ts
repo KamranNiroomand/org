@@ -1,4 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
+import { nyToday } from './positionHealth.js';
 import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
 import { optionContracts, optionQuotes } from '../../db/market/schema.js';
@@ -57,6 +58,24 @@ export async function runAutoEntry(
   day: string,
   selectEntriesFn: typeof selectEntries = selectEntries,
 ): Promise<AutoEntryResult> {
+  // Entries only on the session the board describes. The board is a
+  // snapshot of one trading day's market; buying from it on any OTHER
+  // calendar day records a fill nobody could get — found live when a
+  // Saturday catch-up run bought a FICO put at Friday's close on a
+  // market that was not open. The runner's capture-time entry always
+  // passes (board day == today); every stale path — weekend catch-ups,
+  // a reader restart replaying yesterday's board — is refused here, in
+  // one place, rather than each caller remembering to check.
+  if (day !== nyToday()) {
+    const skippedReason =
+      `stale_board: board is for ${day} but today is ${nyToday()} — ` +
+      `not opening entries against a session that is not this one`;
+    logDecisions([
+      { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'stale_board', detail: { boardDay: day, today: nyToday() } },
+    ]);
+    return { day, opened: [], skippedReason, failures: [] };
+  }
+
   // A board that covers a fraction of the universe is not a smaller
   // menu — it is a *biased* one: capture walks symbols alphabetically,
   // so a truncated night leaves only the front of the alphabet, and an
