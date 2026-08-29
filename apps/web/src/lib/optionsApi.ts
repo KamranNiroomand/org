@@ -200,7 +200,7 @@ export interface StockPicksResponse {
   modelRunId: string;
   horizonDays: number;
   picks: StockPickRow[];
-  stances: Record<string, { stance: string; summary: string }>;
+  stances: Record<string, { stance: string; summary: string; day: string; isToday: boolean }>;
 }
 
 export interface StockOrderRow {

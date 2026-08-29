@@ -74,6 +74,7 @@ function PickList({ book }: { book: 'short' | 'long' }) {
                 }
               >
                 {stance.stance.replace('_', ' ')}
+                {!stance.isToday && ` · ${stance.day.slice(5)}`}
               </Badge>
             ) : (
               <span className="text-faint">no panel read</span>
