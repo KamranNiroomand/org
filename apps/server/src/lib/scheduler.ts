@@ -32,7 +32,7 @@ import { classifyUnclassifiedDocuments } from './text/classify.js';
 import { computePositionHealth, latestCapturedTradingDay, nyToday } from './options/positionHealth.js';
 import { runAutoEntry } from './options/autoEntry.js';
 import { runExitEngine, type ExitEngineSummary } from './options/exitEngine.js';
-import { pullMarketSnapshot } from './options/marketPull.js';
+import { marketCorpusIsStale, pullMarketSnapshot } from './options/marketPull.js';
 import { evaluatePriceAlerts } from './alerts/evaluate.js';
 import { createNewsAlerts } from './alerts/newsAlerts.js';
 import { runRadarScoring, type RadarRunSummary } from './radar/run.js';
@@ -895,6 +895,8 @@ let radarTask: ReturnType<typeof cron.schedule> | null = null;
 let panelTask: ReturnType<typeof cron.schedule> | null = null;
 let exitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stockExitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
+let stalenessHealTask: ReturnType<typeof cron.schedule> | null = null;
+const selfHealAttemptsToday = { day: '', count: 0 };
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
 let lastRetrainResult: RetrainJobResult | null = null;
@@ -1180,6 +1182,39 @@ export function startScheduler(log: FastifyBaseLogger): void {
     log.info(`Retrain scheduled (${config.market.retrainCron}), next run ${getNextRetrainRun() ?? 'unknown'}`);
   }
 
+  // The reader's market corpus heals itself. The 06:00 nightly pull
+  // fires only if this laptop is awake at 06:00, and the boot catch-up
+  // below keys on the BANK sync's staleness, not the market's — so a
+  // Saturday sleep-through left the app showing Thursday's board until
+  // someone restarted the server (found live, 2026-08-29). Every hour:
+  // if the newest captured trading day is older than the most recent
+  // session whose snapshot should exist, pull the snapshot — just the
+  // pull, never the whole nightly, because an hourly heal must not
+  // re-run panel reads or the stock cycle. Capped at three attempts a
+  // day so a holiday (a weekday with no session, hence a permanently
+  // "stale-looking" corpus) costs three cheap no-op pulls, not a pull
+  // an hour all day.
+  if (!config.market.isRunner && config.market.runnerSshHost) {
+    stalenessHealTask = cron.schedule(
+      '10 * * * *',
+      () => {
+        if (selfHealAttemptsToday.day !== nyToday()) {
+          selfHealAttemptsToday.day = nyToday();
+          selfHealAttemptsToday.count = 0;
+        }
+        if (selfHealAttemptsToday.count >= 3 || !marketCorpusIsStale()) return;
+        selfHealAttemptsToday.count += 1;
+        log.info('Market corpus is stale — self-heal pull starting');
+        void pullMarketSnapshot().then((r) => {
+          if (r.ok) log.info('Self-heal pull complete');
+          else log.warn(`Self-heal pull failed: ${r.message}`);
+        });
+      },
+      { timezone: config.market.captureTimezone },
+    );
+    log.info('Market staleness self-heal scheduled (hourly, reader only)');
+  }
+
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
   // delay keeps startup fast and avoids racing the first request.
   setTimeout(() => {
@@ -1254,4 +1289,6 @@ export function stopScheduler(): void {
   exitRecheckTask = null;
   stockExitRecheckTask?.stop();
   stockExitRecheckTask = null;
+  stalenessHealTask?.stop();
+  stalenessHealTask = null;
 }
