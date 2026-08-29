@@ -54,3 +54,45 @@ def test_falls_back_when_the_horizon_swallows_the_contract():
 
 def test_falls_back_on_degenerate_vol():
     assert horizon_value_and_prob(SPOT, STRIKE, YEARS, H, 0.9, RATE, 0.0, 0.0, True, 5.0) is None
+
+
+class TestPositionCap:
+    def test_no_single_position_exceeds_a_quarter_of_investable_cash(self):
+        from app.rank import MAX_POSITION_FRACTION, RankedContract, select_entries
+
+        c = RankedContract(
+            occ_symbol="GWW   261016C01380000", underlying="GWW", expiry="2026-10-16",
+            type="call", strike=1380.0, dte=48, market_price=24.50, market_iv=0.4,
+            forecast_vol=0.4, forecast_drift=0.5, forecast_value=30.0, ev=550.0,
+            ev_per_risk=0.22, prob_profit=0.6, spot=1188.0, delta=0.3,
+        )
+        selected, _ = select_entries(
+            [c], held_underlyings=set(), available_capital=100_000.0,
+            open_position_count=9, max_concurrent_positions=10,
+            max_new_positions=3, opened_today=0, min_ev_per_risk=0.05,
+            min_prob_profit=0.5, min_dte=7, max_dte=90,
+        )
+        # One slot left, 100k cash: the old per-slot budget would buy 40
+        # contracts. The cap holds it to a quarter of the pool.
+        assert len(selected) == 1
+        assert selected[0].cost <= 100_000.0 * MAX_POSITION_FRACTION
+
+    def test_one_contract_is_always_allowed_even_above_the_cap(self):
+        from app.rank import RankedContract, select_entries
+
+        c = RankedContract(
+            occ_symbol="BRK   261016C00700000", underlying="BRK", expiry="2026-10-16",
+            type="call", strike=700.0, dte=48, market_price=300.0, market_iv=0.2,
+            forecast_vol=0.2, forecast_drift=0.2, forecast_value=310.0, ev=800.0,
+            ev_per_risk=0.06, prob_profit=0.6, spot=740.0, delta=0.6,
+        )
+        selected, _ = select_entries(
+            [c], held_underlyings=set(), available_capital=40_000.0,
+            open_position_count=0, max_concurrent_positions=10,
+            max_new_positions=3, opened_today=0, min_ev_per_risk=0.05,
+            min_prob_profit=0.5, min_dte=7, max_dte=90,
+        )
+        # $30k contract, 25% cap = $10k — but a minimum position of one
+        # contract still opens; the cap bounds concentration, not entry.
+        assert len(selected) == 1
+        assert selected[0].quantity == 1

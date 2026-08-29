@@ -866,16 +866,20 @@ class TestSelectEntriesSizing:
         assert [s.cost for s in selected] == [3_000.0]
 
     def test_quantity_is_capped_by_cash_left_not_just_by_the_slot_budget(self) -> None:
-        # One concurrent slot, so the slot budget is the whole $10,000 —
-        # but only $700 is available, which is 3 contracts at $200, not 50.
+        # One concurrent slot, so the slot budget is the whole $700 pool —
+        # but the concentration cap (MAX_POSITION_FRACTION) holds any one
+        # position to a quarter of investable cash. $175 buys no whole
+        # $200 contract, and the one-contract minimum then applies: one
+        # unit, never the 3 that would put 86% of the pool in one name
+        # (the DIA incident, in miniature).
         c = _candidate(underlying="AAA")
 
         selected = self._select(
             [c], available_capital=700.0, max_new_positions=1, max_concurrent_positions=1
         )
 
-        assert [s.quantity for s in selected] == [3]
-        assert selected[0].cost == 600.0
+        assert [s.quantity for s in selected] == [1]
+        assert selected[0].cost == 200.0
 
     def test_a_thin_day_deploys_one_slot_rather_than_concentrating(self) -> None:
         # Only one candidate clears the bar. It gets one slot's worth, not

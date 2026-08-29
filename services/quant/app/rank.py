@@ -930,6 +930,11 @@ class EntrySelection:
     cost: float
 
 
+#: No single new position may take more than this fraction of the
+#: day's investable cash. See the sizing comment below for the incident.
+MAX_POSITION_FRACTION = 0.25
+
+
 def select_entries(
     candidates: list[RankedContract],
     held_underlyings: set[str],
@@ -1092,7 +1097,17 @@ def select_entries(
         # equal-weight slot, which is the common case for an expensive
         # contract in a small account.
         quantity = max(1, int(per_slot_budget // cost_per_contract))
-        # ...but never more than the cash actually left.
+        # ...but never more than a quarter of the day's investable cash
+        # in one position. The equal-weight slot already aims for this;
+        # what it cannot prevent is the last-slots case where a nearly
+        # full book leaves one giant per-slot budget — DIA took ten
+        # contracts, a fifth of the whole account, through exactly that
+        # gap, and EV-greedy ordering guarantees the biggest such bet is
+        # always placed on the single most extrapolated forecast of the
+        # day. One contract stays allowed even above the cap: a minimum
+        # position is a sizing floor, not a concentration.
+        quantity = min(quantity, max(1, int((available_capital * MAX_POSITION_FRACTION) // cost_per_contract)))
+        # ...and never more than the cash actually left.
         quantity = min(quantity, int(remaining // cost_per_contract))
         cost = cost_per_contract * quantity
         selected.append(EntrySelection(contract=c, quantity=quantity, cost=cost))
