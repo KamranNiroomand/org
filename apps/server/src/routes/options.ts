@@ -183,6 +183,50 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    */
   app.post('/api/options/retier', async () => retierByLiquidity());
 
+  /** The skew map — what option traders are paying for, per name, per
+   * day, in four quadrants. All math in the quant sidecar (skew.py);
+   * this route only picks the day (latest captured unless given),
+   * marks held names, and translates sidecar refusals into HTTP. */
+  app.get<{ Querystring: { day?: string } }>('/api/options/skew', async (req, reply) => {
+    const { sql } = await import('drizzle-orm');
+    const { optionQuotes } = await import('../db/market/schema.js');
+    const day =
+      req.query.day ??
+      marketDb
+        .select({ d: sql<string | null>`max(${optionQuotes.tradingDay})` })
+        .from(optionQuotes)
+        .get()?.d;
+    if (!day) return reply.code(503).send({ error: 'No captured chains yet.' });
+    try {
+      const res = await fetch(`${config.market.quantUrl}/options/skew`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ day }),
+        signal: AbortSignal.timeout(300_000),
+      });
+      if (res.status === 409) {
+        const body = (await res.json()) as { detail: string };
+        return reply.code(503).send({ error: body.detail });
+      }
+      if (!res.ok) return reply.code(503).send({ error: `quant ${res.status}` });
+      const map = (await res.json()) as { rows: Array<Record<string, unknown>> };
+      const { paperDb } = await import('../db/paper/index.js');
+      const { paperOrders, stockOrders } = await import('../db/paper/schema.js');
+      const { eq } = await import('drizzle-orm');
+      const held = new Set<string>();
+      for (const o of paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all()) {
+        held.add(o.underlying ?? o.occSymbol.slice(0, 6).trim());
+      }
+      for (const o of paperDb.select().from(stockOrders).where(eq(stockOrders.status, 'open')).all()) {
+        held.add(o.symbol);
+      }
+      for (const r of map.rows) r.held = held.has(String(r.symbol));
+      return map;
+    } catch (err) {
+      return reply.code(503).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   /**
    * Recomputes IV/greeks for a day's already-captured quotes that came back
    * from capture unpriced — a rate-limited provider or a cold quant sidecar

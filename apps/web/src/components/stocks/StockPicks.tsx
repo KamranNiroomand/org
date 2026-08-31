@@ -6,6 +6,7 @@ import { Badge, Button, Card, CardHeader, Empty, Skeleton, cn } from '../ui';
 import { StatTile } from '../charts';
 import { e4ToUsd, stocksApi, type StockOrderRow } from '../../lib/optionsApi';
 import { ModelPerformance } from '../options/ModelPerformance';
+import { SkewMap } from './SkewMap';
 
 function usd(e4: number): string {
   return formatMoney(money(Math.round(e4ToUsd(e4) * 100), 'USD'));
@@ -130,7 +131,7 @@ export function StockPicks() {
   const [book, setBook] = useState<'short' | 'long'>('short');
   // The three questions this tab answers: what does the model like, is
   // the model any good, and what did the engine actually do about it.
-  const [view, setView] = useState<'picks' | 'model' | 'decisions'>('picks');
+  const [view, setView] = useState<'picks' | 'model' | 'decisions' | 'skew'>('picks');
   const { data: bookData, isLoading } = useQuery({
     queryKey: ['stock-book'],
     queryFn: () => stocksApi.book(),
@@ -179,9 +180,9 @@ export function StockPicks() {
           </Button>
         ))}
         <span className="mx-1 h-4 w-px bg-border" />
-        {(['picks', 'model', 'decisions'] as const).map((v) => (
+        {(['picks', 'model', 'decisions', 'skew'] as const).map((v) => (
           <Button key={v} size="sm" variant={view === v ? 'primary' : 'ghost'} onClick={() => setView(v)}>
-            {v === 'picks' ? 'Picks & book' : v === 'model' ? 'Model' : 'Decision log'}
+            {v === 'picks' ? 'Picks & book' : v === 'model' ? 'Model' : v === 'decisions' ? 'Decision log' : 'Skew map'}
           </Button>
         ))}
         <div className="ml-auto">
@@ -200,6 +201,8 @@ export function StockPicks() {
           <ModelPerformance target={book === 'short' ? 'stk_short' : 'stk_long'} />
         </Card>
       )}
+
+      {view === 'skew' && <SkewMap />}
 
       {view === 'decisions' && <DecisionLog book={book} />}
 
