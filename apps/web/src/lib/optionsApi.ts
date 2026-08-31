@@ -253,7 +253,40 @@ export const stocksApi = {
   runCycle: () => api.post<unknown>('/api/stocks/cycle', {}),
 };
 
+export interface SkewRow {
+  symbol: string;
+  sector: string | null;
+  expiry: string;
+  dte: number;
+  atm_iv: number;
+  put25_iv: number;
+  call25_iv: number;
+  skew_norm: number;
+  skew_pts: number;
+  ret_1m: number | null;
+  ret_1m_vs_spy: number | null;
+  rvol: number | null;
+  delta_5d: number | null;
+  sector_rank_pct: number | null;
+  quadrant: 'contrarian_bid' | 'chase' | 'hedged_rally' | 'fear' | null;
+  chain_ok: boolean;
+  suspect: boolean;
+  event_flag: boolean;
+  held: boolean;
+  sentence: string;
+}
+
+export interface SkewMapResponse {
+  day: string;
+  prior_day: string | null;
+  rows: SkewRow[];
+  sectors: Array<{ sector: string; mean_skew_pts: number; agreement: number; n: number; excluded: number }>;
+  benchmarks: Array<{ symbol: string; skew_pts: number; skew_norm: number }>;
+  median_skew_norm: number | null;
+}
+
 export const optionsApi = {
+  skewMap: () => api.get<SkewMapResponse>('/api/options/skew'),
   status: () => api.get<OptionsStatus>('/api/options/status'),
   triggerCapture: () => api.post<CaptureJobResult>('/api/options/capture'),
   triggerTextSync: () => api.post<TextSyncResult>('/api/options/text-sync'),

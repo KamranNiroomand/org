@@ -471,6 +471,22 @@ def stock_calibration(request: StockCalibrationRequest) -> dict:
     return brier_scores(request.turns, read_bars(), read_symbol_sectors())
 
 
+class SkewMapRequest(BaseModel):
+    day: str
+
+
+@app.post("/options/skew")
+def options_skew(request: SkewMapRequest) -> dict:
+    """The skew map for one day — see skew.py for the four quadrants and
+    the five disciplines. 409 when the day has no captured chains."""
+    from .skew import skew_map
+
+    result = skew_map(request.day)
+    if not result["rows"]:
+        raise HTTPException(status_code=409, detail=f"No captured chains for {request.day}.")
+    return result
+
+
 @app.get("/stock/performance")
 def stock_performance(target: str = "dir", run: str | None = None) -> dict:
     """The model-performance dashboard's data, computed in Python.
