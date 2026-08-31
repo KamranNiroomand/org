@@ -72,3 +72,58 @@ describe('symbol spelling', () => {
     }
   });
 });
+
+describe('chainCaptureSymbols', () => {
+  it('captures the liquid core plus every held underlying, never the whole universe', async () => {
+    const { runMarketMigrations } = await import('../../db/market/migrate.js');
+    const { runPaperMigrations } = await import('../../db/paper/migrate.js');
+    runMarketMigrations();
+    runPaperMigrations();
+    const { marketDb } = await import('../../db/market/index.js');
+    const { trackedUnderlyings } = await import('../../db/market/schema.js');
+    const { paperDb } = await import('../../db/paper/index.js');
+    const { paperOrders } = await import('../../db/paper/schema.js');
+    const { chainCaptureSymbols, seedUniverse } = await import('./universe.js');
+
+    // Snapshot the WHOLE table: this test seeds and re-tiers a shared
+    // test DB, and later suites (autoEntry's board guard) assume it
+    // holds exactly what they put there. Restore wholesale in finally.
+    const originalRows = marketDb.select().from(trackedUnderlyings).all();
+    seedUniverse();
+    // Demote a name we then "hold": the book must never go blind on it.
+    marketDb.update(trackedUnderlyings).set({ tier: 'research' }).run();
+    try {
+    marketDb
+      .update(trackedUnderlyings)
+      .set({ tier: 'core' })
+      .where((await import('drizzle-orm')).inArray(trackedUnderlyings.symbol, ['SPY', 'QQQ']))
+      .run();
+    paperDb
+      .insert(paperOrders)
+      .values({
+        id: `test-ame-${Date.now()}`,
+        occSymbol: 'AME   261016C00240000',
+        underlying: 'AME',
+        quantity: 1,
+        entryPriceE4: 10_0000,
+        entryBasis: 'modelled',
+        status: 'open',
+        source: 'model',
+        openedAt: new Date().toISOString(),
+      })
+      .run();
+
+    const set = chainCaptureSymbols().map((r) => r.symbol);
+    expect(set).toContain('SPY');
+    expect(set).toContain('QQQ');
+    expect(set).toContain('AME'); // held, research-tier — rides along
+    expect(set).not.toContain('MSFT'); // research and unheld — stays out
+    } finally {
+      marketDb.delete(trackedUnderlyings).run();
+      if (originalRows.length > 0) marketDb.insert(trackedUnderlyings).values(originalRows).run();
+      paperDb.delete(paperOrders).where(
+        (await import('drizzle-orm')).like(paperOrders.id, 'test-ame-%'),
+      ).run();
+    }
+  });
+});

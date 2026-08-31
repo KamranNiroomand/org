@@ -89,7 +89,12 @@ export async function runAutoEntry(
     .innerJoin(optionContracts, eq(optionQuotes.occSymbol, optionContracts.occSymbol))
     .where(eq(optionQuotes.tradingDay, day))
     .get()?.n ?? 0;
-  const universeSize = listUniverse({ activeOnly: true }).length;
+  // The denominator is the liquid CORE tier — the set capture actually
+  // targets since chains went liquidity-tiered. Measuring a ~250-name
+  // board against the full 566 would read every night as partial; and
+  // deliberately NOT chainCaptureSymbols(), whose held-position
+  // ride-alongs would couple this guard to the paper book's contents.
+  const universeSize = listUniverse({ tier: 'core', activeOnly: true }).length;
   if (universeSize > 0 && boardCoverage < universeSize * 0.5) {
     const skippedReason =
       `partial_board: only ${boardCoverage}/${universeSize} underlyings captured for ${day} — ` +
