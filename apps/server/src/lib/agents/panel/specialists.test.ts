@@ -51,3 +51,23 @@ describe('runRound2', () => {
     await expect(runRound2('momentum', CTX, [])).rejects.toThrow(/ANTHROPIC_API_KEY/);
   });
 });
+
+describe('probUp discipline', () => {
+  it('the wire schema carries no numeric bounds — the API rejects them', async () => {
+    const src = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('./specialists.ts', import.meta.url), 'utf8'),
+    );
+    const schemaRegion = src.slice(src.indexOf('SHARED_TURN_PROPERTIES'), src.indexOf('ROUND1_SCHEMA'));
+    expect(schemaRegion).not.toContain('minimum:');
+    expect(schemaRegion).not.toContain('maximum:');
+  });
+
+  it('clampProbUp forbids certainty, zero, and garbage alike', async () => {
+    const { clampProbUp } = await import('./specialists.js');
+    expect(clampProbUp(1)).toBe(0.95);
+    expect(clampProbUp(0)).toBe(0.05);
+    expect(clampProbUp(0.7)).toBe(0.7);
+    expect(clampProbUp(undefined)).toBe(0.5);
+    expect(clampProbUp(Number.NaN)).toBe(0.5);
+  });
+});

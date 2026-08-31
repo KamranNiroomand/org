@@ -93,6 +93,14 @@ objection is exactly the kind of confident-but-hollow reasoning this panel
 exists to avoid, from either direction.`,
 };
 
+/** The schema cannot carry numeric bounds (the API rejects them), so
+ * calibration's floor and ceiling are enforced here: certainty and
+ * reflex-zero are equally inadmissible, whatever the model wrote. */
+export function clampProbUp(v: unknown): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : 0.5;
+  return Math.min(0.95, Math.max(0.05, n));
+}
+
 const CITED_INPUTS_SCHEMA = {
   type: 'array' as const,
   items: { type: 'string' as const },
@@ -108,9 +116,11 @@ const SHARED_TURN_PROPERTIES = {
   confidence: { type: 'string' as const, enum: ['low', 'medium', 'high'] },
   probUp: {
     type: 'number' as const,
-    minimum: 0.05,
-    maximum: 0.95,
-    description: 'Your probability that this symbol outperforms its own sector over the next 21 trading sessions. A committed number, not a reflex 0.5 — it will be scored against outcomes.',
+    // No minimum/maximum keys: the structured-output API rejects them
+    // on number types (400, found live — the first weekday panel run
+    // failed whole). The [0.05, 0.95] bounds live in the prompt and are
+    // enforced by clampProbUp on the way out of every parse.
+    description: 'Your probability, between 0.05 and 0.95, that this symbol outperforms its own sector over the next 21 trading sessions. A committed number, not a reflex 0.5 — it will be scored against outcomes.',
   },
   falsifier: {
     type: 'string' as const,
@@ -191,6 +201,7 @@ export async function runRound1(agent: Specialist, ctx: SymbolContext): Promise<
     throw new Error(`Claude returned no content for ${agent}'s round 1 turn`);
   }
   const parsed = JSON.parse(block.text) as Omit<Round1Turn, 'agent'>;
+  parsed.probUp = clampProbUp(parsed.probUp);
   return { agent, ...parsed };
 }
 
@@ -226,5 +237,6 @@ export async function runRound2(agent: Specialist, ctx: SymbolContext, round1: R
     throw new Error(`Claude returned no content for ${agent}'s round 2 turn`);
   }
   const parsed = JSON.parse(block.text) as Omit<Round2Turn, 'agent'>;
+  parsed.probUp = clampProbUp(parsed.probUp);
   return { agent, ...parsed };
 }
