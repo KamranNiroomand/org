@@ -1,5 +1,7 @@
 import { and, eq, gte, sql } from 'drizzle-orm';
 import { marketDb } from '../../db/market/index.js';
+import { paperDb } from '../../db/paper/index.js';
+import { paperOrders } from '../../db/paper/schema.js';
 import { trackedUnderlyings, optionQuotes, optionContracts } from '../../db/market/schema.js';
 import { SP500 } from '../../data/sp500.js';
 import { NASDAQ_100_SET } from '../../data/indices.js';
@@ -207,4 +209,32 @@ export function retierByLiquidity(
   }
 
   return { evaluated: stats.length, promoted, demoted };
+}
+
+/**
+ * The symbols whose option CHAINS get captured — the expensive nightly
+ * job — as opposed to the full universe, which keeps its cheap bars,
+ * fundamentals, and text sync so the stock models never lose breadth.
+ *
+ * Chains cost ~5-20 paginated requests per symbol per night; captured
+ * across all ~566 names that is 3k-10k requests, and history shows
+ * whole nights losing hundreds of symbols to 429s. The liquid `core`
+ * tier is the only set whose chains are worth that spend: an illiquid
+ * chain's quotes fail the gate anyway and price nothing.
+ *
+ * Held underlyings ALWAYS ride along regardless of tier: the book must
+ * never go blind on a position it already owns because a retier demoted
+ * the name after entry.
+ */
+export function chainCaptureSymbols(): ReturnType<typeof listUniverse> {
+  const core = listUniverse({ tier: 'core', activeOnly: true });
+  const have = new Set(core.map((r) => r.symbol));
+  const held = new Set<string>();
+  for (const o of paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all()) {
+    const underlying = o.underlying ?? o.occSymbol.slice(0, 6).trim();
+    if (underlying && !have.has(underlying)) held.add(underlying);
+  }
+  if (held.size === 0) return core;
+  const extras = listUniverse({ activeOnly: false }).filter((r) => held.has(r.symbol));
+  return [...core, ...extras];
 }

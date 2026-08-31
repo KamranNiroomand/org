@@ -15,11 +15,11 @@ import { syncAllItems, syncIsStale } from './plaid.js';
 import { fetchQuotes, fetchUsdCad, saveQuotes } from './quotes.js';
 import { PolygonProvider } from './options/polygon.js';
 import { captureChains } from './options/capture.js';
-import { listUniverse, seedUniverse, toVendorSymbol } from './options/universe.js';
+import { chainCaptureSymbols, listUniverse, retierByLiquidity, seedUniverse, toVendorSymbol } from './options/universe.js';
 import { syncRates } from './options/rates.js';
 import { snapshotMarketDb } from '../db/market/snapshot.js';
 import { marketDb } from '../db/market/index.js';
-import { optionContracts, optionQuotes } from '../db/market/schema.js';
+import { optionContracts, optionQuotes, trackedUnderlyings } from '../db/market/schema.js';
 import { syncBars } from './options/barsSync.js';
 import { syncFundamentals } from './options/fundamentalsSync.js';
 import { runStockCycle, runStockExits } from './stockEngine.js';
@@ -602,7 +602,11 @@ export async function runOptionsCapture(
       result.errors.push(`Rate curve: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const symbols = listUniverse({ activeOnly: true }).map((u) => toVendorSymbol(u.symbol));
+    // Chains for the liquid core plus anything held — not the whole
+    // universe. Bars/fundamentals/text above stay universe-wide; the
+    // stock models keep their breadth, and the 3k-10k-request nights
+    // that lost hundreds of symbols to 429s stop. See chainCaptureSymbols.
+    const symbols = chainCaptureSymbols().map((u) => toVendorSymbol(u.symbol));
     result.symbols = symbols.length;
 
     const summary = await captureChains(new PolygonProvider(), symbols);
@@ -896,6 +900,7 @@ let panelTask: ReturnType<typeof cron.schedule> | null = null;
 let exitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stockExitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stalenessHealTask: ReturnType<typeof cron.schedule> | null = null;
+let retierTask: ReturnType<typeof cron.schedule> | null = null;
 const selfHealAttemptsToday = { day: '', count: 0 };
 let lastResult: NightlyResult | null = null;
 let lastCaptureResult: CaptureJobResult | null = null;
@@ -1165,6 +1170,45 @@ export function startScheduler(log: FastifyBaseLogger): void {
     log.info('Option capture, text sync, and watchlist text sync disabled — POLYGON_API_KEY is not set');
   }
 
+  // Tiers must track measured liquidity, not the seed-time guess — a
+  // weekly re-measure on the runner (which owns the corpus the measure
+  // reads). Floor guard: a retier that would leave fewer than 150 core
+  // names is refused — one bad, thin week must not gut the board.
+  if (config.market.isRunner && config.market.configured) {
+    retierTask = cron.schedule(
+      '0 7 * * 0',
+      () => {
+        try {
+          const before = listUniverse({ tier: 'core', activeOnly: true }).length;
+          const r = retierByLiquidity();
+          const after = listUniverse({ tier: 'core', activeOnly: true }).length;
+          if (after < 150) {
+            // Roll back by re-promoting: simplest safe rollback is to
+            // refuse the demotions — re-run promotion of the demoted set.
+            log.error(
+              `Retier would leave ${after} core names (< 150 floor) — restoring previous tiers`,
+            );
+            for (const sym of r.demoted) {
+              marketDb
+                .update(trackedUnderlyings)
+                .set({ tier: 'core' })
+                .where(eq(trackedUnderlyings.symbol, sym))
+                .run();
+            }
+          } else {
+            log.info(
+              `Retier: ${r.evaluated} evaluated, +${r.promoted.length} promoted, -${r.demoted.length} demoted (core ${before} -> ${after})`,
+            );
+          }
+        } catch (err) {
+          log.error({ err }, 'Weekly retier failed');
+        }
+      },
+      { timezone: config.market.captureTimezone },
+    );
+    log.info('Weekly liquidity retier scheduled (Sun 07:00 ET, runner only)');
+  }
+
   if (!config.market.isRunner) {
     log.info('Retrain not scheduled — MARKET_ROLE=reader. Training runs on the runner.');
   } else if (!cron.validate(config.market.retrainCron)) {
@@ -1252,7 +1296,7 @@ export function startScheduler(log: FastifyBaseLogger): void {
             .innerJoin(optionContracts, eq(optionQuotes.occSymbol, optionContracts.occSymbol))
             .where(eq(optionQuotes.tradingDay, today))
             .get()?.n ?? 0;
-          const universe = listUniverse({ activeOnly: true }).length;
+          const universe = listUniverse({ tier: 'core', activeOnly: true }).length;
           if (universe > 0 && captured < universe * 0.8) {
             log.warn(
               `Capture coverage for ${today}: ${captured}/${universe} underlyings — re-running capture`,
@@ -1291,4 +1335,6 @@ export function stopScheduler(): void {
   stockExitRecheckTask = null;
   stalenessHealTask?.stop();
   stalenessHealTask = null;
+  retierTask?.stop();
+  retierTask = null;
 }

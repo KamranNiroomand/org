@@ -79,7 +79,7 @@ const schema = z.object({
   // 321 of 566 symbols lost to 429s, every night, for three nights running.
   // Conservative default; lower it if 429s persist, raise it once a run
   // shows clean headroom.
-  POLYGON_MAX_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().default(60),
+  POLYGON_MAX_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().default(50),
   QUANT_URL: z.string().default('http://127.0.0.1:5175'),
   OPTIONS_CAPTURE_CRON: z.string().default('45 16 * * 1-5'),
   // Morning, deliberately, and on its own schedule. The vendor publishes a
