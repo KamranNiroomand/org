@@ -1172,8 +1172,11 @@ export function startScheduler(log: FastifyBaseLogger): void {
 
   // Tiers must track measured liquidity, not the seed-time guess — a
   // weekly re-measure on the runner (which owns the corpus the measure
-  // reads). Floor guard: a retier that would leave fewer than 150 core
-  // names is refused — one bad, thin week must not gut the board.
+  // reads). Floor guard: a retier that would leave fewer than 100 core
+  // names is refused — one bad, thin week must not gut the board. (100,
+  // not a rounder 150: the first full-corpus measure found exactly 115
+  // names clearing the liquidity bar, and a floor above measured
+  // reality would roll back honest demotions every single Sunday.)
   if (config.market.isRunner && config.market.configured) {
     retierTask = cron.schedule(
       '0 7 * * 0',
@@ -1182,11 +1185,11 @@ export function startScheduler(log: FastifyBaseLogger): void {
           const before = listUniverse({ tier: 'core', activeOnly: true }).length;
           const r = retierByLiquidity();
           const after = listUniverse({ tier: 'core', activeOnly: true }).length;
-          if (after < 150) {
+          if (after < 100) {
             // Roll back by re-promoting: simplest safe rollback is to
             // refuse the demotions — re-run promotion of the demoted set.
             log.error(
-              `Retier would leave ${after} core names (< 150 floor) — restoring previous tiers`,
+              `Retier would leave ${after} core names (< 100 floor) — restoring previous tiers`,
             );
             for (const sym of r.demoted) {
               marketDb
