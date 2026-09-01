@@ -208,7 +208,11 @@ export function SkewMap() {
                 </Badge>
                 <span className="tnum text-muted">P {Math.round(r.probability * 100)}%</span>
               </div>
-              <p className="mt-1 text-muted">{r.reasoning}</p>
+              {r.reasoning.split('\n\n').map((para, i) => (
+                <p key={i} className={i === 0 ? 'mt-1' : 'mt-1 text-faint'}>
+                  {para}
+                </p>
+              ))}
               <p className="mt-0.5 text-faint">Would change this: {r.falsifier}</p>
             </div>
           ))}
