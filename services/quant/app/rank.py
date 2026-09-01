@@ -239,9 +239,16 @@ def horizon_value_and_prob(
     ev_acc = 0.0
     p_acc = 0.0
     sell_vol = remaining_vol if remaining_vol is not None and remaining_vol > 0 else vol
+    # The sale is priced by the SAME model the IV was solved from — the
+    # nightly solve inverts american_price, and plugging its IV into the
+    # European formula undervalues anything with early-exercise premium
+    # (ITM puts especially), tilting the board toward calls (review
+    # finding). Symmetry of model, not just of vol.
+    from .pricing import american_price
+
     for zi, wi in zip(z, w):
         s_h = math.exp(m + scale * zi)
-        v = bsm_price(s_h, strike, remaining, rate, div_yield, sell_vol, is_call)
+        v = american_price(s_h, strike, remaining, rate, div_yield, sell_vol, is_call)
         ev_acc += wi * v
         if v > breakeven:
             p_acc += wi
@@ -252,6 +259,12 @@ def probability_above(
     spot: float, threshold: float, years: float, drift: float, div_yield: float, vol: float
 ) -> float:
     """P(S_T > threshold) under the same forecast lognormal distribution."""
+    if threshold <= 0:
+        # A non-positive threshold (a put priced at or above its own
+        # strike — a bad print) is certainly exceeded by a positive
+        # price; without this, log(spot/threshold) kills the whole
+        # day's board on one corrupt row (review finding).
+        return 1.0
     if years <= _MIN_YEARS or vol <= _MIN_VOL:
         terminal = spot * math.exp((drift - div_yield) * max(years, 0.0))
         return 1.0 if terminal > threshold else 0.0
@@ -352,7 +365,14 @@ def _vol_forecast_ratio(
     reference = float(ivs.median())
     if reference <= 0:
         return 1.0
-    return min(realized_vol / reference, max_ratio)
+    # Symmetric by the cap's own reasoning: an extreme ratio in EITHER
+    # direction is more likely a blind spot than a real view. Uncapped
+    # BELOW, a post-spike HAR forecast of 8% against a chain still
+    # marked at 50% crushes every forecast vol to 0.16x IV, collapsing
+    # the horizon distribution's width and manufacturing near-certain
+    # P(profit) — the FICO vega incident's mirror image (review finding).
+    ratio = realized_vol / reference
+    return min(max(ratio, 1.0 / max_ratio), max_ratio)
 
 
 def _solve_missing_iv(
@@ -772,6 +792,11 @@ def _forecast_inputs(
     return drift_by_symbol, vol_by_symbol, rate_curve, manifest, horizon_ret_by_symbol
 
 
+#: KNOWN SIMPLIFICATION (review finding, accepted): dividend yield is 0
+#: through the whole ranking path — internally consistent (the IV solve
+#: uses q=0 too), but call EVs on high-yield names are overstated near
+#: ex-div dates. The universe is predominantly low-yield; revisit if a
+#: yield-heavy name ever tops the board suspiciously.
 def rank_day(
     trading_day: str,
     model_dir: Path,
@@ -877,7 +902,10 @@ def rank_day(
                 drift,
                 vol_ratio,
                 rate_curve,
-                horizon_years=_manifest["horizon"] * 1.4 / 365.0,
+                # horizon/252, matching _annualize_horizon_return's clock exactly
+                # — the old 1.4/365 recovered only 96.6% of the predicted
+                # horizon move (365/252 = 1.4486, not 1.4; review finding).
+                horizon_years=_manifest["horizon"] / 252.0,
                 dividend_yield=dividend_yield,
                 round_trip_cost=round_trip_cost,
                 max_capital=max_capital,
@@ -1228,7 +1256,10 @@ def score_held_contracts(
             drift,
             vol_ratio,
             rate_curve,
-            horizon_years=_manifest["horizon"] * 1.4 / 365.0,
+            # horizon/252, matching _annualize_horizon_return's clock exactly
+                # — the old 1.4/365 recovered only 96.6% of the predicted
+                # horizon move (365/252 = 1.4486, not 1.4; review finding).
+                horizon_years=_manifest["horizon"] / 252.0,
             dividend_yield=dividend_yield,
             round_trip_cost=round_trip_cost,
         ):

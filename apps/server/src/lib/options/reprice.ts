@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { sql, and, eq, isNull } from 'drizzle-orm';
 import { marketDb } from '../../db/market/index.js';
 import { optionContracts, optionQuotes } from '../../db/market/schema.js';
 import { enrichChain } from './capture.js';
@@ -63,6 +63,13 @@ export async function repriceDay(
         eq(optionQuotes.tradingDay, tradingDay),
         eq(optionQuotes.liquid, true),
         isNull(optionQuotes.ivBps),
+        // Only the row the read path will actually surface — solving a
+        // superseded duplicate burns sidecar time on rows nobody reads
+        // (review finding). Correlated max keeps this index-friendly.
+        sql`${optionQuotes.asOf} = (
+          select max(q2.as_of) from option_quotes q2
+          where q2.occ_symbol = ${optionQuotes.occSymbol} and q2.trading_day = ${optionQuotes.tradingDay}
+        )`,
       ),
     )
     .all();

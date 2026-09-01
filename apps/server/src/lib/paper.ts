@@ -254,7 +254,16 @@ export function reduceOrder(input: ReduceOrderInput): string {
       })
       .run();
     tx.update(paperOrders)
-      .set({ quantity: order.quantity - input.contracts })
+      .set({
+        quantity: order.quantity - input.contracts,
+        // Pin the pre-split size. Legacy rows carry NULL here, and the
+        // exit engine's fallback (initialQuantity ?? quantity) would
+        // read the REDUCED quantity as "the original size", satisfying
+        // the scale-out-once guard afresh every pass — the engine would
+        // have re-halved position A every 15 minutes had its price held
+        // at target (review finding).
+        initialQuantity: order.initialQuantity ?? order.quantity,
+      })
       .where(eq(paperOrders.id, order.id))
       .run();
   });
@@ -541,10 +550,15 @@ export function computeDailyEquity(day: string): void {
   );
   let openPositionsValueE4 = 0;
   for (const o of openOnDay) {
+    // A split slice has no marks of its own — its price history lives
+    // under the parent (review finding: recomputing a pre-split day
+    // valued the parent at its reduced quantity and skipped the slice,
+    // silently halving the position's historical value).
+    const markOwnerId = o.splitFrom ?? o.id;
     const mark = paperDb
       .select()
       .from(paperMarks)
-      .where(and(eq(paperMarks.orderId, o.id), lte(paperMarks.tradingDay, day)))
+      .where(and(eq(paperMarks.orderId, markOwnerId), lte(paperMarks.tradingDay, day)))
       // id as the tiebreak: the intraday engine now appends marks during
       // the session, so one trading day can hold several rows per order
       // and "the latest write" must be deterministic, not whichever row
