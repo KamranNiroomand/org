@@ -299,6 +299,14 @@ export function SkewMap() {
           title="Ranked by five-session change"
           subtitle="The level is structural; the change is the signal. Thin chains and suspect quotes sit at the bottom, named — never silently dropped."
         />
+        <div className="flex flex-wrap items-baseline gap-x-3 border-b border-border px-4 py-1.5 text-[10px] uppercase tracking-wide text-faint">
+          <span className="w-14">Name</span>
+          <span className="w-28">Map corner</span>
+          <span className="w-16" title="How strongly protection (positive) or optimism (negative) is favored right now">Lean now</span>
+          <span className="w-16" title="How much that lean moved in the last five trading days — the number this table is sorted by">5-day shift</span>
+          <span className="w-14" title="Trading volume vs a normal day">Volume</span>
+          <span className="min-w-0 flex-1">The read</span>
+        </div>
         <div className="max-h-[32rem] divide-y divide-border overflow-y-auto">
           {data.rows.map((r) => (
             <div key={r.symbol} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2 text-xs">
