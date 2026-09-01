@@ -173,6 +173,34 @@ export function SkewMap() {
 
       <Card>
         <CardHeader
+          title="Worth looking into"
+          subtitle="The agent's enter candidates — names where falling prices and quiet optimism disagree enough to deserve your research time. Never a buy list: each one is a homework assignment, not an order."
+        />
+        <div className="px-4 pb-3">
+          {(agentReads.data?.reads ?? []).filter((r: SkewAgentRead) => r.verdict === 'enter_candidate')
+            .length === 0 ? (
+            <p className="text-xs text-faint">
+              None today — most days there are none, and the tool saying so is it working, not failing.
+            </p>
+          ) : (
+            (agentReads.data?.reads ?? [])
+              .filter((r: SkewAgentRead) => r.verdict === 'enter_candidate')
+              .map((r: SkewAgentRead) => (
+                <div key={r.symbol} className="mb-2 rounded-lg border border-positive/40 bg-positive/5 p-2.5 text-xs">
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-medium">{r.symbol}</span>
+                    <Badge tone="positive">worth looking into</Badge>
+                    <span className="tnum text-muted">confidence {Math.round(r.probability * 100)}%</span>
+                  </div>
+                  <p className="mt-1">{r.reasoning.split(String.fromCharCode(10) + String.fromCharCode(10))[0]}</p>
+                </div>
+              ))
+          )}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader
           title="Agent read"
           subtitle="A standalone research layer — the agent judges only the names the math flagged, commits a scoreable probability, and influences nothing: no engine reads these verdicts. Its track record decides its future."
         />
