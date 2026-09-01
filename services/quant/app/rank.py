@@ -683,6 +683,34 @@ def _forecast_inputs(
                     all_features = all_features.with_columns(
                         pl.lit(None, dtype=pl.Float64).alias(c)
                     )
+    # Same discipline for the sector and earnings panels: the manifest's
+    # feature list is the single statement of what the model eats, and a
+    # panel joined at training but not at scoring is train/serve skew —
+    # caught in PR review (the trial-24 stk_short model would have taken
+    # stock_rank down on its four sector_* columns the day it served).
+    from .features import EARNINGS_FEATURE_COLS, SECTOR_FEATURE_COLS
+
+    if any(c in feature_cols for c in SECTOR_FEATURE_COLS):
+        from .features import sector_feature_panel
+
+        sector = sector_feature_panel(bars)
+        if sector.height > 0:
+            all_features = all_features.join(sector, on=["symbol", "day"], how="left")
+        else:
+            for c in SECTOR_FEATURE_COLS:
+                if c in feature_cols:
+                    all_features = all_features.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
+    if any(c in feature_cols for c in EARNINGS_FEATURE_COLS):
+        from .features import earnings_feature_panel
+
+        earnings = earnings_feature_panel()
+        if earnings.height > 0:
+            all_features = all_features.join(earnings, on=["symbol", "day"], how="left")
+        else:
+            for c in EARNINGS_FEATURE_COLS:
+                if c in feature_cols:
+                    all_features = all_features.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
+
     # Preprocessing must mirror training exactly, and the manifest is the
     # single source of what that was — a model trained on per-day feature
     # ranks scored on raw levels (or vice versa) is garbage that still
