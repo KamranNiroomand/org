@@ -779,3 +779,33 @@ export const categoryRelations = relations(categories, ({ many }) => ({
 export const ideaRelations = relations(ideas, ({ many }) => ({
   links: many(ideaLinks),
 }));
+
+/**
+ * The skew reader's daily verdicts — a STANDALONE research layer, by
+ * the user's explicit design: nothing in the stock or options engines
+ * reads this table, and the agent sees no model ranks or panel
+ * stances. It reads the skew map's disagreement cases and commits a
+ * verdict + probability per name, so its judgment can be Brier-scored
+ * against outcomes before it is ever allowed to influence anything.
+ */
+export const skewAgentReads = sqliteTable(
+  'skew_agent_reads',
+  {
+    id: id(),
+    day: text('day').notNull(),
+    symbol: text('symbol').notNull(),
+    verdict: text('verdict', {
+      enum: ['enter_candidate', 'avoid', 'tighten_if_held', 'ignore'],
+    }).notNull(),
+    /** P(symbol outperforms its sector over the next 21 sessions),
+     * clamped [0.05, 0.95] in code — same scoreable question as the
+     * panel's probUp, so one grader serves both. */
+    probability: real('probability').notNull(),
+    reasoning: text('reasoning').notNull(),
+    falsifier: text('falsifier').notNull(),
+    /** The skew facts the verdict rested on, for the audit trail. */
+    inputs: text('inputs', { mode: 'json' }).$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: now(),
+  },
+  (t) => [uniqueIndex('skew_agent_day_symbol_uq').on(t.day, t.symbol)],
+);

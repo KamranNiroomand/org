@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useQuery } from '@tanstack/react-query';
 import {
   CartesianGrid,
@@ -12,7 +13,7 @@ import {
   ZAxis,
 } from 'recharts';
 import { Badge, Card, CardHeader, Empty, Skeleton, cn } from '../ui';
-import { optionsApi, type SkewRow } from '../../lib/optionsApi';
+import { optionsApi, type SkewAgentRead, type SkewRow } from '../../lib/optionsApi';
 
 /**
  * The skew map — what option traders are paying for, crossed with what
@@ -70,6 +71,16 @@ export function SkewMap() {
     staleTime: 60_000,
   });
   const [crosshair, setCrosshair] = useState<'zero' | 'median'>('zero');
+  const qc = useQueryClient();
+  const agentReads = useQuery({
+    queryKey: ['skew-agent'],
+    queryFn: () => optionsApi.skewAgentReads(),
+    refetchInterval: 5 * 60_000,
+  });
+  const runAgent = useMutation({
+    mutationFn: () => optionsApi.runSkewAgent(),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['skew-agent'] }),
+  });
 
   const groups = useMemo(() => {
     const rows = data?.rows ?? [];
@@ -156,6 +167,51 @@ export function SkewMap() {
               />
             </ScatterChart>
           </ResponsiveContainer>
+        </div>
+      </Card>
+
+
+      <Card>
+        <CardHeader
+          title="Agent read"
+          subtitle="A standalone research layer — the agent judges only the names the math flagged, commits a scoreable probability, and influences nothing: no engine reads these verdicts. Its track record decides its future."
+        />
+        <div className="flex items-center gap-2 px-4 pb-2">
+          <button
+            className="rounded border border-border px-2 py-1 text-xs text-muted hover:bg-panel disabled:opacity-50"
+            disabled={runAgent.isPending}
+            onClick={() => runAgent.mutate()}
+          >
+            {runAgent.isPending ? 'Reading the map…' : 'Run agent read'}
+          </button>
+          {agentReads.data && agentReads.data.reads.length === 0 && (
+            <span className="text-xs text-faint">No verdicts for {agentReads.data.day} yet.</span>
+          )}
+        </div>
+        <div className="divide-y divide-border">
+          {(agentReads.data?.reads ?? []).map((r: SkewAgentRead) => (
+            <div key={r.symbol} className="px-4 py-2.5 text-xs">
+              <div className="flex flex-wrap items-baseline gap-x-3">
+                <span className="w-14 font-medium">{r.symbol}</span>
+                <Badge
+                  tone={
+                    r.verdict === 'enter_candidate'
+                      ? 'positive'
+                      : r.verdict === 'avoid'
+                        ? 'negative'
+                        : r.verdict === 'tighten_if_held'
+                          ? 'accent'
+                          : 'neutral'
+                  }
+                >
+                  {r.verdict.replace(/_/g, ' ')}
+                </Badge>
+                <span className="tnum text-muted">P {Math.round(r.probability * 100)}%</span>
+              </div>
+              <p className="mt-1 text-muted">{r.reasoning}</p>
+              <p className="mt-0.5 text-faint">Would change this: {r.falsifier}</p>
+            </div>
+          ))}
         </div>
       </Card>
 
