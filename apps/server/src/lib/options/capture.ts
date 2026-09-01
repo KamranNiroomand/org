@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { daysToExpiry, parseOccSymbol, yearsToExpiry } from '@org/shared';
 import { marketDb } from '../../db/market/index.js';
 import { captureRuns, optionContracts, optionQuotes } from '../../db/market/schema.js';
@@ -234,7 +234,8 @@ export async function enrichChain(
       const sep = r.key.lastIndexOf('|');
       const occSymbol = r.key.slice(0, sep);
       const asOf = r.key.slice(sep + 1);
-      tx.update(optionQuotes)
+      const res = tx
+        .update(optionQuotes)
         .set({
           ivBps: r.iv_bps,
           delta: r.delta,
@@ -244,7 +245,12 @@ export async function enrichChain(
         })
         .where(sql`${optionQuotes.occSymbol} = ${occSymbol} and ${optionQuotes.asOf} = ${asOf}`)
         .run();
-      priced += 1;
+      // Solver output is not a stored greek: if the row this solve
+      // belongs to was never persisted (a failed persist earlier), the
+      // UPDATE hits nothing and counting it would make the night's
+      // summary lie about how many stored rows carry greeks (review
+      // finding).
+      if (res.changes > 0) priced += 1;
     }
   });
   return priced;
@@ -265,6 +271,15 @@ export async function captureChains(
 
   const runId = newId();
   const startedAt = nowIso();
+  // A crashed run never writes its final status and sits 'running'
+  // forever, with the status page believing it (review finding). A new
+  // run starting is proof the old one is dead — mark it so, with the
+  // takeover named.
+  marketDb
+    .update(captureRuns)
+    .set({ status: 'failed', finishedAt: startedAt })
+    .where(sql`${captureRuns.status} = 'running'`)
+    .run();
   marketDb.insert(captureRuns).values({ id: runId, kind: 'nightly', startedAt }).run();
 
   // Checked once up front so the log says plainly whether this run produced
@@ -289,7 +304,40 @@ export async function captureChains(
     summary.errors.push(SIDECAR_UNAVAILABLE_ERROR);
   }
 
-  for (const symbol of symbols) {
+  // One trading day for the whole run, stamped at start: per-symbol
+  // stamping let a throttled run cross ET midnight and give late
+  // symbols a phantom next-day date — which then poisoned the FOLLOWING
+  // session's staleness screen into dropping the entire board (review
+  // finding, the ET-midnight sibling of the documented UTC fix).
+  const runTradingDay = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+
+  // Resume, not restart: symbols already captured for this trading day
+  // are skipped, so an interrupted run's re-run fills only the gaps —
+  // which also kills the duplicate-as_of regime (same-evening re-runs
+  // used to write a full second row-set per contract; review finding).
+  const alreadyCaptured = new Set(
+    marketDb
+      .select({ u: optionContracts.underlying })
+      .from(optionQuotes)
+      .innerJoin(optionContracts, eq(optionQuotes.occSymbol, optionContracts.occSymbol))
+      .where(eq(optionQuotes.tradingDay, runTradingDay))
+      .groupBy(optionContracts.underlying)
+      .all()
+      .map((r) => r.u),
+  );
+  const toCapture = symbols.filter((s) => !alreadyCaptured.has(s));
+  if (alreadyCaptured.size > 0) {
+    summary.errors.push(
+      `resume: ${symbols.length - toCapture.length} symbol(s) already captured for ${runTradingDay} — filling gaps only`,
+    );
+  }
+
+  for (const symbol of toCapture) {
     // Fetch and persist are the coverage-critical half: their failure means
     // this symbol has zero quotes for the night, which is what `symbolsFailed`
     // exists to count. Pricing is a separate try — a chain that persisted
@@ -300,9 +348,11 @@ export async function captureChains(
     // vendor again, and would make the vendor-rate-limit warning in the UI
     // lie about what actually happened.
     let chain: readonly ChainQuote[] = [];
+    let persisted = false;
     try {
-      chain = await provider.fetchChain({ underlying: symbol, maxDte });
+      chain = await provider.fetchChain({ underlying: symbol, maxDte, tradingDay: runTradingDay });
       const written = persistChain(chain, thresholds);
+      persisted = true;
       summary.contractsSeen += written.contracts;
       summary.quotesWritten += written.quotes;
       summary.liquidWritten += written.liquid;
@@ -311,7 +361,10 @@ export async function captureChains(
       summary.symbolsFailed += 1;
     }
 
-    if (chain.length > 0 && quantAvailable) {
+    // Enrich only what was actually stored — solving a chain whose
+    // persist failed writes nothing and mislabels the night (review
+    // finding, pairs with the changed-row count in enrichChain).
+    if (persisted && chain.length > 0 && quantAvailable) {
       try {
         summary.pricedWritten += await enrichChain(chain, thresholds, dividendYield);
       } catch (err) {

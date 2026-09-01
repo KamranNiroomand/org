@@ -571,7 +571,10 @@ describe('runExitEngine', () => {
     expect(summary.revised).toBe(1);
     const order = paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!;
     expect(order.targetExitPriceE4).toBe(toE4(1.8));
-    expect(order.targetExitDate).toBe('2026-09-10');
+    // The advisor asked for 2026-09-10, past the fixture's 08-19 expiry —
+    // the clamp (review finding: an unclamped extension kills the
+    // time-stop and rides theta to the DTE floor) pins it to expiry-3d.
+    expect(order.targetExitDate).toBe('2026-08-16');
     const revisions = paperDb.select().from(paperExitRevisions).where(eq(paperExitRevisions.orderId, id)).all();
     expect(revisions).toHaveLength(1);
     expect(revisions[0]!.triggeredBy).toBe('llm');
@@ -767,7 +770,8 @@ describe('runExitEngine revision atomicity', () => {
 
     expect(revisions).toHaveLength(1);
     expect(order.targetExitPriceE4).toBe(toE4(1.9));
-    expect(order.targetExitDate).toBe('2026-09-12');
+    // Clamped to expiry-3d — see the advisor-clamp comment above.
+    expect(order.targetExitDate).toBe('2026-08-16');
     expect(order.exitUpdatedAt).not.toBe('2020-01-01T00:00:00.000Z');
     expect(revisions[0]!.newTargetExitPriceE4).toBe(order.targetExitPriceE4);
     expect(revisions[0]!.newTargetExitDate).toBe(order.targetExitDate);

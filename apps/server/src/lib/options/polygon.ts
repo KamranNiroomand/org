@@ -267,6 +267,11 @@ async function getAll<T>(path: string, maxPages = 200): Promise<T[]> {
     if (env.results) out.push(...env.results);
     next = env.next_url;
   }
+  if (next) {
+    // Silent truncation writes a half-fetched chain that then passes
+    // every coverage check as whole (review finding) — loud beats lossy.
+    throw new ProviderError(`pagination exceeded ${maxPages} pages for ${path} — refusing a truncated result`);
+  }
   return out;
 }
 
@@ -352,12 +357,14 @@ export class PolygonProvider implements OptionsProvider {
     // straddled UTC midnight and stamped half of one session's board with
     // the *next* day's date — a phantom trading day the ranking then
     // treated as a real session whose every spot was "stale".
-    const tradingDay = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/New_York',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(new Date(asOf));
+    const tradingDay =
+      request.tradingDay ??
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date(asOf));
     const underlying = request.underlying.toUpperCase();
 
     const [raw, spot] = await Promise.all([

@@ -10,7 +10,7 @@ import type { paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
 import { adviseOnExit, type ExitAdvisorResult } from '../agents/exitAdvisor.js';
-import { recordIntradayMark, reduceOrder, contractMultiplier, closeOrder, logDecisions } from '../paper.js';
+import { haircutE4, recordIntradayMark, reduceOrder, contractMultiplier, closeOrder, logDecisions } from '../paper.js';
 import {
   computeExitTarget,
   evaluateExit,
@@ -359,8 +359,14 @@ export async function runExitEngine(
         // it are already recorded as 'modelled' by closeOrder.
         const live = liveQuotes.get(order.occSymbol);
         const measuredBidE4 = live?.bidE4 ?? quote?.bidE4 ?? null;
+        // Modelled prints are haircut BEFORE the rule ladder sees them,
+        // so the stop is checked on the same basis the book is marked
+        // at — unhaircut, a position sat marked below its stop for days
+        // while the raw print kept the stop from firing (review
+        // finding). A measured bid needs no haircut: it IS a fill.
+        const rawEvalE4 = measuredBidE4 ?? (quote ? (quote.lastE4 ?? quote.closeE4) : null);
         const evalPriceE4 =
-          measuredBidE4 ?? (quote ? (quote.lastE4 ?? quote.closeE4) : null);
+          rawEvalE4 === null ? null : measuredBidE4 !== null ? rawEvalE4 : haircutE4(rawEvalE4, 'sell');
         if (evalPriceE4 === null) {
           summary.errors.push(
             `${order.occSymbol}: no usable price (bid, last, or close) — skipping this recheck`,
@@ -483,6 +489,10 @@ export async function runExitEngine(
               .where(eq(paperOrders.id, order.id))
               .run();
           });
+          // Keep the in-memory row honest: a same-pass extension writes
+          // its own revision from this object, and pre-ratchet values
+          // there made the audit trail lie (review finding).
+          order.stopLossPriceE4 = decision.newStopLossPriceE4;
         }
 
         // An extended target date (the horizon time-stop's "model still
@@ -584,7 +594,35 @@ export async function runExitEngine(
         // the day. Advancing it while the decision it accompanies rolled
         // back would suppress the re-review *and* leave no trace of the
         // attempt. Same idiom as routes/options.ts's promote.
-        const revised = advice.action === 'move_target';
+        let revised = advice.action === 'move_target';
+        // The advisor's outputs are opinions; the contract's expiry is a
+        // fact. Unclamped, an extension past expiry kills the time-stop
+        // and the position rides theta to the DTE-floor forced exit
+        // (review finding). Same clamp the deterministic path applies:
+        // never past expiry minus the floor, never a target below the
+        // stop.
+        if (
+          revised &&
+          typeof advice.newTargetExitDate === 'string' &&
+          /^\d{4}-\d{2}-\d{2}$/.test(advice.newTargetExitDate)
+        ) {
+          // Type-strict on purpose: a malformed date must reach the DB
+          // write and fail loudly there, not be laundered into a valid
+          // clamp value ("[object Object]" > "2026-.." is TRUE in JS).
+          const latestAllowed = new Date(Date.parse(`${contract.expiry}T00:00:00Z`) - 3 * 86_400_000)
+            .toISOString()
+            .slice(0, 10);
+          if (advice.newTargetExitDate > latestAllowed) advice.newTargetExitDate = latestAllowed;
+        }
+        if (
+          revised &&
+          advice.newTargetExitPriceE4 !== null &&
+          order.stopLossPriceE4 !== null &&
+          advice.newTargetExitPriceE4 <= order.stopLossPriceE4
+        ) {
+          // A target at or below the stop is not a plan; hold instead.
+          revised = false;
+        }
         record(
           order,
           revised ? 'target_moved' : 'held',
@@ -615,6 +653,15 @@ export async function runExitEngine(
           tx.update(paperOrders)
             .set({
               exitUpdatedAt: nowIso(),
+              // An ev_sign_flip the advisor has reviewed and chosen to
+              // hold through is a RESOLVED fact, not a standing alarm:
+              // re-baseline entryEv to the current read so the same
+              // permanent flip (an inflated-legacy entry vs honest
+              // current EV) cannot burn one LLM call per pass all day
+              // (review finding). A future flip is then genuinely new.
+              ...(decision.triggeredBy === 'ev_sign_flip' && currentEv !== undefined
+                ? { entryEv: currentEv }
+                : {}),
               ...(revised
                 ? { targetExitPriceE4: advice.newTargetExitPriceE4, targetExitDate: advice.newTargetExitDate }
                 : {}),

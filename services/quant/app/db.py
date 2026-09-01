@@ -198,7 +198,16 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
                    q.occ_symbol, q.bid_e4, q.ask_e4, q.close_e4, q.volume, q.open_interest,
                    q.underlying_e4, q.underlying_asof_day,
                    q.iv_bps, q.delta, q.gamma, q.vega, q.theta, q.liquid,
-                   ROW_NUMBER() OVER (PARTITION BY q.occ_symbol ORDER BY q.as_of DESC) AS rn
+                   -- Solved rows outrank unsolved newer ones: a same-day
+                   -- re-capture taken while the quant sidecar was down
+                   -- writes fresh rows with NULL iv, and preferring them
+                   -- discards a perfectly good solve for the same session
+                   -- (review finding). Same close, same day; the solve is
+                   -- the only difference that matters here.
+                   ROW_NUMBER() OVER (
+                       PARTITION BY q.occ_symbol
+                       ORDER BY (q.iv_bps IS NOT NULL) DESC, q.as_of DESC
+                   ) AS rn
             FROM option_quotes q
             JOIN option_contracts c ON c.occ_symbol = q.occ_symbol
             WHERE c.underlying = ? AND q.trading_day = ?
@@ -216,9 +225,24 @@ def read_quotes(underlying: str, trading_day: str, liquid_only: bool = False) ->
         return pl.DataFrame(schema=schema)
 
     def mid(bid_e4: int | None, ask_e4: int | None) -> float | None:
-        if bid_e4 is None or ask_e4 is None or bid_e4 <= 0:
+        # Mirrors gate.ts's crossed-quote refusal exactly: a zero or
+        # crossed ask means the solve used the CLOSE, and reporting a
+        # crossed mid here hands every consumer a basis mismatch dressed
+        # as a mispricing (review finding).
+        if bid_e4 is None or ask_e4 is None or bid_e4 <= 0 or ask_e4 <= 0 or ask_e4 < bid_e4:
             return None
         return (bid_e4 + ask_e4) / (2 * _E4)
+
+    # One chain, one spot vintage: after dedup across re-captures, rows
+    # can carry different underlying_asof_day values (a contract present
+    # in only one run keeps that run's spot), and a mixed-vintage chain
+    # corrupts moneyness and every IV comparison (review finding). Keep
+    # the majority vintage; the discarded handful are named by absence,
+    # not silently blended.
+    vintages = [r["underlying_asof_day"] for r in rows if r["underlying_asof_day"] is not None]
+    if vintages:
+        modal = max(set(vintages), key=vintages.count)
+        rows = [r for r in rows if r["underlying_asof_day"] in (None, modal)]
 
     mids = [mid(r["bid_e4"], r["ask_e4"]) for r in rows]
     closes = [(r["close_e4"] / _E4) if r["close_e4"] is not None else None for r in rows]
@@ -471,7 +495,9 @@ def read_contract_history(occ_symbols: list[str]) -> pl.DataFrame:
         return pl.DataFrame(schema=schema)
 
     def price(bid_e4: int | None, ask_e4: int | None, close_e4: int | None) -> float | None:
-        if bid_e4 is not None and ask_e4 is not None and bid_e4 > 0:
+        # Crossed/zero-ask refusal mirrors gate.ts — see read_quotes'
+        # mid() (review finding: basis mismatch on crossed quotes).
+        if bid_e4 is not None and ask_e4 is not None and bid_e4 > 0 and ask_e4 > 0 and ask_e4 >= bid_e4:
             return (bid_e4 + ask_e4) / (2 * _E4)
         return (close_e4 / _E4) if close_e4 is not None else None
 

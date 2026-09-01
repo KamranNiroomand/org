@@ -76,6 +76,10 @@ export interface DailyBar {
 }
 
 export interface ChainRequest {
+  /** Stamp every quote of this run with ONE trading day (see capture.ts)
+   * instead of the per-symbol clock — a throttled run must not hand its
+   * late symbols a phantom next-day date. */
+  tradingDay?: string;
   readonly underlying: string;
   /** Contracts expiring more than this many days out are skipped. */
   readonly maxDte: number;
