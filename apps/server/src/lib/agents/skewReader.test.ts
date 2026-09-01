@@ -22,18 +22,18 @@ describe('shortlistForAgent', () => {
   it('surfaces clean contrarian bids, held or fast-rising hedged rallies, and big movers', () => {
     const rows = [
       row({ symbol: 'CB', quadrant: 'contrarian_bid' }),
-      row({ symbol: 'CBEV', quadrant: 'contrarian_bid', event_flag: true }), // event-tainted: out
+      row({ symbol: 'CBEV', quadrant: 'contrarian_bid', event_flag: true }), // event-tainted: judged, not hidden
       row({ symbol: 'HRHELD', held: true }),
       row({ symbol: 'HRFAST', delta_5d: 0.3 }),
       row({ symbol: 'HRSLOW', delta_5d: 0.01 }), // ordinary weather: out unless a top mover
       row({ symbol: 'MOVER', quadrant: 'fear', delta_5d: -0.9 }),
     ];
-    const picked = shortlistForAgent(rows, 4).map((r) => r.symbol);
+    const picked = shortlistForAgent(rows, 5).map((r) => r.symbol);
     expect(picked).toContain('CB');
     expect(picked).toContain('HRHELD');
     expect(picked).toContain('HRFAST');
     expect(picked).toContain('MOVER');
-    expect(picked).not.toContain('CBEV');
+    expect(picked).toContain('CBEV'); // the agent judges the ambiguity; the filter no longer decides silently
     expect(picked).not.toContain('HRSLOW');
   });
 

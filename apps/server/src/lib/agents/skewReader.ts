@@ -96,7 +96,13 @@ export function shortlistForAgent(rows: SkewRowForAgent[], cap = 12): SkewRowFor
   const usable = rows.filter((r) => r.quadrant !== null);
   const picked = new Map<string, SkewRowForAgent>();
   for (const r of usable) {
-    if (r.quadrant === 'contrarian_bid' && !r.event_flag) picked.set(r.symbol, r);
+    // Event-flagged contrarian bids are INCLUDED on purpose: judging
+    // whether an upside bid is an informed position or a dated catalyst
+    // being priced is exactly the ambiguity this agent exists for (its
+    // prompt mandates the discount), and a user rightly asked why WMT's
+    // blue dot never got a verdict. The filter's old exclusion decided
+    // silently what the agent should have decided visibly.
+    if (r.quadrant === 'contrarian_bid') picked.set(r.symbol, r);
   }
   for (const r of usable) {
     if (r.quadrant === 'hedged_rally' && (r.held || (r.delta_5d ?? 0) > 0.15)) picked.set(r.symbol, r);
