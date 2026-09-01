@@ -40,6 +40,10 @@ Discipline, non-negotiable:
   it is NOT a buy call, and you never use the words buy or sell.
 - An event_flag means measured skew likely reflects a dated catalyst:
   discount the sentiment reading accordingly, and say so.
+- plain: the first thing a completely non-technical reader sees. If a
+  sentence needs ANY market concept explained to be understood, rewrite
+  it until it doesn't. Say what is happening and what to do, nothing
+  about how you know.
 - probability: your committed P(this symbol outperforms its own sector
   over the next 21 trading sessions), between 0.05 and 0.95. It will be
   scored. A reflex 0.5 is only honest when the evidence is balanced.
@@ -56,7 +60,7 @@ const READ_SCHEMA = {
     plain: {
       type: 'string' as const,
       description:
-        'One or two sentences for a non-technical reader: what you concluded and why, no jargon — no deltas, percentiles, skew, or term structure. The way you would tell a friend.',
+        'One or two sentences for someone who knows NOTHING about options or markets. Forbidden: options, puts, calls, insurance, hedging, protection, premium, skew, volatility, positioning — any trading concept at all. Allowed: only what it means for the stock in everyday life terms and what the reader should do. Example of the register: "Nothing unusual is happening with Apple — big investors are just being routinely careful, like they always are. If you own it, keep it, but decide in advance at what price you would sell." Write at that level.',
     },
     probability: {
       type: 'number' as const,
