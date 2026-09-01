@@ -89,32 +89,25 @@ export interface SkewRowForAgent {
   sentence: string;
 }
 
-/** The disagreement shortlist — the only names worth an LLM's opinion.
- * Everything else is the map's ordinary weather. Capped so a wild day
- * cannot stampede the budget. */
-export function shortlistForAgent(rows: SkewRowForAgent[], cap = 12): SkewRowForAgent[] {
+/** The whole usable board, interesting names first — the user's
+ * explicit design: the agent judges everything it can see, not just
+ * what the math flagged. Ordering matters because runs are resumable
+ * (idempotent per day+symbol): contrarian bids, held names, and big
+ * movers get read first, ordinary weather last, so an interrupted run
+ * has already covered what matters most. The cap is a stampede guard,
+ * set above any realistic board size. */
+export function shortlistForAgent(rows: SkewRowForAgent[], cap = 150): SkewRowForAgent[] {
   const usable = rows.filter((r) => r.quadrant !== null);
-  const picked = new Map<string, SkewRowForAgent>();
-  for (const r of usable) {
-    // Event-flagged contrarian bids are INCLUDED on purpose: judging
-    // whether an upside bid is an informed position or a dated catalyst
-    // being priced is exactly the ambiguity this agent exists for (its
-    // prompt mandates the discount), and a user rightly asked why WMT's
-    // blue dot never got a verdict. The filter's old exclusion decided
-    // silently what the agent should have decided visibly.
-    if (r.quadrant === 'contrarian_bid') picked.set(r.symbol, r);
-  }
-  for (const r of usable) {
-    if (r.quadrant === 'hedged_rally' && (r.held || (r.delta_5d ?? 0) > 0.15)) picked.set(r.symbol, r);
-  }
-  const movers = [...usable]
-    .filter((r) => r.delta_5d !== null)
-    .sort((a, b) => Math.abs(b.delta_5d!) - Math.abs(a.delta_5d!));
-  for (const r of movers) {
-    if (picked.size >= cap) break;
-    picked.set(r.symbol, r);
-  }
-  return [...picked.values()].slice(0, cap);
+  const priority = (r: SkewRowForAgent): number => {
+    if (r.quadrant === 'contrarian_bid') return 0;
+    if (r.held) return 1;
+    if (Math.abs(r.delta_5d ?? 0) > 0.15) return 2;
+    if (r.quadrant === 'hedged_rally' || r.quadrant === 'fear') return 3;
+    return 4;
+  };
+  return [...usable]
+    .sort((a, b) => priority(a) - priority(b) || Math.abs(b.delta_5d ?? 0) - Math.abs(a.delta_5d ?? 0))
+    .slice(0, cap);
 }
 
 export interface SkewAgentRunResult {
