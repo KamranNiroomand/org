@@ -271,8 +271,8 @@ export function SkewMap() {
           title="Ranked by five-session change"
           subtitle="The level is structural; the change is the signal. Thin chains and suspect quotes sit at the bottom, named — never silently dropped."
         />
-        <div className="divide-y divide-border">
-          {data.rows.slice(0, 40).map((r) => (
+        <div className="max-h-[32rem] divide-y divide-border overflow-y-auto">
+          {data.rows.map((r) => (
             <div key={r.symbol} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2 text-xs">
               <span className="w-14 font-medium">
                 {r.symbol}
