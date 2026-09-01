@@ -1101,6 +1101,18 @@ OPTION_FEATURE_COLS = [
     "risk_reversal_25d",
     "put_call_oi_ratio",
     "put_call_volume_ratio",
+    # The skew map's two lessons, promoted to ride-along features
+    # (2026-09-01): the LEVEL of skew is a stock's personality, but the
+    # CHANGE is the signal, and the sector-relative rank is what makes
+    # UBER's 0.84 mean something its raw value doesn't. Same fixed
+    # ~45-DTE measurement as the map (skew.py), so the feature and the
+    # display can never disagree about what skew "is". Ride-alongs:
+    # joined from day one, consumed by no model until a deliberate,
+    # counted flip (candidate trial ~late October at 60 days of chain
+    # coverage).
+    "skew_norm_45d",
+    "skew_chg_5d",
+    "skew_sector_rank",
 ]
 
 
@@ -1170,6 +1182,12 @@ def option_feature_panel() -> pl.DataFrame:
         front_expiry = (
             screened["expiry"].min() if screened.height > 0 else None
         )
+        # The map's own measurement, verbatim — one definition of skew.
+        from .skew import _measure_name
+
+        m = _measure_name(chain, day)
+        skew_norm = m["skew_norm"] if m is not None and m["chain_ok"] and not m["suspect"] else None
+
         rows.append(
             {
                 "symbol": symbol,
@@ -1181,6 +1199,9 @@ def option_feature_panel() -> pl.DataFrame:
                 ),
                 "put_call_oi_ratio": ratios["put_call_oi_ratio"],
                 "put_call_volume_ratio": ratios["put_call_volume_ratio"],
+                "skew_norm_45d": skew_norm,
+                "skew_chg_5d": None,
+                "skew_sector_rank": None,
             }
         )
 
@@ -1190,6 +1211,35 @@ def option_feature_panel() -> pl.DataFrame:
         **{c: pl.Float64 for c in OPTION_FEATURE_COLS},
     }
     panel = pl.DataFrame(rows, schema=schema)
+
+    # The change column: this session's skew vs five sessions back, per
+    # symbol — null (never zero) when either endpoint is missing, same
+    # discipline as the map's own delta.
+    panel = panel.sort(["symbol", "day"]).with_columns(
+        (pl.col("skew_norm_45d") - pl.col("skew_norm_45d").shift(5).over("symbol")).alias("skew_chg_5d")
+    )
+
+    # Sector-relative rank per day, ETF pseudo-sectors excluded by the
+    # sectors source itself; a name without a sector (or a sector with
+    # fewer than 3 measured names that day) keeps null.
+    from .db import read_symbol_sectors
+
+    sectors = read_symbol_sectors()
+    sector_df = pl.DataFrame(
+        {"symbol": list(sectors.keys()), "_sector": list(sectors.values())},
+        schema={"symbol": pl.Utf8, "_sector": pl.Utf8},
+    )
+    panel = panel.join(sector_df, on="symbol", how="left").with_columns(
+        pl.when(
+            pl.col("_sector").is_not_null()
+            & pl.col("skew_norm_45d").is_not_null()
+            & (pl.col("skew_norm_45d").count().over(["day", "_sector"]) >= 3)
+        )
+        .then(pl.col("skew_norm_45d").rank().over(["day", "_sector"]) / pl.col("skew_norm_45d").count().over(["day", "_sector"]))
+        .otherwise(None)
+        .alias("skew_sector_rank")
+    ).drop("_sector")
+
     _option_panel_cache.clear()  # one corpus, one entry — never a leak
     _option_panel_cache[fingerprint] = panel
     return panel
