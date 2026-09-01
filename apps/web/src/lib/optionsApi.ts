@@ -285,8 +285,19 @@ export interface SkewMapResponse {
   median_skew_norm: number | null;
 }
 
+export interface SkewAgentRead {
+  day: string;
+  symbol: string;
+  verdict: 'enter_candidate' | 'avoid' | 'tighten_if_held' | 'ignore';
+  probability: number;
+  reasoning: string;
+  falsifier: string;
+}
+
 export const optionsApi = {
   skewMap: () => api.get<SkewMapResponse>('/api/options/skew'),
+  skewAgentReads: () => api.get<{ day: string; reads: SkewAgentRead[] }>('/api/options/skew-agent'),
+  runSkewAgent: () => api.post<{ day: string; read: number; skipped: number; errors: string[] }>('/api/options/skew-agent', {}),
   status: () => api.get<OptionsStatus>('/api/options/status'),
   triggerCapture: () => api.post<CaptureJobResult>('/api/options/capture'),
   triggerTextSync: () => api.post<TextSyncResult>('/api/options/text-sync'),

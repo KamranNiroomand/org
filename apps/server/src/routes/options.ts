@@ -183,6 +183,50 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    */
   app.post('/api/options/retier', async () => retierByLiquidity());
 
+  /** The skew reader agent — STANDALONE research layer (user's design:
+   * nothing in the engines reads its verdicts). POST runs it over
+   * today's map shortlist; GET returns the day's verdicts. */
+  app.post('/api/options/skew-agent', async (_req, reply) => {
+    const { runSkewReader } = await import('../lib/agents/skewReader.js');
+    const { sql: dsql } = await import('drizzle-orm');
+    const { optionQuotes: oq } = await import('../db/market/schema.js');
+    const day = marketDb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d;
+    if (!day) return reply.code(503).send({ error: 'No captured chains yet.' });
+    try {
+      const res = await fetch(`${config.market.quantUrl}/options/skew`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ day }),
+        signal: AbortSignal.timeout(300_000),
+      });
+      if (!res.ok) return reply.code(503).send({ error: `quant ${res.status}` });
+      const map = (await res.json()) as { rows: Array<Record<string, unknown>> };
+      const { paperDb } = await import('../db/paper/index.js');
+      const { paperOrders, stockOrders } = await import('../db/paper/schema.js');
+      const { eq: deq } = await import('drizzle-orm');
+      const held = new Set<string>();
+      for (const o of paperDb.select().from(paperOrders).where(deq(paperOrders.status, 'open')).all())
+        held.add(o.underlying ?? o.occSymbol.slice(0, 6).trim());
+      for (const o of paperDb.select().from(stockOrders).where(deq(stockOrders.status, 'open')).all())
+        held.add(o.symbol);
+      const rows = map.rows
+        .filter((r) => r.chain_ok && !r.suspect)
+        .map((r) => ({ ...(r as object), held: held.has(String(r.symbol)) })) as never[];
+      return await runSkewReader(day, rows);
+    } catch (err) {
+      return reply.code(503).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/options/skew-agent', async (_req, reply) => {
+    const { latestSkewReads } = await import('../lib/agents/skewReader.js');
+    const { sql: dsql } = await import('drizzle-orm');
+    const { optionQuotes: oq } = await import('../db/market/schema.js');
+    const day = marketDb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d;
+    if (!day) return reply.code(503).send({ error: 'No captured chains yet.' });
+    return { day, reads: latestSkewReads(day) };
+  });
+
   /** The skew map — what option traders are paying for, per name, per
    * day, in four quadrants. All math in the quant sidecar (skew.py);
    * this route only picks the day (latest captured unless given),
