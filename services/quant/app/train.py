@@ -148,6 +148,14 @@ RANK_FEATURES = True
 #: slow momentum, residual momentum, and liquidity, with the slow news
 #: axis. Both ride the same vol-scaled label and per-day rank transform
 #: as `dir`.
+DIR_COLS = [
+    *FEATURE_COLS,
+    "news_count_1d",
+    "news_count_5d",
+    "news_sent_net_1d",
+    "news_sent_net_5d",
+]
+
 STOCK_SHORT_COLS = [
     *FEATURE_COLS,
     "momentum_5d",
@@ -203,7 +211,12 @@ class TargetSpec:
 
 TARGETS: dict[str, TargetSpec] = {
     # The original options-direction config, unchanged in substance.
-    "dir": TargetSpec(5, FEATURE_COLS, LABEL_VOL_WINDOW, 4, include_news=False),
+    # Trial #25 (2026-09-01): news columns into the options direction
+    # model. A five-day horizon is where news should matter MOST, yet
+    # dir trained blind to it while both stock targets read it from
+    # birth — an input handicap, not a modelling choice anyone defended.
+    # First fair test also rides the healed corpus.
+    "dir": TargetSpec(5, DIR_COLS, LABEL_VOL_WINDOW, 4, include_news=True),
     # Stock engine: ~1-4 week swings.
     "stk_short": TargetSpec(21, STOCK_SHORT_COLS, 21, 4, include_news=True),
     # Stock engine: ~6-12 month positions. Two folds until the bar corpus
