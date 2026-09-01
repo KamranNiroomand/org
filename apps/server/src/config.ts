@@ -127,6 +127,13 @@ const schema = z.object({
   // scheduled daily run silently defaulted to 1 and reported a 1.96
   // hurdle against results that had really consumed 19 trials.
   // 22 as of 2026-08-26: trial #20 was the vol-scaled label + per-day
+  // Trial #25 (2026-09-01): news columns into the options dir model —
+  // a 5-day horizon trained blind to news was an input handicap, not a
+  // choice. Counted on running, as ever.
+  // Trial #24 (2026-09-01): sector-spillover columns into stk_short's
+  // feature set, first trained over the healed corpus. Counted on
+  // running the trial, not on adopting it — the ledger ticks whether or
+  // not the config survives its own out-of-fold comparison.
   // Trial #23 (2026-08-29): serving the stock boards from an average of
   // the target's last five daily refits (STOCK_ENSEMBLE_N, rank.py)
   // instead of the single champion artifact — a new configuration whose
@@ -134,7 +141,7 @@ const schema = z.object({
   // feature-rank configuration; trials #21 and #22 are the stock
   // engine's stk_short and stk_long configurations (see TARGETS in
   // services/quant/app/train.py).
-  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(23),
+  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(25),
   // The modelled-fill spread haircut. With no quote entitlement, every
   // paper fill and mark derives from a *print* (close or last trade) —
   // a price two other people met at, not one offered to us. Real option

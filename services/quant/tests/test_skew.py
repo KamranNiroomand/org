@@ -99,3 +99,21 @@ class TestSentence:
         row = {"symbol": "X", "skew_norm": 0.02, "sector_rank_pct": None,
                "ret_1m": None, "rvol": None, "quadrant": None, "event_flag": True}
         assert "dated catalyst" in _sentence(row)
+
+
+def test_every_declared_ride_along_panel_is_joined_at_scoring_time():
+    """Train/serve symmetry as an invariant: any feature family a
+    manifest can declare must have a matching join in _forecast_inputs —
+    the trial-24 review caught sector columns trained-but-not-served."""
+    import inspect
+
+    from app import rank
+    from app.features import EARNINGS_FEATURE_COLS, NEWS_FEATURE_COLS, SECTOR_FEATURE_COLS
+
+    src = inspect.getsource(rank._forecast_inputs)
+    for family, name in [
+        (NEWS_FEATURE_COLS, "NEWS_FEATURE_COLS"),
+        (SECTOR_FEATURE_COLS, "SECTOR_FEATURE_COLS"),
+        (EARNINGS_FEATURE_COLS, "EARNINGS_FEATURE_COLS"),
+    ]:
+        assert name in src, f"_forecast_inputs has no scoring join for {name}"

@@ -55,7 +55,12 @@ class TestTrainEndToEnd:
         # The artifact is not just present, it is usable: a fresh LightGBM
         # booster loads it and can score a real feature row.
         booster = lgb.Booster(model_file=str(run_dir / "model.txt"))
-        assert booster.num_feature() == len(FEATURE_COLS)
+        # dir eats DIR_COLS since trial #25 (news adopted); the manifest
+        # is the single statement of the feature set, so assert against
+        # the target's own spec, not the base price-feature list.
+        from app.train import TARGETS
+
+        assert booster.num_feature() == len(TARGETS["dir"].feature_cols)
 
         manifest = json.loads((run_dir / "manifest.json").read_text())
         assert manifest["target"] == "dir"
@@ -64,7 +69,7 @@ class TestTrainEndToEnd:
         assert manifest["metrics"]["n_test_rows"] > 0
 
         features = json.loads((run_dir / "features.json").read_text())
-        assert features["feature_cols"] == FEATURE_COLS
+        assert features["feature_cols"] == TARGETS["dir"].feature_cols
 
     def test_refuses_to_train_on_too_little_data(self, tmp_path) -> None:
         if not _have_enough_bars():

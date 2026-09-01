@@ -148,6 +148,14 @@ RANK_FEATURES = True
 #: slow momentum, residual momentum, and liquidity, with the slow news
 #: axis. Both ride the same vol-scaled label and per-day rank transform
 #: as `dir`.
+DIR_COLS = [
+    *FEATURE_COLS,
+    "news_count_1d",
+    "news_count_5d",
+    "news_sent_net_1d",
+    "news_sent_net_5d",
+]
+
 STOCK_SHORT_COLS = [
     *FEATURE_COLS,
     "momentum_5d",
@@ -157,6 +165,11 @@ STOCK_SHORT_COLS = [
     "news_count_5d",
     "news_sent_net_1d",
     "news_sent_net_5d",
+    # Trial #24 (2026-09-01) RAN AND WAS REJECTED: sector-spillover
+    # columns dropped daily IC from 0.0063 to 0.0025 on the healed
+    # corpus (artifact 2026-09-01-stk_short-h21-a74037e82ee6). The
+    # columns stay ride-alongs; the ledger keeps the trial — counted on
+    # running, not on winning.
 ]
 STOCK_LONG_COLS = [
     "momentum_21d",
@@ -193,7 +206,12 @@ class TargetSpec:
 
 TARGETS: dict[str, TargetSpec] = {
     # The original options-direction config, unchanged in substance.
-    "dir": TargetSpec(5, FEATURE_COLS, LABEL_VOL_WINDOW, 4, include_news=False),
+    # Trial #25 (2026-09-01) RAN AND WAS ADOPTED: news columns lifted
+    # dir's daily IC from 0.0060 to 0.0132 (pooled 0.0353) — the
+    # strongest dir signal recorded (artifact
+    # 2026-09-01-dir-h5-359f97363a0d). Still below the hurdle; the
+    # banner stands.
+    "dir": TargetSpec(5, DIR_COLS, LABEL_VOL_WINDOW, 4, include_news=True),
     # Stock engine: ~1-4 week swings.
     "stk_short": TargetSpec(21, STOCK_SHORT_COLS, 21, 4, include_news=True),
     # Stock engine: ~6-12 month positions. Two folds until the bar corpus
