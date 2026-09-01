@@ -18,30 +18,22 @@ const row = (over: Partial<SkewRowForAgent>): SkewRowForAgent => ({
   ...over,
 });
 
-describe('shortlistForAgent', () => {
-  it('surfaces clean contrarian bids, held or fast-rising hedged rallies, and big movers', () => {
+describe('shortlistForAgent (full board)', () => {
+  it('judges every usable name, most interesting first', () => {
     const rows = [
+      row({ symbol: 'WEATHER', quadrant: 'chase' }),
       row({ symbol: 'CB', quadrant: 'contrarian_bid' }),
-      row({ symbol: 'CBEV', quadrant: 'contrarian_bid', event_flag: true }), // event-tainted: judged, not hidden
-      row({ symbol: 'HRHELD', held: true }),
-      row({ symbol: 'HRFAST', delta_5d: 0.3 }),
-      row({ symbol: 'HRSLOW', delta_5d: 0.01 }), // ordinary weather: out unless a top mover
-      row({ symbol: 'MOVER', quadrant: 'fear', delta_5d: -0.9 }),
+      row({ symbol: 'HELD', held: true }),
+      row({ symbol: 'MOVER', delta_5d: 0.4 }),
     ];
-    const picked = shortlistForAgent(rows, 5).map((r) => r.symbol);
-    expect(picked).toContain('CB');
-    expect(picked).toContain('HRHELD');
-    expect(picked).toContain('HRFAST');
-    expect(picked).toContain('MOVER');
-    expect(picked).toContain('CBEV'); // the agent judges the ambiguity; the filter no longer decides silently
-    expect(picked).not.toContain('HRSLOW');
+    const picked = shortlistForAgent(rows).map((r) => r.symbol);
+    expect(picked).toEqual(['CB', 'HELD', 'MOVER', 'WEATHER']); // priority order
+    expect(picked).toHaveLength(4); // nothing usable is excluded
   });
 
-  it('the cap holds on a wild day — a stampede cannot spend the budget', () => {
-    const rows = Array.from({ length: 50 }, (_, i) =>
-      row({ symbol: `S${i}`, quadrant: 'contrarian_bid' }),
-    );
-    expect(shortlistForAgent(rows, 12)).toHaveLength(12);
+  it('the stampede cap still bounds a pathological board', () => {
+    const rows = Array.from({ length: 300 }, (_, i) => row({ symbol: `S${i}` }));
+    expect(shortlistForAgent(rows)).toHaveLength(150);
   });
 
   it('unquadranted rows never reach the agent', () => {
