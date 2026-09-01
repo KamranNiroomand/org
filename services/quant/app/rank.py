@@ -187,6 +187,7 @@ def horizon_value_and_prob(
     vol: float,
     is_call: bool,
     breakeven: float,
+    remaining_vol: float | None = None,
 ) -> tuple[float, float] | None:
     """Expected option VALUE at the model's own horizon, not payoff at expiry
     — with P(that value clears `breakeven`) from the same integral.
@@ -213,6 +214,17 @@ def horizon_value_and_prob(
     calibration bug wearing a suit (found live: a COST put entered at
     exactly that number), and no five-day equity forecast earns three
     nines.
+
+    `remaining_vol` is the vol the REMAINING life is priced at — the
+    market's own implied vol, not the forecast. The forecast vol's only
+    honest job is the width of the horizon spot distribution (our view
+    of how far S moves in five days). Pricing the sale-at-horizon with
+    forecast vol quietly bets that the market re-marks IV to our number
+    — found live when a 1.8x HAR-over-market vol ratio printed a FICO
+    call at 'EV 206% of risk' with every drift honestly bounded: the
+    drift channel was fixed and the vega channel was still smuggling
+    magnitude. Defaults to `vol` for callers that mean held-to-model
+    consistency (tests, degenerate cases).
     """
     h = min(horizon_years, years)
     remaining = years - h
@@ -226,9 +238,10 @@ def horizon_value_and_prob(
     scale = vol * math.sqrt(h)
     ev_acc = 0.0
     p_acc = 0.0
+    sell_vol = remaining_vol if remaining_vol is not None and remaining_vol > 0 else vol
     for zi, wi in zip(z, w):
         s_h = math.exp(m + scale * zi)
-        v = bsm_price(s_h, strike, remaining, rate, div_yield, vol, is_call)
+        v = bsm_price(s_h, strike, remaining, rate, div_yield, sell_vol, is_call)
         ev_acc += wi * v
         if v > breakeven:
             p_acc += wi
@@ -444,6 +457,7 @@ def rank_underlying(
             horizon_value_and_prob(
                 spot, strike, years, horizon_years, forecast_drift, rate,
                 dividend_yield, forecast_vol, is_call, price + cost_per_share,
+                remaining_vol=row["iv"],
             )
             if horizon_years is not None
             else None

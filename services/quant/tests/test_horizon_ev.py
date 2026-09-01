@@ -96,3 +96,28 @@ class TestPositionCap:
         # contract still opens; the cap bounds concentration, not entry.
         assert len(selected) == 1
         assert selected[0].quantity == 1
+
+
+class TestSellAtMarketVol:
+    def test_a_vol_forecast_above_market_cannot_inflate_the_sale_price(self):
+        # Forecast vol 2x market: the horizon distribution may widen, but
+        # the remaining life must be priced at the market's own vol — the
+        # counterparty at the horizon pays market IV, not our opinion.
+        market_iv = 0.35
+        inflated, _ = horizon_value_and_prob(
+            SPOT, STRIKE, YEARS, H, 0.3, RATE, 0.0, 2 * market_iv, True, 24.50
+        )
+        honest, _ = horizon_value_and_prob(
+            SPOT, STRIKE, YEARS, H, 0.3, RATE, 0.0, 2 * market_iv, True, 24.50,
+            remaining_vol=market_iv,
+        )
+        # The FICO shape: same forecast, wildly different EV depending on
+        # whose vol prices the sale.
+        assert honest < inflated * 0.6
+
+    def test_matching_vols_change_nothing(self):
+        a = horizon_value_and_prob(SPOT, STRIKE, YEARS, H, 0.3, RATE, 0.0, VOL, True, 24.50)
+        b = horizon_value_and_prob(
+            SPOT, STRIKE, YEARS, H, 0.3, RATE, 0.0, VOL, True, 24.50, remaining_vol=VOL
+        )
+        assert a == b
