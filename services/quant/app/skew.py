@@ -261,8 +261,19 @@ def skew_map(trading_day: str) -> dict:
         key = str(sym[0] if isinstance(sym, tuple) else sym)
         closes = group.get_column("close").to_list()
         vols = group.get_column("volume").to_list()
+        days = group.get_column("day").to_list()
+        # The bar 21 sessions back must actually BE about a month back.
+        # Half this corpus carries gapped history (a lossy backfill left
+        # 271 names with months missing), and counting positions across
+        # a gap printed DELL at +271% "on the month" against a December
+        # close. A return whose endpoints aren't a month apart is not a
+        # 1-month return; better no dot than a fictional one.
         if len(closes) >= 22 and closes[-22] > 0:
-            ret_1m[key] = (closes[-1] / closes[-22] - 1.0) * 100.0
+            from datetime import date
+
+            span = (date.fromisoformat(days[-1]) - date.fromisoformat(days[-22])).days
+            if span <= 45:
+                ret_1m[key] = (closes[-1] / closes[-22] - 1.0) * 100.0
         if len(vols) >= 21:
             avg = sum(vols[-21:-1]) / 20.0
             if avg > 0:
