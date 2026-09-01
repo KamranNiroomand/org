@@ -53,6 +53,11 @@ const READ_SCHEMA = {
       type: 'string' as const,
       enum: ['enter_candidate', 'avoid', 'tighten_if_held', 'ignore'],
     },
+    plain: {
+      type: 'string' as const,
+      description:
+        'One or two sentences for a non-technical reader: what you concluded and why, no jargon — no deltas, percentiles, skew, or term structure. The way you would tell a friend.',
+    },
     probability: {
       type: 'number' as const,
       description: 'P(outperforms own sector, 21 sessions), 0.05-0.95. Scored against outcomes.',
@@ -60,7 +65,7 @@ const READ_SCHEMA = {
     reasoning: { type: 'string' as const, description: 'Three to five sentences, outside view first.' },
     falsifier: { type: 'string' as const, description: 'The concrete observation that would change this verdict.' },
   },
-  required: ['verdict', 'probability', 'reasoning', 'falsifier'],
+  required: ['verdict', 'plain', 'probability', 'reasoning', 'falsifier'],
   additionalProperties: false,
 };
 
@@ -156,6 +161,7 @@ export async function runSkewReader(
       if (!block || block.type !== 'text') throw new Error('no content');
       const read = JSON.parse(block.text) as {
         verdict: 'enter_candidate' | 'avoid' | 'tighten_if_held' | 'ignore';
+        plain: string;
         probability: number;
         reasoning: string;
         falsifier: string;
@@ -167,7 +173,10 @@ export async function runSkewReader(
           symbol: row.symbol,
           verdict: read.verdict,
           probability: clampProbUp(read.probability),
-          reasoning: read.reasoning,
+          // Plain first, detail after — the card's audience said "I am
+          // not technical", and an analyst who cannot say it simply is
+          // not done thinking.
+          reasoning: `${read.plain}\n\n${read.reasoning}`,
           falsifier: read.falsifier,
           inputs: {
             quadrant: row.quadrant,
