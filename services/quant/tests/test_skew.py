@@ -89,16 +89,19 @@ class TestSentence:
             "quadrant": "hedged_rally", "event_flag": False,
         }
         s = _sentence(row)
-        assert s.startswith("MU — traders are paying heavily more for puts")
-        assert "82% of its sector" in s
-        assert "up 6.2% on the month" in s
-        assert "heavy volume" in s
-        assert "HEDGED RALLY" in s
+        assert s.startswith("MU — big investors are paying heavily more to protect against a fall")
+        assert "82% of similar companies" in s
+        assert "up 6.2% this month" in s
+        assert "busier-than-usual" in s
+        assert "insured against a fall" in s
+        # The jargon ban, as an assertion: none of these words may appear.
+        for banned in ("puts", "calls", "skew", "premium", "volatility"):
+            assert banned not in s.lower()
 
     def test_event_flag_appends_the_caveat(self):
         row = {"symbol": "X", "skew_norm": 0.02, "sector_rank_pct": None,
                "ret_1m": None, "rvol": None, "quadrant": None, "event_flag": True}
-        assert "dated catalyst" in _sentence(row)
+        assert "announcement is coming up" in _sentence(row)
 
 
 def test_every_declared_ride_along_panel_is_joined_at_scoring_time():

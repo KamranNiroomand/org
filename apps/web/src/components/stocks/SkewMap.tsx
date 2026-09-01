@@ -26,22 +26,22 @@ import { optionsApi, type SkewAgentRead, type SkewRow } from '../../lib/optionsA
 
 const QUADRANT_META = {
   contrarian_bid: {
-    label: 'Contrarian bid',
+    label: 'Falling, optimism building',
     color: 'var(--color-accent)',
     blurb: 'Down on the month, but calls are bid — tape and chain disagree. Watchlist; the only box where two sources of information split.',
   },
   chase: {
-    label: 'Chase',
+    label: 'Rising, crowd is in',
     color: '#e8923c',
     blurb: 'Up, and calls still bid. Everyone agrees — crowded, late, not wrong.',
   },
   hedged_rally: {
-    label: 'Hedged rally',
+    label: 'Rising, being insured',
     color: '#d4b83c',
     blurb: 'Up, but puts are bid — the rally is not trusted. Tighten stops on anything held here.',
   },
   fear: {
-    label: 'Fear',
+    label: 'Falling, getting scarier',
     color: 'var(--color-negative, #e05252)',
     blurb: 'Down, and protection keeps getting pricier. Not a bargain. Leave it alone.',
   },
@@ -301,10 +301,10 @@ export function SkewMap() {
         />
         <div className="flex flex-wrap items-baseline gap-x-3 border-b border-border px-4 py-1.5 text-[10px] uppercase tracking-wide text-faint">
           <span className="w-14">Name</span>
-          <span className="w-28">Map corner</span>
-          <span className="w-16" title="How strongly protection (positive) or optimism (negative) is favored right now">Lean now</span>
-          <span className="w-16" title="How much that lean moved in the last five trading days — the number this table is sorted by">5-day shift</span>
-          <span className="w-14" title="Trading volume vs a normal day">Volume</span>
+          <span className="w-28">Situation</span>
+          <span className="w-40" title="What big investors are paying more for right now">What's being paid for</span>
+          <span className="w-40" title="Which way that changed over the last week — the list is sorted by this">This week's change</span>
+          <span className="w-24">Trading</span>
           <span className="min-w-0 flex-1">The read</span>
         </div>
         <div className="max-h-[32rem] divide-y divide-border overflow-y-auto">
@@ -321,17 +321,36 @@ export function SkewMap() {
               ) : (
                 <span className="w-28 text-faint">—</span>
               )}
-              <span className="tnum w-16">{r.skew_norm.toFixed(2)}</span>
+              <span className="w-40 text-muted">
+                {Math.abs(r.skew_norm) < 0.05
+                  ? 'balanced'
+                  : r.skew_norm >= 0
+                    ? `protection ${Math.abs(r.skew_norm) >= 0.3 ? 'very ' : ''}expensive`
+                    : `optimism ${Math.abs(r.skew_norm) >= 0.3 ? 'very ' : ''}expensive`}
+                <span className="tnum text-faint"> {r.skew_norm.toFixed(2)}</span>
+              </span>
               <span
                 className={cn(
-                  'tnum w-16',
-                  r.delta_5d === null ? 'text-faint' : r.delta_5d >= 0 ? 'text-negative' : 'text-positive',
+                  'w-40',
+                  r.delta_5d === null ? 'text-faint' : r.delta_5d >= 0.05 ? 'text-negative' : r.delta_5d <= -0.05 ? 'text-positive' : 'text-muted',
                 )}
               >
-                {r.delta_5d !== null ? `Δ ${r.delta_5d >= 0 ? '+' : ''}${r.delta_5d.toFixed(2)}` : 'Δ —'}
+                {r.delta_5d === null
+                  ? 'no history yet'
+                  : r.delta_5d >= 0.05
+                    ? '▲ worry rising this week'
+                    : r.delta_5d <= -0.05
+                      ? '▼ worry easing this week'
+                      : 'steady this week'}
               </span>
-              <span className="tnum w-14 text-muted">{r.rvol !== null ? `×${r.rvol.toFixed(1)}` : ''}</span>
-              {r.event_flag && <span title="Event premium in the front expiry — dated catalyst, not sentiment">⚠</span>}
+              <span className="w-24 text-muted">
+                {r.rvol === null ? '' : r.rvol >= 1.5 ? 'busy day' : r.rvol <= 0.6 ? 'quiet day' : 'normal day'}
+              </span>
+              {r.event_flag && (
+                <span title="A company announcement is coming up — some caution is just that date being priced in">
+                  📅
+                </span>
+              )}
               {!r.chain_ok && <Badge tone="neutral">thin chain</Badge>}
               {r.suspect && <Badge tone="negative">suspect quote</Badge>}
               <span className="min-w-0 flex-1 truncate text-muted">{r.sentence}</span>
@@ -339,9 +358,10 @@ export function SkewMap() {
           ))}
         </div>
         <div className="px-4 py-2 text-[11px] text-faint">
-          A quadrant is where to look, never a signal: contrarian bids go on a watchlist, chases are already
-          crowded, hedged rallies mean tighten, fear means leave it. Rising put skew (Δ red) = protection
-          getting bid; falling (green) = fear draining out. * = held by a book.
+          How to use this: "falling, optimism building" goes on your research list; "rising, crowd is in"
+          means you're late; "rising, being insured" means keep it but set your exit price; "falling,
+          getting scarier" means don't go bargain-hunting. Red = worry growing; green = worry fading.
+          📅 = announcement coming up. * = we own it.
         </div>
       </Card>
     </div>

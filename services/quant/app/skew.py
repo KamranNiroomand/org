@@ -170,29 +170,55 @@ def _measure_name(chain: pl.DataFrame, trading_day: str) -> dict | None:
     }
 
 
+#: Everyday names for the four corners — what each situation IS, not
+#: trader shorthand. The enum stays stable for code; these are the
+#: words a person reads.
+QUADRANT_PLAIN = {
+    "contrarian_bid": "falling, but quiet optimism is building",
+    "chase": "rising, and the crowd is already in",
+    "hedged_rally": "rising, but being insured against a fall",
+    "fear": "falling, and getting scarier",
+}
+
+
 def _sentence(row: dict) -> str:
-    side = "puts" if row["skew_norm"] >= 0 else "calls"
-    flavor = "fear" if side == "puts" else "upside"
+    """The fixed per-name read, in words a non-trader understands — no
+    puts, calls, skew, or premium anywhere. The numbers live in the
+    table's own columns; this sentence carries only meaning."""
+    protecting = row["skew_norm"] >= 0
     mag = abs(row["skew_norm"])
     level = next(word for cutoff, word in SENTENCE_LEVELS if mag >= cutoff)
-    parts = [f"{row['symbol']} — traders are paying {level} more for {side}"]
-    if row.get("sector_rank_pct") is not None:
-        parts.append(f"more {flavor} than {row['sector_rank_pct']:.0f}% of its sector")
+    what = (
+        f"big investors are paying {level} more to protect against a fall"
+        if protecting
+        else f"big investors are paying {level} more to bet on a rise"
+    )
+    parts = [f"{row['symbol']} — {what}"]
+    if row.get("sector_rank_pct") is not None and protecting:
+        parts.append(f"more caution here than in {row['sector_rank_pct']:.0f}% of similar companies")
     ret = row.get("ret_1m")
     if ret is not None:
         direction = "up" if ret >= 0 else "down"
         vs = row.get("ret_1m_vs_spy")
-        vs_txt = f" ({'+' if (vs or 0) >= 0 else ''}{vs:.1f}% vs SPY)" if vs is not None else ""
-        parts.append(f"the stock is {direction} {abs(ret):.1f}% on the month{vs_txt}")
+        vs_txt = (
+            f" ({'ahead of' if (vs or 0) >= 0 else 'behind'} the market by {abs(vs):.1f}%)"
+            if vs is not None
+            else ""
+        )
+        parts.append(f"the stock is {direction} {abs(ret):.1f}% this month{vs_txt}")
     rvol = row.get("rvol")
     if rvol is not None:
-        vol_word = "heavy" if rvol >= RVOL_HEAVY else "light" if rvol <= RVOL_LIGHT else "normal"
-        parts.append(f"on {vol_word} volume")
+        vol_word = (
+            "a busier-than-usual" if rvol >= RVOL_HEAVY else "a quiet" if rvol <= RVOL_LIGHT else "an ordinary"
+        )
+        parts.append(f"on {vol_word} trading day")
     quadrant = row.get("quadrant")
     if quadrant:
-        parts.append(f"that puts it in {quadrant.replace('_', ' ').upper()}")
+        parts.append(f"situation: {QUADRANT_PLAIN.get(quadrant, quadrant)}")
     if row.get("event_flag"):
-        parts.append("⚠ event premium in the front expiry — read as a dated catalyst, not sentiment")
+        parts.append(
+            "note: a company announcement is coming up, and some of this caution is just that date being priced in"
+        )
     return ". ".join(parts) + "."
 
 
