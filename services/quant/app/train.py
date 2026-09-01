@@ -165,16 +165,11 @@ STOCK_SHORT_COLS = [
     "news_count_5d",
     "news_sent_net_1d",
     "news_sent_net_5d",
-    # Trial #24 (2026-09-01): the sector-spillover ride-alongs promoted
-    # to the feature set, trained for the first time over the healed
-    # corpus (they aggregate peers' bars, so the old gaps corrupted the
-    # neighbourhood as well as the name). Industry momentum is among the
-    # most replicated cross-sectional factors; the counted trial is the
-    # price of finding out whether it survives here.
-    "sector_mom_5d",
-    "sector_mom_21d",
-    "sector_news_count_1d",
-    "sector_sent_net_1d",
+    # Trial #24 (2026-09-01) RAN AND WAS REJECTED: sector-spillover
+    # columns dropped daily IC from 0.0063 to 0.0025 on the healed
+    # corpus (artifact 2026-09-01-stk_short-h21-a74037e82ee6). The
+    # columns stay ride-alongs; the ledger keeps the trial — counted on
+    # running, not on winning.
 ]
 STOCK_LONG_COLS = [
     "momentum_21d",
@@ -211,11 +206,11 @@ class TargetSpec:
 
 TARGETS: dict[str, TargetSpec] = {
     # The original options-direction config, unchanged in substance.
-    # Trial #25 (2026-09-01): news columns into the options direction
-    # model. A five-day horizon is where news should matter MOST, yet
-    # dir trained blind to it while both stock targets read it from
-    # birth — an input handicap, not a modelling choice anyone defended.
-    # First fair test also rides the healed corpus.
+    # Trial #25 (2026-09-01) RAN AND WAS ADOPTED: news columns lifted
+    # dir's daily IC from 0.0060 to 0.0132 (pooled 0.0353) — the
+    # strongest dir signal recorded (artifact
+    # 2026-09-01-dir-h5-359f97363a0d). Still below the hurdle; the
+    # banner stands.
     "dir": TargetSpec(5, DIR_COLS, LABEL_VOL_WINDOW, 4, include_news=True),
     # Stock engine: ~1-4 week swings.
     "stk_short": TargetSpec(21, STOCK_SHORT_COLS, 21, 4, include_news=True),
