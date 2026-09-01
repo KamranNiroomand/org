@@ -157,6 +157,16 @@ STOCK_SHORT_COLS = [
     "news_count_5d",
     "news_sent_net_1d",
     "news_sent_net_5d",
+    # Trial #24 (2026-09-01): the sector-spillover ride-alongs promoted
+    # to the feature set, trained for the first time over the healed
+    # corpus (they aggregate peers' bars, so the old gaps corrupted the
+    # neighbourhood as well as the name). Industry momentum is among the
+    # most replicated cross-sectional factors; the counted trial is the
+    # price of finding out whether it survives here.
+    "sector_mom_5d",
+    "sector_mom_21d",
+    "sector_news_count_1d",
+    "sector_sent_net_1d",
 ]
 STOCK_LONG_COLS = [
     "momentum_21d",
