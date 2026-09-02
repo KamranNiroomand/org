@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The stale-board guard compares the board's day to the real calendar;
 // these fixtures live on a fixed day, so pin "today" to it. The guard's
@@ -123,6 +123,18 @@ function equityRow(day: string, totalEquity: number) {
 }
 
 describe('the drawdown circuit breaker', () => {
+  // Dormant by default (limit 1.0) while the book is paper; these tests
+  // arm it the way a live-capital deployment would.
+  const autoEntryCfg = config.market.autoEntry as { maxDrawdownPct: number };
+  let savedLimit: number;
+  beforeEach(() => {
+    savedLimit = autoEntryCfg.maxDrawdownPct;
+    autoEntryCfg.maxDrawdownPct = 0.1;
+  });
+  afterEach(() => {
+    autoEntryCfg.maxDrawdownPct = savedLimit;
+  });
+
   it('opens nothing while equity sits more than the limit below its high-water mark', async () => {
     equityRow('2026-08-14', 110_000);
     equityRow('2026-08-17', 81_851); // -25.6% from peak — August's actual hole
