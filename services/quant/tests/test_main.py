@@ -527,8 +527,8 @@ class TestSelectEntries:
         r = client.post("/select-entries", json=_SELECT_BODY)
         assert r.status_code == 200
         picked = r.json()["selected"][0]
-        assert picked["quantity"] == 20
-        assert picked["cost"] == 10_000.0
+        assert picked["quantity"] == 16  # 8% position cap binds before the $10k slot
+        assert picked["cost"] == 8_000.0
 
     def test_a_maturity_outside_the_band_is_not_selected(self, tmp_path, monkeypatch) -> None:
         leap = replace(_FAKE_CONTRACT, expiry="2027-01-16", dte=400)

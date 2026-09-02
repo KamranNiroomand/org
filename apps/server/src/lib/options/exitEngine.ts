@@ -1,6 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
-import { daysToExpiry } from '@org/shared';
+import { daysToExpiry, parseOccSymbol } from '@org/shared';
 import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
 import { optionContracts } from '../../db/market/schema.js';
@@ -338,10 +338,20 @@ export async function runExitEngine(
     for (const order of orders) {
       summary.checked += 1;
       try {
-        const contract = contractsBySymbol.get(order.occSymbol);
+        // A pruned contract row must not orphan the position: `continue`
+        // here meant its stop was never checked again and it rode
+        // unmanaged to expiry (review finding, 2026-09-02). The OCC
+        // symbol itself carries underlying and expiry — parse them and
+        // keep the rulebook running.
+        let contract = contractsBySymbol.get(order.occSymbol);
         if (!contract) {
-          summary.errors.push(`${order.occSymbol}: contract not found in the corpus — skipping this recheck`);
-          continue;
+          const parsed = parseOccSymbol(order.occSymbol);
+          if (!parsed) {
+            summary.errors.push(`${order.occSymbol}: contract missing from corpus AND unparseable — skipping this recheck`);
+            continue;
+          }
+          summary.errors.push(`${order.occSymbol}: contract row missing from corpus — managing from the OCC symbol itself`);
+          contract = { underlying: parsed.underlying, expiry: parsed.expiry } as typeof contract & object;
         }
         const dte = Math.max(0, daysToExpiry(contract.expiry, todayKey()));
 
@@ -365,14 +375,21 @@ export async function runExitEngine(
         // while the raw print kept the stop from firing (review
         // finding). A measured bid needs no haircut: it IS a fill.
         const rawEvalE4 = measuredBidE4 ?? (quote ? (quote.lastE4 ?? quote.closeE4) : null);
-        const evalPriceE4 =
-          rawEvalE4 === null ? null : measuredBidE4 !== null ? rawEvalE4 : haircutE4(rawEvalE4, 'sell');
-        if (evalPriceE4 === null) {
+        if (rawEvalE4 === null) {
           summary.errors.push(
             `${order.occSymbol}: no usable price (bid, last, or close) — skipping this recheck`,
           );
           continue;
         }
+        const evalBasis: 'measured' | 'modelled' = measuredBidE4 !== null ? 'measured' : 'modelled';
+        const evalPriceE4 = evalBasis === 'measured' ? rawEvalE4 : haircutE4(rawEvalE4, 'sell');
+        // Persistence (marks, closes, reduces) receives the RAW print with
+        // its basis and applies the modelled haircut itself, exactly once —
+        // handing it the already-haircut evalPriceE4 double-charged the
+        // spread on every modelled exit and marked the book below the
+        // price the stop was checked at (review finding, 2026-09-02).
+        // haircutE4 is deterministic, so paper.ts lands on the same number
+        // the rule ladder evaluated.
 
         // The price just fetched becomes the position's current mark —
         // see recordIntradayMark for why the book's numbers should move
@@ -396,7 +413,13 @@ export async function runExitEngine(
           entryEv: order.entryEv ?? undefined,
           currentEv,
           newDocumentsCount: docs.length,
-          today: day,
+          // Real calendar, not the captured day: `day` is the corpus's
+          // latest capture (yesterday, during a live session), and using
+          // it here made the time-stop fire one session late — three
+          // after a weekend — while `dte` above already ran on the real
+          // clock. Decision-log rows and marks keep `day` (they describe
+          // the corpus vintage); date comparisons get today.
+          today: todayKey(),
           entryPriceE4: order.entryPriceE4,
           quantity: order.quantity,
           initialQuantity: order.initialQuantity ?? order.quantity,
@@ -533,6 +556,11 @@ export async function runExitEngine(
               .where(eq(paperOrders.id, order.id))
               .run();
           });
+          // Same-pass reads must see the extension — the stop ratchet
+          // already does this (see below); without it, an escalation later
+          // this pass sends the advisor the PRE-extension date and writes
+          // it into the audit trail as if the extension never happened.
+          order.targetExitDate = decision.newTargetExitDate;
         }
 
         if (decision.action === 'hold') {
@@ -570,6 +598,22 @@ export async function runExitEngine(
           newDocuments: docs.slice(0, 5).map((d) => ({ title: d.title, eventType: d.eventType, publishedAt: d.publishedAt })),
         });
 
+        if (
+          advice.action === 'move_target' &&
+          advice.newTargetExitDate !== null &&
+          !(typeof advice.newTargetExitDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(advice.newTargetExitDate))
+        ) {
+          // The old comment down at the clamp assumed a malformed date
+          // would "fail loudly at the DB write" — but the column is
+          // SQLite text, so garbage stores silently and then corrupts
+          // every string-compare in the time-stop. Refused here, on the
+          // same no-cutoff-advance path as a missing field, so the
+          // triggering documents get re-reviewed.
+          summary.errors.push(
+            `${order.occSymbol}: advisor returned malformed target date ${JSON.stringify(advice.newTargetExitDate)} — left on hold`,
+          );
+          continue;
+        }
         if (advice.action === 'move_target' && (advice.newTargetExitPriceE4 === null || advice.newTargetExitDate === null)) {
           // The schema describes both fields as required for this action,
           // but nothing enforces that at the API boundary — a response that

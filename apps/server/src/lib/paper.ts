@@ -566,9 +566,14 @@ export function computeDailyEquity(day: string): void {
       .orderBy(desc(paperMarks.tradingDay), desc(paperMarks.id))
       .limit(1)
       .get();
-    if (!mark) continue; // unmarked yet — excluded rather than valued at cost, which would hide P&L.
     const { multiplier } = contractMultiplier(o.occSymbol);
-    openPositionsValueE4 += mark.markPriceE4 * o.quantity * multiplier;
+    // An unmarked position is valued at entry cost, not excluded: its
+    // cash already left the account, so valuing it at zero broke the
+    // equity identity — the row showed a phantom crash the day a
+    // position opened unmarked, then a phantom recovery when its first
+    // mark landed (review finding, 2026-09-02). Cost hides P&L for a
+    // day; zero fabricates a loss the size of the whole position.
+    openPositionsValueE4 += (mark?.markPriceE4 ?? o.entryPriceE4) * o.quantity * multiplier;
   }
 
   const totalEquityE4 = cashE4 + openPositionsValueE4;

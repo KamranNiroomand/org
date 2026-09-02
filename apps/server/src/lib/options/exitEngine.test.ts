@@ -396,11 +396,20 @@ describe('runExitEngine', () => {
     expect(summary.errors.join(' ')).toContain('sidecar down');
   });
 
-  it('records an error and leaves the position open when the contract is gone from the corpus', async () => {
+  it('keeps managing a position whose contract row vanished from the corpus', async () => {
+    // The old behavior — skip with an error — orphaned the position: its
+    // stop was never checked again and it rode unmanaged to expiry
+    // (review finding, 2026-09-02). The OCC symbol itself carries
+    // underlying and expiry, so the rulebook keeps running on it.
     const id = openManagedPosition();
     marketDb.delete(optionContracts).run();
     const summary = await runExitEngine(log, new StubProvider(liveQuote(toE4(1.0))), NEVER_REVIEW_DEPS);
-    expect(summary.errors.some((e) => e.includes('not found in the corpus'))).toBe(true);
+    expect(summary.errors.some((e) => e.includes('managing from the OCC symbol'))).toBe(true);
+    expect(summary.checked).toBe(1);
+    // Still open because the stub serves no chain for the parsed
+    // underlying — the point is the pass proceeded into the rulebook
+    // (price lookup and onward) instead of abandoning the position at
+    // the contract lookup.
     expect(paperDb.select().from(paperOrders).where(eq(paperOrders.id, id)).get()!.status).toBe('open');
   });
 

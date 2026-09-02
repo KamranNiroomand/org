@@ -204,8 +204,9 @@ def horizon_value_and_prob(
     price for the remaining life (edge beyond your horizon is not yours
     to book).
 
-    Gauss-Hermite quadrature over the lognormal horizon spot — exact for
-    this integrand family at 41 nodes, no sampling noise. Returns None
+    Gauss-Hermite quadrature over the lognormal horizon spot — not exact
+    (american_price is no polynomial in z) but highly accurate at 41
+    nodes, and free of sampling noise. Returns None
     when the horizon reaches past the contract's life or vol is
     degenerate; the caller falls back to terminal valuation, which is
     then honest (drift over DTE <= drift over horizon).
@@ -314,6 +315,22 @@ class RankedContract:
     delta: float | None = None
 
 
+def _atm_reference_iv(quotes: pl.DataFrame) -> float | None:
+    """Median market IV over the fixed 0.8-1.2 moneyness band — the one
+    per-underlying vol reference shared by `_vol_forecast_ratio` and the
+    physical horizon distribution (see the forecast_vol comment in the
+    ranking loop for why those two must agree)."""
+    atm = quotes.filter(
+        (pl.col("strike") / pl.col("underlying_price")).is_between(0.8, 1.2)
+    )
+    ivs = atm["iv"].drop_nulls()
+    if ivs.len() == 0:
+        ivs = quotes["iv"].drop_nulls()
+    if ivs.len() == 0:
+        return None
+    return float(ivs.median())
+
+
 def _vol_forecast_ratio(
     realized_vol: float, quotes: pl.DataFrame, max_ratio: float = MAX_VOL_FORECAST_RATIO
 ) -> float:
@@ -354,16 +371,8 @@ def _vol_forecast_ratio(
     # directions. A fixed-band reference cannot move when the forecast
     # moves, and it is the same ATM reference the screens themselves
     # standardize against.
-    atm = quotes.filter(
-        (pl.col("strike") / pl.col("underlying_price")).is_between(0.8, 1.2)
-    )
-    ivs = atm["iv"].drop_nulls()
-    if ivs.len() == 0:
-        ivs = quotes["iv"].drop_nulls()
-    if ivs.len() == 0:
-        return 1.0
-    reference = float(ivs.median())
-    if reference <= 0:
+    reference = _atm_reference_iv(quotes)
+    if reference is None or reference <= 0:
         return 1.0
     # Symmetric by the cap's own reasoning: an extreme ratio in EITHER
     # direction is more likely a blind spot than a real view. Uncapped
@@ -424,6 +433,7 @@ def rank_underlying(
     round_trip_cost: float = DEFAULT_ROUND_TRIP_COST,
     multiplier: int = DEFAULT_MULTIPLIER,
     max_capital: float | None = None,
+    atm_ref_iv: float | None = None,
 ) -> list[RankedContract]:
     """Ranks one underlying's contracts by expected value under the given
     forecast. `quotes` is expected to already be `liquid`-filtered (pass
@@ -448,6 +458,12 @@ def rank_underlying(
     chance to matter if the expensive rows were never excluded first.
     """
     out: list[RankedContract] = []
+    # Callers scoring a SUBSET of the chain (score_held_contracts) pass
+    # the full-chain reference explicitly, so the monitor and the ranker
+    # hold one definition of the underlying's physical vol — the same
+    # two-definitions trap the vol_ratio reference already fell into once.
+    if atm_ref_iv is None:
+        atm_ref_iv = _atm_reference_iv(quotes)
     for row in quotes.iter_rows(named=True):
         if row["iv"] is None or row["price"] is None or row["price"] <= 0:
             continue
@@ -466,7 +482,18 @@ def rank_underlying(
         capital = price * multiplier
         if max_capital is not None and capital > max_capital:
             continue
-        forecast_vol = row["iv"] * vol_ratio
+        # ONE physical vol per underlying (review finding, 2026-09-02):
+        # the horizon distribution of the underlying's spot is a fact
+        # about the underlying and cannot differ by strike — priced with
+        # each contract's own IV, a 70%-IV wing put was given a spot
+        # distribution 2.4x wider than the ATM contract on the same name,
+        # overstating its chance of paying off ~2.5x and tilting EV
+        # toward the smile's wings. The SNDK flat-vol lesson (see
+        # _vol_forecast_ratio) still holds where it was learned: the
+        # sale-at-horizon is priced at each contract's own market IV via
+        # `remaining_vol`, preserving the skew. Only the physical measure
+        # is shared.
+        forecast_vol = (atm_ref_iv if atm_ref_iv is not None else row["iv"]) * vol_ratio
 
         cost_per_share = round_trip_cost / multiplier
         # Horizon-consistent by default: drift over the model's own
@@ -1268,7 +1295,9 @@ def score_held_contracts(
         ).passed
         if reference.height > 0:
             vol_ratio = _vol_forecast_ratio(vol, reference)
+            atm_ref = _atm_reference_iv(reference)
         else:
+            atm_ref = None
             # An empty screened reference means the chain is at its most
             # corrupt — the first version fell back to the *unscreened*
             # median here, handing the fully-corrupt set to the exact
@@ -1303,6 +1332,9 @@ def score_held_contracts(
                 horizon_years=_manifest["horizon"] / 252.0,
             dividend_yield=dividend_yield,
             round_trip_cost=round_trip_cost,
+            # The full screened chain's reference, not the held subset's —
+            # one physical vol per underlying, same number rank_day uses.
+            atm_ref_iv=atm_ref,
         ):
             results[scored.occ_symbol] = scored
 

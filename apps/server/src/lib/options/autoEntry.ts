@@ -55,7 +55,33 @@ export interface AutoEntryResult {
  * a real selection supplied directly, not just the honest "sidecar
  * unavailable" fallback.
  */
+/** Serializes runAutoEntry across its callers (evening cron 19:15 and
+ * 21:15, morning sync, boot catch-up): two invocations interleaving both
+ * read `openedToday` before either writes, and each spends the full daily
+ * budget — the wake-from-sleep race (review finding, 2026-09-02). */
+let entryRunInFlight = false;
+
 export async function runAutoEntry(
+  day: string,
+  selectEntriesFn: typeof selectEntries = selectEntries,
+): Promise<AutoEntryResult> {
+  if (entryRunInFlight) {
+    return {
+      day,
+      opened: [],
+      skippedReason: 'entry_run_in_flight: another auto-entry invocation is still running',
+      failures: [],
+    };
+  }
+  entryRunInFlight = true;
+  try {
+    return await runAutoEntryInner(day, selectEntriesFn);
+  } finally {
+    entryRunInFlight = false;
+  }
+}
+
+async function runAutoEntryInner(
   day: string,
   selectEntriesFn: typeof selectEntries = selectEntries,
 ): Promise<AutoEntryResult> {
@@ -217,7 +243,7 @@ export async function runAutoEntry(
   // print-derived price pays the buy-side haircut in openOrder as before.
   const liveAsks = await fetchLiveNbbo(selected.map((s) => s.contract.occ_symbol));
 
-  for (const { contract: candidate, quantity } of selected) {
+  for (const { contract: candidate, quantity, cost } of selected) {
     try {
       // The sidecar sizes every selection at one contract or more; a
       // non-positive quantity would open a zero-cost, zero-payoff row the
@@ -267,8 +293,33 @@ export async function runAutoEntry(
         decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'failed', reason: 'price_below_e4_resolution', detail: { market_price: candidate.market_price } });
         continue;
       }
-      const affordable = Math.floor(remainingE4 / perContractE4);
-      const size = Math.min(quantity, affordable);
+      // Three trims, tightest wins (review findings, 2026-09-02):
+      // 1. Real cash left — but charged at the price the fill will
+      //    actually use (live ask when one exists), not the modelled
+      //    close: subtracting the modelled cost while paying the ask made
+      //    the loop spend money it hadn't accounted for, eating into the
+      //    capital reserve on gap days.
+      // 2. The sidecar's approved dollar budget for THIS position (its
+      //    `cost`, which already embeds MAX_POSITION_FRACTION at the
+      //    standard 100x multiplier) — a split-adjusted 200x contract
+      //    sized to the 8% slot at 100x really costs 16%, and trimming
+      //    only to free cash waved that straight through. 10% tolerance
+      //    so an ordinary ask-over-close gap doesn't zero honest picks.
+      const liveAskE4 = liveAsks.get(candidate.occ_symbol)?.askE4 ?? null;
+      const chargedPerContractE4 = (liveAskE4 ?? entryPriceE4) * multiplier;
+      const approvedBudgetE4 = Math.round(cost * 10_000 * 1.1);
+      const affordable = Math.floor(remainingE4 / chargedPerContractE4);
+      const withinApproved = Math.floor(approvedBudgetE4 / chargedPerContractE4);
+      const size = Math.min(quantity, affordable, withinApproved);
+      if (size < 1 && withinApproved < 1 && affordable >= 1) {
+        failures.push(
+          `${candidate.occ_symbol}: real cost $${(chargedPerContractE4 / 10_000).toFixed(2)}/contract ` +
+            `(multiplier ${multiplier}x${liveAskE4 !== null ? ', live ask' : ''}) breaches the sidecar's ` +
+            `approved $${cost.toFixed(0)} position budget — not opened`,
+        );
+        decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'failed', reason: 'exceeds_position_budget', detail: { chargedPerContractE4, multiplier, approvedBudgetE4 } });
+        continue;
+      }
       if (size < 1) {
         failures.push(
           `${candidate.occ_symbol}: costs $${(perContractE4 / 10_000).toFixed(2)}/contract at a ${multiplier}x ` +
@@ -289,7 +340,6 @@ export async function runAutoEntry(
       }
       // Order and exit plan land in one insert — see `OpenOrderInput.exitPlan`
       // for why this must not be an insert followed by an update.
-      const liveAskE4 = liveAsks.get(candidate.occ_symbol)?.askE4 ?? null;
       const orderId = openOrder({
         occSymbol: candidate.occ_symbol,
         quantity: size,
@@ -304,9 +354,18 @@ export async function runAutoEntry(
           targetExitDate: candidate.suggested_target_exit_date,
         },
       });
-      remainingE4 -= perContractE4 * size;
+      remainingE4 -= chargedPerContractE4 * size;
       opened.push({ occSymbol: candidate.occ_symbol, orderId, quantity: size });
-      decisions.push({ day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'opened', reason: 'cleared_all_bars', detail: { orderId, quantity: size, entryPriceE4, ev: candidate.ev, ev_per_risk: candidate.ev_per_risk, prob_profit: candidate.prob_profit, dte: candidate.dte } });
+      // Written IMMEDIATELY, not batched at the end of the run: the 21:15
+      // refire's idempotency rests on counting these rows, and a crash
+      // between openOrder and a deferred batch write would grant the next
+      // invocation a fresh full budget on top of positions already open
+      // (review finding, 2026-09-02).
+      if (!logDecisions([
+        { day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'opened', reason: 'cleared_all_bars', detail: { orderId, quantity: size, entryPriceE4, ev: candidate.ev, ev_per_risk: candidate.ev_per_risk, prob_profit: candidate.prob_profit, dte: candidate.dte } },
+      ])) {
+        failures.push(`${candidate.occ_symbol}: opened but its decision row failed to write — opened-today count is now understated`);
+      }
     } catch (err) {
       // One contract failing to open must not cost the rest of the day's
       // selection — same per-item isolation as capture.ts's own loop.
