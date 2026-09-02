@@ -1003,7 +1003,11 @@ class EntrySelection:
 
 #: No single new position may take more than this fraction of the
 #: day's investable cash. See the sizing comment below for the incident.
-MAX_POSITION_FRACTION = 0.25
+#: Cut from 0.25 after the August 2026 drawdown: the inflated-EV bugs did
+#: their damage *through* this number — a model must earn back the right
+#: to bet big, and a freshly repaired one has not. Revisit only with a
+#: positive out-of-sample record on the honest EV chain.
+MAX_POSITION_FRACTION = 0.08
 
 
 def select_entries(
