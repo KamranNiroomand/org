@@ -77,7 +77,7 @@ class TestPositionCap:
         assert len(selected) == 1
         assert selected[0].cost <= 100_000.0 * MAX_POSITION_FRACTION
 
-    def test_one_contract_is_always_allowed_even_above_the_cap(self):
+    def test_one_contract_above_the_cap_is_rejected(self):
         from app.rank import RankedContract, select_entries
 
         c = RankedContract(
@@ -92,10 +92,10 @@ class TestPositionCap:
             max_new_positions=3, opened_today=0, min_ev_per_risk=0.05,
             min_prob_profit=0.5, min_dte=7, max_dte=90,
         )
-        # $30k contract, 25% cap = $10k — but a minimum position of one
-        # contract still opens; the cap bounds concentration, not entry.
-        assert len(selected) == 1
-        assert selected[0].quantity == 1
+        # $30k contract, 8% cap = $3.2k: probation closed the old
+        # one-unit-above-the-cap loophole — a single expensive contract
+        # IS a concentration, and it is not bought at all.
+        assert selected == []
 
 
 class TestSellAtMarketVol:

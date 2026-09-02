@@ -238,17 +238,25 @@ class TestRankUnderlying:
         assert ranked[0].forecast_vol == pytest.approx(0.10, rel=1e-9)
         assert ranked[0].ev < 0.0
 
-    def test_two_contracts_on_the_same_chain_get_different_forecast_vols(self) -> None:
-        # The whole point of the ratio design: two strikes with different
-        # market IVs (a real skew) must not collapse to one flat forecast.
+    def test_one_physical_vol_per_underlying_but_market_iv_kept_per_contract(self) -> None:
+        # The horizon distribution of the SPOT is a fact about the
+        # underlying: both strikes share one physical forecast vol
+        # (ratio x ATM-band median IV) — per-contract IV as physical vol
+        # gave a 70%-IV wing a spot distribution 2.4x wider than the ATM
+        # contract on the same name (review finding, 2026-09-02). The
+        # skew itself survives where it belongs: each contract's own
+        # market_iv, which prices the sale at horizon via remaining_vol.
         quotes = _quotes_frame([
             _quote_row(occ_symbol="A", strike=90.0, iv=0.20),
             _quote_row(occ_symbol="B", strike=110.0, iv=0.40),
         ])
         ranked = rank_underlying(quotes, "2025-12-01", 0.0, 1.5, [(365, 0.04)])
         by_symbol = {c.occ_symbol: c for c in ranked}
-        assert by_symbol["A"].forecast_vol == pytest.approx(0.20 * 1.5, rel=1e-9)
-        assert by_symbol["B"].forecast_vol == pytest.approx(0.40 * 1.5, rel=1e-9)
+        shared = 0.30 * 1.5  # median of the two IVs, scaled by the ratio
+        assert by_symbol["A"].forecast_vol == pytest.approx(shared, rel=1e-9)
+        assert by_symbol["B"].forecast_vol == pytest.approx(shared, rel=1e-9)
+        assert by_symbol["A"].market_iv == pytest.approx(0.20, rel=1e-9)
+        assert by_symbol["B"].market_iv == pytest.approx(0.40, rel=1e-9)
 
     def test_round_trip_cost_reduces_every_contracts_expected_value(self) -> None:
         quotes = _quotes_frame([_quote_row()])
