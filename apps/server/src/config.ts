@@ -208,16 +208,19 @@ const schema = z.object({
   // daily number. The reserve is the fraction of current cash never
   // deployed; see select_entries' docstring for the real $122k-contract
   // incident that made an explicit capital constraint non-optional.
-  // Probation caps (September 2026): the pre-repair model lost ~18% of the
-  // account through 10 concurrent oversized positions. The repaired EV
-  // chain starts with a short leash — 4 concurrent, 2 new per day — and
-  // widens only on a demonstrated out-of-sample record.
-  AUTO_ENTRY_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().positive().default(4),
-  AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY: z.coerce.number().int().positive().default(2),
+  // Sample flow over caution (user's call, September 2026): the paper
+  // book's job is to generate scored predictions, and trade COUNT is the
+  // sample rate — so the caps stay wide. What August actually taught is a
+  // sizing lesson, and it lives in MAX_POSITION_FRACTION (rank.py), not
+  // here: every bet small and equal, so the curve reads as skill.
+  AUTO_ENTRY_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().positive().default(10),
+  AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY: z.coerce.number().int().positive().default(5),
   // Circuit breaker: when account equity sits more than this fraction below
-  // its high-water mark, auto-entry opens nothing (exits keep running).
-  // The rule that would have stopped August's bleed at -10% instead of -18%.
-  AUTO_ENTRY_MAX_DRAWDOWN_PCT: z.coerce.number().min(0).max(1).default(0.10),
+  // its rolling high-water mark, auto-entry opens nothing (exits keep
+  // running). DORMANT at 1.0 while the book is paper — halting entries
+  // starves the model of training samples — but the mechanism stays wired
+  // so real capital can turn it on with one env var.
+  AUTO_ENTRY_MAX_DRAWDOWN_PCT: z.coerce.number().min(0).max(1).default(1.0),
   AUTO_ENTRY_CAPITAL_RESERVE_PCT: z.coerce.number().min(0).max(1).default(0.2),
   // The maturity band an entry may be opened in. The forecast is a single
   // fixed horizon (5 trading days) annualized into a constant drift, so a
