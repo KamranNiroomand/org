@@ -1167,21 +1167,30 @@ def select_entries(
         if cost_per_contract > remaining:
             reject(c, "unaffordable", cost_per_contract=cost_per_contract, remaining=remaining)
             continue
+        if cost_per_contract > available_capital * MAX_POSITION_FRACTION:
+            # Under the probation cap the old "one contract stays allowed
+            # above the cap" floor is exactly the loophole: a single
+            # expensive contract IS a concentration in this account. A
+            # candidate whose minimum position breaches the cap is not
+            # bought smaller — it is not bought.
+            reject(c, "exceeds_position_cap", cost_per_contract=cost_per_contract,
+                   cap=available_capital * MAX_POSITION_FRACTION)
+            continue
         # At least one contract — a candidate that fits in `remaining` at
         # all is worth a single unit even when one unit overshoots its
         # equal-weight slot, which is the common case for an expensive
         # contract in a small account.
         quantity = max(1, int(per_slot_budget // cost_per_contract))
-        # ...but never more than a quarter of the day's investable cash
-        # in one position. The equal-weight slot already aims for this;
-        # what it cannot prevent is the last-slots case where a nearly
-        # full book leaves one giant per-slot budget — DIA took ten
-        # contracts, a fifth of the whole account, through exactly that
-        # gap, and EV-greedy ordering guarantees the biggest such bet is
-        # always placed on the single most extrapolated forecast of the
-        # day. One contract stays allowed even above the cap: a minimum
-        # position is a sizing floor, not a concentration.
-        quantity = min(quantity, max(1, int((available_capital * MAX_POSITION_FRACTION) // cost_per_contract)))
+        # ...but never more than MAX_POSITION_FRACTION of the day's
+        # investable cash in one position. The equal-weight slot already
+        # aims for this; what it cannot prevent is the last-slots case
+        # where a nearly full book leaves one giant per-slot budget — DIA
+        # took ten contracts, a fifth of the whole account, through
+        # exactly that gap, and EV-greedy ordering guarantees the biggest
+        # such bet is always placed on the single most extrapolated
+        # forecast of the day. The cap is hard: candidates whose single
+        # contract already breaches it were rejected above.
+        quantity = min(quantity, int((available_capital * MAX_POSITION_FRACTION) // cost_per_contract))
         # ...and never more than the cash actually left.
         quantity = min(quantity, int(remaining // cost_per_contract))
         cost = cost_per_contract * quantity

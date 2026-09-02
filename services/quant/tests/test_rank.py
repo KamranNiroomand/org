@@ -777,13 +777,22 @@ class TestSelectEntries:
         assert [s.contract.underlying for s in selected] == ["MOD"]
 
     def test_capital_depletes_across_acceptances(self) -> None:
-        # $500 available; each contract costs $200 — only two fit.
+        # $1,000 available; each contract costs $80 — exactly the 8%
+        # position cap, so with enough slots twelve fit and the thirteenth
+        # finds the till empty. (The cap is why depletion now needs many
+        # small positions to demonstrate: no single position may be large
+        # enough to drain the account in a few buys.)
+        names = [f"A{chr(65 + i)}A" for i in range(15)]
         candidates = [
-            _candidate(occ_symbol=f"{u}   260918C00100000", underlying=u, ev=ev)
-            for u, ev in [("AAA", 50.0), ("BBB", 40.0), ("CCC", 30.0)]
+            _candidate(occ_symbol=f"{u:<6}260918C00100000", underlying=u, market_price=0.8, ev=50.0 - i)
+            for i, u in enumerate(names)
         ]
-        selected = self._select(candidates, available_capital=500.0)
-        assert [s.contract.underlying for s in selected] == ["AAA", "BBB"]
+        selected = self._select(
+            candidates, available_capital=1_000.0,
+            max_new_positions=15, max_concurrent_positions=15,
+        )
+        assert [s.contract.underlying for s in selected] == names[:12]
+        assert sum(s.cost for s in selected) == 960.0
 
     def test_never_selects_a_held_underlying_or_two_contracts_on_one_name(self) -> None:
         candidates = [
@@ -835,16 +844,17 @@ class TestSelectEntriesSizing:
         return select_entries(candidates, **defaults)[0]
 
     def test_two_differently_priced_contracts_get_near_equal_dollar_weight(self) -> None:
-        # $10,000 over 10 concurrent slots is a $1,000 budget each. A $200
-        # contract takes 5 units and a $1,000 contract 1 — the point of
-        # sizing: equal *money*, not equal contract count.
+        # $10,000 over 10 concurrent slots is a $1,000 budget each, but the
+        # 8% position cap binds first at $800. A $200 contract takes 4
+        # units and an $800 contract 1 — the point of sizing: equal
+        # *money*, not equal contract count.
         cheap = _candidate(underlying="CHP", occ_symbol="CHP   260918C00100000", market_price=2.0, ev=50.0)
-        dear = _candidate(underlying="DER", occ_symbol="DER   260918C00100000", market_price=10.0, ev=40.0)
+        dear = _candidate(underlying="DER", occ_symbol="DER   260918C00100000", market_price=8.0, ev=40.0)
 
         selected = self._select([cheap, dear])
 
-        assert [s.quantity for s in selected] == [5, 1]
-        assert [s.cost for s in selected] == [1_000.0, 1_000.0]
+        assert [s.quantity for s in selected] == [4, 1]
+        assert [s.cost for s in selected] == [800.0, 800.0]
 
     def test_sizing_never_commits_more_than_the_capital_available(self) -> None:
         candidates = [
@@ -855,31 +865,53 @@ class TestSelectEntriesSizing:
         assert sum(s.cost for s in selected) <= 10_000.0
 
     def test_a_contract_costing_more_than_its_slot_still_gets_one_unit(self) -> None:
-        # $1,000 per slot, but the contract costs $3,000. Rounding the
-        # equal-weight quantity down would give zero and silently drop a
-        # candidate that the account can genuinely afford.
-        chunky = _candidate(underlying="BIG", occ_symbol="BIG   260918C00100000", market_price=30.0)
+        # $500 per slot (20 concurrent slots on $10,000), but the contract
+        # costs $600 — over its slot yet inside the 8% ($800) position
+        # cap. Rounding the equal-weight quantity down would give zero and
+        # silently drop a candidate the cap genuinely allows.
+        chunky = _candidate(underlying="BIG", occ_symbol="BIG   260918C00100000", market_price=6.0)
 
-        selected = self._select([chunky])
+        selected = self._select([chunky], max_concurrent_positions=20)
 
         assert [s.quantity for s in selected] == [1]
-        assert [s.cost for s in selected] == [3_000.0]
+        assert [s.cost for s in selected] == [600.0]
+
+    def test_a_contract_over_the_position_cap_is_rejected_not_bought_small(self) -> None:
+        # The August 2026 lesson closing the old "one unit stays allowed
+        # above the cap" loophole: on probation, a candidate whose MINIMUM
+        # position breaches MAX_POSITION_FRACTION is not bought at all.
+        chunky = _candidate(underlying="BIG", occ_symbol="BIG   260918C00100000", market_price=30.0)
+
+        selected, rejected = select_entries(
+            [chunky],
+            held_underlyings=set(),
+            available_capital=10_000.0,
+            open_position_count=0,
+            max_concurrent_positions=10,
+            max_new_positions=5,
+            opened_today=0,
+            min_ev_per_risk=0.05,
+            min_prob_profit=0.5,
+            min_dte=14,
+            max_dte=60,
+        )
+        assert selected == []
+        assert [r.reason for r in rejected] == ["exceeds_position_cap"]
 
     def test_quantity_is_capped_by_cash_left_not_just_by_the_slot_budget(self) -> None:
-        # One concurrent slot, so the slot budget is the whole $700 pool —
-        # but the concentration cap (MAX_POSITION_FRACTION) holds any one
-        # position to a quarter of investable cash. $175 buys no whole
-        # $200 contract, and the one-contract minimum then applies: one
-        # unit, never the 3 that would put 86% of the pool in one name
-        # (the DIA incident, in miniature).
+        # One concurrent slot, so the slot budget is the whole $10,000
+        # pool — but the concentration cap (MAX_POSITION_FRACTION) holds
+        # any one position to 8% of investable cash: 4 units of a $200
+        # contract, never the 50 the slot budget alone would buy (the DIA
+        # incident, in miniature).
         c = _candidate(underlying="AAA")
 
         selected = self._select(
-            [c], available_capital=700.0, max_new_positions=1, max_concurrent_positions=1
+            [c], available_capital=10_000.0, max_new_positions=1, max_concurrent_positions=1
         )
 
-        assert [s.quantity for s in selected] == [1]
-        assert selected[0].cost == 200.0
+        assert [s.quantity for s in selected] == [4]
+        assert selected[0].cost == 800.0
 
     def test_a_thin_day_deploys_one_slot_rather_than_concentrating(self) -> None:
         # Only one candidate clears the bar. It gets one slot's worth, not
@@ -890,7 +922,8 @@ class TestSelectEntriesSizing:
 
         selected = self._select([lonely], available_capital=10_000.0, max_new_positions=5)
 
-        assert selected[0].cost == 1_000.0
+        # The 8% position cap binds before the $1,000 slot budget does.
+        assert selected[0].cost == 800.0
 
     def test_a_full_day_leaves_room_for_later_days_at_comparable_size(self) -> None:
         # The real defect this replaced: dividing by the per-day cap sized
@@ -907,7 +940,9 @@ class TestSelectEntriesSizing:
             ],
             available_capital=80_000.0,
         )
-        assert sum(s.cost for s in day_one) == 40_000.0  # half, not all
+        # Five positions at the 8% cap ($6,400 each): well under half the
+        # pool, leaving later days room by construction.
+        assert sum(s.cost for s in day_one) == 32_000.0
 
         # Day two, against the cash day one actually left.
         later = ["FFF", "GGG", "HHH", "III", "JJJ"]
@@ -919,7 +954,9 @@ class TestSelectEntriesSizing:
             available_capital=48_000.0,
             open_position_count=5,
         )
-        assert day_one[0].cost / day_two[0].cost < 1.5
+        # The 8% cap scales with each day's investable cash, so day-two
+        # positions shrink with the pool — bounded, not equal.
+        assert day_one[0].cost / day_two[0].cost < 2.0
 
     def test_a_zero_priced_contract_is_refused_rather_than_sized_infinitely(self) -> None:
         # A stale or bad print at 0 would divide by zero computing quantity.
