@@ -633,14 +633,16 @@ export async function runOptionsCapture(
       result.errors.push(`Fundamentals: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Right after capture, so a position opened today is marked against
-    // tonight's own quotes rather than waiting for tomorrow's job — the
-    // whole point of an equity curve is that it moves every day capture
-    // runs, not every day someone happens to look at it. This is the
-    // runner's own paper trades, if any; a reader's are covered separately
-    // inside `runNightly`, since this job never runs there — see
-    // `runPaperMaintenance`'s own doc comment for why that split exists.
-    {
+    // The paper book belongs to the READER — the machine whose UI the
+    // user actually looks at. For a week after the roles split, this
+    // block traded a second, invisible book on the runner: same engine,
+    // separate paper.db, positions nobody could see (found 2026-09-02 —
+    // MU, VRTX, MSI and six others sitting in a book no screen reads,
+    // plus nightly LLM exit reviews billed against it). Capture and
+    // retraining stay here; every paper-book action — marking, exit
+    // checks, entries — happens once, on the reader, right after its
+    // nightly pull of tonight's snapshot.
+    if (!isRunner()) {
       const tradingDay = nyToday();
       await runPaperMaintenance(log, tradingDay);
 
@@ -663,6 +665,9 @@ export async function runOptionsCapture(
       } catch (err) {
         result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);
       }
+    } else {
+      result.autoEntrySkippedReason =
+        'reader_owns_book: paper actions run on the reader after its nightly pull';
     }
 
     // Text used to ingest here, once a night — now on its own faster cron
@@ -900,6 +905,7 @@ let panelTask: ReturnType<typeof cron.schedule> | null = null;
 let exitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stockExitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stalenessHealTask: ReturnType<typeof cron.schedule> | null = null;
+let eveningPaperTask: ReturnType<typeof cron.schedule> | null = null;
 let retierTask: ReturnType<typeof cron.schedule> | null = null;
 const selfHealAttemptsToday = { day: '', count: 0 };
 let lastResult: NightlyResult | null = null;
@@ -1262,6 +1268,52 @@ export function startScheduler(log: FastifyBaseLogger): void {
     log.info('Market staleness self-heal scheduled (hourly, reader only)');
   }
 
+  // The reader's EVENING paper cycle — the one that can actually open
+  // positions. The 06:00 sync pulls yesterday's board, so its auto-entry
+  // hit the stale-board guard every single morning; between that and the
+  // runner trading only its own invisible book, no visible entry had
+  // opened since the roles split (found 2026-09-02). 19:15 Eastern sits
+  // after the runner's ~16:45 capture and snapshot, so the pull lands
+  // tonight's board while it is still today — marking, exit checks, and
+  // entries all run against same-day data, in the book the UI shows.
+  if (!config.market.isRunner && config.market.runnerSshHost) {
+    eveningPaperTask = cron.schedule(
+      '15 19,21 * * 1-5',
+      () => {
+        void (async () => {
+          const pull = await pullMarketSnapshot();
+          if (!pull.ok) {
+            log.warn(`Evening paper cycle: pull failed — ${pull.message}`);
+            return;
+          }
+          const tradingDay = latestCapturedTradingDay() ?? nyToday();
+          if (tradingDay !== nyToday()) {
+            log.warn(
+              `Evening paper cycle: freshest board is ${tradingDay}, not today — ` +
+                `runner capture has not landed yet; leaving entries to the guard`,
+            );
+          }
+          await runPaperMaintenance(log, tradingDay);
+          try {
+            const entry = await runAutoEntry(tradingDay);
+            if (entry.opened.length > 0) {
+              log.info(`Evening auto-entry opened ${entry.opened.map((o) => o.occSymbol).join(', ')}`);
+            } else if (entry.skippedReason) {
+              log.info(`Evening auto-entry: ${entry.skippedReason}`);
+            }
+            if (entry.failures.length > 0) {
+              log.warn(`Evening auto-entry: ${entry.failures.join('; ')}`);
+            }
+          } catch (err) {
+            log.warn(`Evening auto-entry failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        })();
+      },
+      { timezone: config.market.captureTimezone },
+    );
+    log.info('Evening paper cycle scheduled (19:15 and 21:15 ET, reader only)');
+  }
+
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
   // delay keeps startup fast and avoids racing the first request.
   setTimeout(() => {
@@ -1338,6 +1390,8 @@ export function stopScheduler(): void {
   stockExitRecheckTask = null;
   stalenessHealTask?.stop();
   stalenessHealTask = null;
+  eveningPaperTask?.stop();
+  eveningPaperTask = null;
   retierTask?.stop();
   retierTask = null;
 }
