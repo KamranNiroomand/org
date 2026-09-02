@@ -1,11 +1,12 @@
-import { eq, sql } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 import { nyToday } from './positionHealth.js';
 import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
 import { optionContracts, optionQuotes } from '../../db/market/schema.js';
 import { listUniverse } from './universe.js';
 import { accountCapacity, contractMultiplier, logDecisions, modelEntriesOpenedOn, openOrder, PaperError } from '../paper.js';
-import type { paperDecisionLog } from '../../db/paper/schema.js';
+import { paperDb } from '../../db/paper/index.js';
+import { paperEquity, type paperDecisionLog } from '../../db/paper/schema.js';
 
 type DecisionRow = Omit<typeof paperDecisionLog.$inferInsert, 'createdAt'>;
 import { fetchLiveNbbo } from './liveQuotes.js';
@@ -103,6 +104,33 @@ export async function runAutoEntry(
       { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'partial_board', detail: { boardCoverage, universeSize } },
     ]);
     return { day, opened: [], skippedReason, failures: [] };
+  }
+
+  // Drawdown circuit breaker: below the high-water mark by more than the
+  // configured fraction, this engine loses the right to open anything —
+  // exits keep running, entries wait for equity to recover. A system in a
+  // deep hole has, by definition, been wrong recently; the last thing it
+  // gets to do is press.
+  const equityRows = paperDb
+    .select({ day: paperEquity.day, totalEquityE4: paperEquity.totalEquityE4 })
+    .from(paperEquity)
+    .orderBy(desc(paperEquity.day))
+    .limit(30) // rolling high-water mark: old peaks age out with the calendar
+    .all();
+  const latest = equityRows[0];
+  if (latest !== undefined) {
+    const peakE4 = Math.max(...equityRows.map((r) => r.totalEquityE4));
+    const drawdown = peakE4 > 0 ? 1 - latest.totalEquityE4 / peakE4 : 0;
+    if (drawdown > config.market.autoEntry.maxDrawdownPct) {
+      const skippedReason =
+        `drawdown_breaker: equity ${(latest.totalEquityE4 / 10_000).toFixed(0)} is ` +
+        `${(drawdown * 100).toFixed(1)}% below the high-water mark ${(peakE4 / 10_000).toFixed(0)} ` +
+        `(limit ${(config.market.autoEntry.maxDrawdownPct * 100).toFixed(0)}%) — no new entries until it recovers`;
+      logDecisions([
+        { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'drawdown_breaker', detail: { drawdown, peakE4, latestEquityE4: latest.totalEquityE4, asOfDay: latest.day } },
+      ]);
+      return { day, opened: [], skippedReason, failures: [] };
+    }
   }
 
   const capacity = accountCapacity();

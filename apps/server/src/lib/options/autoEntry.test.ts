@@ -14,7 +14,7 @@ import { runMarketMigrations } from '../../db/market/migrate.js';
 import { optionContracts } from '../../db/market/schema.js';
 import { paperDb } from '../../db/paper/index.js';
 import { runPaperMigrations } from '../../db/paper/migrate.js';
-import { paperDecisionLog, paperOrders } from '../../db/paper/schema.js';
+import { paperDecisionLog, paperEquity, paperOrders } from '../../db/paper/schema.js';
 import { decisionsForDay, openOrder } from '../paper.js';
 import { nowIso } from '../util.js';
 import type {
@@ -102,7 +102,58 @@ beforeEach(() => {
   // The decision log accumulates across runs by design, so a test that
   // asserts on a day's decisions needs it cleared like everything else.
   paperDb.delete(paperDecisionLog).run();
+  paperDb.delete(paperEquity).run();
   marketDb.delete(optionContracts).run();
+});
+
+/** Seed one equity-curve row, dollars in, E4 stored. */
+function equityRow(day: string, totalEquity: number) {
+  paperDb
+    .insert(paperEquity)
+    .values({
+      day,
+      cashE4: toE4(totalEquity),
+      openPositionsValueE4: 0,
+      totalEquityE4: toE4(totalEquity),
+      realizedPlToDateE4: 0,
+      dayReturnPct: null,
+      cumulativeReturnPct: 0,
+    })
+    .run();
+}
+
+describe('the drawdown circuit breaker', () => {
+  it('opens nothing while equity sits more than the limit below its high-water mark', async () => {
+    equityRow('2026-08-14', 110_000);
+    equityRow('2026-08-17', 81_851); // -25.6% from peak — August's actual hole
+    const a = ranked();
+    contract(a.occ_symbol, 'NVDA');
+
+    const result = await runAutoEntry('2026-08-18', selectFn([pick(a)]));
+
+    expect(result.opened).toHaveLength(0);
+    expect(result.skippedReason).toContain('drawdown_breaker');
+    expect(paperDb.select().from(paperOrders).all()).toHaveLength(0);
+    const logged = decisionsForDay('2026-08-18');
+    expect(logged.some((d) => d.reason === 'drawdown_breaker')).toBe(true);
+  });
+
+  it('trades normally within the limit, and with no equity history at all', async () => {
+    equityRow('2026-08-14', 100_000);
+    equityRow('2026-08-17', 95_000); // -5%, inside the 10% limit
+    const a = ranked();
+    contract(a.occ_symbol, 'NVDA');
+
+    const withinLimit = await runAutoEntry('2026-08-18', selectFn([pick(a)]));
+    expect(withinLimit.skippedReason).toBeNull();
+    expect(withinLimit.opened).toHaveLength(1);
+
+    // A brand-new book has no curve yet; the breaker must not trip on it.
+    paperDb.delete(paperEquity).run();
+    paperDb.delete(paperOrders).run();
+    const fresh = await runAutoEntry('2026-08-18', selectFn([pick(a)]));
+    expect(fresh.skippedReason).toBeNull();
+  });
 });
 
 describe('runAutoEntry', () => {

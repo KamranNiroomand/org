@@ -208,8 +208,16 @@ const schema = z.object({
   // daily number. The reserve is the fraction of current cash never
   // deployed; see select_entries' docstring for the real $122k-contract
   // incident that made an explicit capital constraint non-optional.
-  AUTO_ENTRY_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().positive().default(10),
-  AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY: z.coerce.number().int().positive().default(5),
+  // Probation caps (September 2026): the pre-repair model lost ~18% of the
+  // account through 10 concurrent oversized positions. The repaired EV
+  // chain starts with a short leash — 4 concurrent, 2 new per day — and
+  // widens only on a demonstrated out-of-sample record.
+  AUTO_ENTRY_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().positive().default(4),
+  AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY: z.coerce.number().int().positive().default(2),
+  // Circuit breaker: when account equity sits more than this fraction below
+  // its high-water mark, auto-entry opens nothing (exits keep running).
+  // The rule that would have stopped August's bleed at -10% instead of -18%.
+  AUTO_ENTRY_MAX_DRAWDOWN_PCT: z.coerce.number().min(0).max(1).default(0.10),
   AUTO_ENTRY_CAPITAL_RESERVE_PCT: z.coerce.number().min(0).max(1).default(0.2),
   // The maturity band an entry may be opened in. The forecast is a single
   // fixed horizon (5 trading days) annualized into a constant drift, so a
@@ -432,6 +440,7 @@ export const config = {
       minProbProfit: env.AUTO_ENTRY_MIN_PROB_PROFIT,
       maxConcurrentPositions: env.AUTO_ENTRY_MAX_CONCURRENT_POSITIONS,
       maxNewPositionsPerDay: env.AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY,
+      maxDrawdownPct: env.AUTO_ENTRY_MAX_DRAWDOWN_PCT,
       capitalReservePct: env.AUTO_ENTRY_CAPITAL_RESERVE_PCT,
       minDte: env.AUTO_ENTRY_MIN_DTE,
       maxDte: env.AUTO_ENTRY_MAX_DTE,
