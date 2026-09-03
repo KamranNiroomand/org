@@ -154,6 +154,16 @@ DIR_COLS = [
     "news_count_5d",
     "news_sent_net_1d",
     "news_sent_net_5d",
+    # Trial #27 (2026-09-04): the five MATURE options-derived columns —
+    # full corpus history, and the most theory-motivated features in the
+    # repo pointed at the target they describe (options flow -> options
+    # direction). The three young skew_* columns deliberately stay out
+    # until their ~late-Oct history flip. Counted in MODEL_TRIAL_COUNT.
+    "cpiv_spread",
+    "iv_term_slope",
+    "risk_reversal_25d",
+    "put_call_oi_ratio",
+    "put_call_volume_ratio",
 ]
 
 STOCK_SHORT_COLS = [

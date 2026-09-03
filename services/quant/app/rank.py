@@ -735,7 +735,7 @@ def _forecast_inputs(
     # panel joined at training but not at scoring is train/serve skew —
     # caught in PR review (the trial-24 stk_short model would have taken
     # stock_rank down on its four sector_* columns the day it served).
-    from .features import EARNINGS_FEATURE_COLS, SECTOR_FEATURE_COLS
+    from .features import EARNINGS_FEATURE_COLS, OPTION_FEATURE_COLS, SECTOR_FEATURE_COLS
 
     if any(c in feature_cols for c in SECTOR_FEATURE_COLS):
         from .features import sector_feature_panel
@@ -745,6 +745,20 @@ def _forecast_inputs(
             all_features = all_features.join(sector, on=["symbol", "day"], how="left")
         else:
             for c in SECTOR_FEATURE_COLS:
+                if c in feature_cols:
+                    all_features = all_features.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
+    if any(c in feature_cols for c in OPTION_FEATURE_COLS):
+        from .features import option_feature_panel
+
+        options_panel = option_feature_panel()
+        if options_panel.height > 0:
+            all_features = all_features.join(
+                options_panel.select(["symbol", "day", *OPTION_FEATURE_COLS]),
+                on=["symbol", "day"],
+                how="left",
+            )
+        else:
+            for c in OPTION_FEATURE_COLS:
                 if c in feature_cols:
                     all_features = all_features.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
     if any(c in feature_cols for c in EARNINGS_FEATURE_COLS):
@@ -847,6 +861,71 @@ def _forecast_inputs(
     return drift_by_symbol, vol_by_symbol, rate_curve, manifest, horizon_ret_by_symbol
 
 
+#: Serve-time ensemble width for the options dir model — the same design
+#: the stock targets adopted as trial #23: retrained-daily fits of one
+#: configuration scatter (dir ICs ran 0.01-0.037 across a week), and the
+#: mean of the last N fits is a steadier signal than any single one.
+#: Counted as trial #26 in MODEL_TRIAL_COUNT's ledger (config.ts) by the
+#: same precedent: serving an average is a configuration whose live
+#: performance will be judged, and the hurdle must know it exists.
+#: 1 disables ensembling.
+DIR_ENSEMBLE_N = int(os.environ.get("DIR_ENSEMBLE_N", "5"))
+
+
+def _ensemble_forecast_inputs(
+    trading_day: str,
+    model_dir: Path,
+    vol_window: int,
+    force: bool,
+    target: str,
+    n: int,
+) -> tuple[dict[str, float], dict[str, float], list[tuple[int, float]], dict, dict[str, float]]:
+    """`_forecast_inputs` averaged across the newest `n` same-target
+    artifacts, `model_dir` always a member and always the manifest of
+    record — mirrors `stock_rank`'s member loop exactly: every member
+    votes with its own full forecast pass (its OWN manifest's feature
+    list, preserving train/serve symmetry per member), the mean horizon
+    return per symbol is re-annualized into the drift, and a member that
+    cannot score simply loses its vote. The realized-vol floor and rate
+    curve are identical across members by construction, so the primary's
+    are returned."""
+    drift_by_symbol, vol_by_symbol, rate_curve, manifest, raw_by_symbol = _forecast_inputs(
+        trading_day, model_dir, vol_window, force
+    )
+    if n <= 1:
+        return drift_by_symbol, vol_by_symbol, rate_curve, manifest, raw_by_symbol
+
+    base = model_dir.parent
+    siblings = sorted(
+        (
+            d
+            for d in (base.iterdir() if base.exists() else [])
+            if d.is_dir() and (d / "manifest.json").exists() and f"-{target}-h" in d.name and d != model_dir
+        ),
+        key=lambda d: (d / "manifest.json").stat().st_mtime,
+        reverse=True,
+    )
+    sums: dict[str, float] = dict(raw_by_symbol)
+    counts: dict[str, int] = {k: 1 for k in raw_by_symbol}
+    voted = 1
+    for member in siblings:
+        if voted >= n:
+            break
+        try:
+            _d, _v, _c, _m, member_raw = _forecast_inputs(trading_day, member, vol_window, force=True)
+        except SystemExit:
+            continue
+        voted += 1
+        for sym, val in member_raw.items():
+            sums[sym] = sums.get(sym, 0.0) + val
+            counts[sym] = counts.get(sym, 0) + 1
+    raw_by_symbol = {sym: sums[sym] / counts[sym] for sym in sums}
+    drift_by_symbol = {
+        sym: _annualize_horizon_return(ret, manifest["horizon"]) for sym, ret in raw_by_symbol.items()
+    }
+    return drift_by_symbol, vol_by_symbol, rate_curve, manifest, raw_by_symbol
+
+
 #: KNOWN SIMPLIFICATION (review finding, accepted): dividend yield is 0
 #: through the whole ranking path — internally consistent (the IV solve
 #: uses q=0 too), but call EVs on high-yield names are overstated near
@@ -884,8 +963,8 @@ def rank_day(
     inclusive; `None` disables that end (the Signal Board wants the whole
     board, unfiltered).
     """
-    drift_by_symbol, vol_by_symbol, rate_curve, _manifest, _raw = _forecast_inputs(
-        trading_day, model_dir, vol_window, force
+    drift_by_symbol, vol_by_symbol, rate_curve, _manifest, _raw = _ensemble_forecast_inputs(
+        trading_day, model_dir, vol_window, force, target="dir", n=DIR_ENSEMBLE_N
     )
 
     prior_day = prior_trading_day(trading_day)
@@ -1255,8 +1334,10 @@ def score_held_contracts(
     "no current view could be computed" (contract expired, no quote today,
     no rate for its DTE), not "this position is fine".
     """
-    drift_by_symbol, vol_by_symbol, rate_curve, _manifest, _raw = _forecast_inputs(
-        trading_day, model_dir, vol_window, force
+    # Same ensemble as rank_day — a held position's current view must
+    # come from the exact machinery a fresh ranking would use.
+    drift_by_symbol, vol_by_symbol, rate_curve, _manifest, _raw = _ensemble_forecast_inputs(
+        trading_day, model_dir, vol_window, force, target="dir", n=DIR_ENSEMBLE_N
     )
 
     by_underlying: dict[str, list[str]] = {}

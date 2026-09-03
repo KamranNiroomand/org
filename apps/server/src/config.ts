@@ -128,6 +128,16 @@ const schema = z.object({
   // scheduled daily run silently defaulted to 1 and reported a 1.96
   // hurdle against results that had really consumed 19 trials.
   // 22 as of 2026-08-26: trial #20 was the vol-scaled label + per-day
+  // Trial #27 (2026-09-04): the five mature options-derived columns
+  // (cpiv_spread, iv_term_slope, risk_reversal_25d, put/call OI+volume
+  // ratios) into the options dir model's own feature set — the most
+  // theory-motivated features in the repo finally pointed at the target
+  // they describe. The three young skew columns wait for their ~late-Oct
+  // history flip as planned. Counted on running.
+  // Trial #26 (2026-09-04): serving the options dir forecast from an
+  // average of the last five daily refits (DIR_ENSEMBLE_N, rank.py) —
+  // the stock boards' trial-#23 design applied to dir, whose single-fit
+  // ICs scattered 0.01-0.037 across one week. Same precedent, counted.
   // Trial #25 (2026-09-01): news columns into the options dir model —
   // a 5-day horizon trained blind to news was an input handicap, not a
   // choice. Counted on running, as ever.
@@ -142,7 +152,7 @@ const schema = z.object({
   // feature-rank configuration; trials #21 and #22 are the stock
   // engine's stk_short and stk_long configurations (see TARGETS in
   // services/quant/app/train.py).
-  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(25),
+  MODEL_TRIAL_COUNT: z.coerce.number().int().positive().default(27),
   // The modelled-fill spread haircut. With no quote entitlement, every
   // paper fill and mark derives from a *print* (close or last trade) —
   // a price two other people met at, not one offered to us. Real option
@@ -222,6 +232,10 @@ const schema = z.object({
   // starves the model of training samples — but the mechanism stays wired
   // so real capital can turn it on with one env var.
   AUTO_ENTRY_MAX_DRAWDOWN_PCT: z.coerce.number().min(0).max(1).default(1.0),
+  // Entries wait until the champion dir model's daily IC clears its own
+  // Bonferroni hurdle (metrics.ic_clears_hurdle) — an unproven edge does
+  // not spend option spread+theta. Exits/forecasts/ledgers unaffected.
+  AUTO_ENTRY_REQUIRE_SIGNIFICANCE: z.coerce.boolean().default(true),
   AUTO_ENTRY_CAPITAL_RESERVE_PCT: z.coerce.number().min(0).max(1).default(0.2),
   // The maturity band an entry may be opened in. The forecast is a single
   // fixed horizon (5 trading days) annualized into a constant drift, so a
@@ -451,6 +465,7 @@ export const config = {
       maxConcurrentPositions: env.AUTO_ENTRY_MAX_CONCURRENT_POSITIONS,
       maxNewPositionsPerDay: env.AUTO_ENTRY_MAX_NEW_POSITIONS_PER_DAY,
       maxDrawdownPct: env.AUTO_ENTRY_MAX_DRAWDOWN_PCT,
+      requireSignificance: env.AUTO_ENTRY_REQUIRE_SIGNIFICANCE,
       capitalReservePct: env.AUTO_ENTRY_CAPITAL_RESERVE_PCT,
       minDte: env.AUTO_ENTRY_MIN_DTE,
       maxDte: env.AUTO_ENTRY_MAX_DTE,
