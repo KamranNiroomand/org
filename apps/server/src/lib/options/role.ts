@@ -31,3 +31,17 @@ export function assertRunner(action: string): void {
 }
 
 export const isRunner = (): boolean => config.market.isRunner;
+
+/**
+ * Which machine owns the paper book — trades it, marks it, serves it.
+ *
+ * The runner, whenever one exists in the topology: it is the always-on
+ * machine, and a book scheduled on a laptop misses its own entry window
+ * every evening the lid is closed (found live 2026-09-03 — capture,
+ * retrain, and fixes all landed, and the sleeping reader still opened
+ * nothing). A standalone machine with no runner configured owns its own
+ * book. A reader with a runner proxies every book route there instead
+ * (see paperProxy.ts) and runs no paper jobs of its own.
+ */
+export const ownsPaperBook = (): boolean =>
+  config.market.isRunner || !config.market.runnerSshHost;

@@ -68,6 +68,7 @@ const schema = z.object({
   MARKET_ROLE: z.enum(['runner', 'reader']).default('runner'),
   // Reader only: SSH target the corpus is pulled from, e.g. "user@host.local".
   RUNNER_SSH_HOST: z.string().optional(),
+  MARKET_RUNNER_HTTP_URL: z.string().url().optional(),
   // Path to MARKET_DATA_DIR on the runner, if different from this machine's.
   RUNNER_DATA_DIR: z.string().optional(),
   MARKET_DB_PATH: z.string().optional(),
@@ -375,6 +376,12 @@ export const config = {
     role: env.MARKET_ROLE,
     isRunner: env.MARKET_ROLE === 'runner',
     runnerSshHost: env.RUNNER_SSH_HOST ?? null,
+    /** HTTP base of the runner's own server, for readers proxying the
+     * paper book there (see paperProxy.ts). Defaults to port 5174 on the
+     * SSH host; MARKET_RUNNER_HTTP_URL overrides. */
+    runnerHttpUrl:
+      env.MARKET_RUNNER_HTTP_URL ??
+      (env.RUNNER_SSH_HOST ? `http://${env.RUNNER_SSH_HOST}:5174` : null),
     runnerDataDir: env.RUNNER_DATA_DIR ?? null,
     polygonKey: env.POLYGON_API_KEY ?? null,
     configured: Boolean(env.POLYGON_API_KEY),

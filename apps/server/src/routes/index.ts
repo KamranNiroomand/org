@@ -17,6 +17,8 @@ import { realEstateRoutes } from './realestate.js';
 import { signalsRoutes } from './signals.js';
 import { stickyRoutes } from './stickies.js';
 import { taskRoutes } from './tasks.js';
+import { paperProxyRoutes } from '../lib/paperProxy.js';
+import { ownsPaperBook } from '../lib/options/role.js';
 import { watchlistRoutes } from './watchlist.js';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
@@ -52,7 +54,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(signalsRoutes);
   await app.register(realEstateRoutes);
   await app.register(optionsRoutes);
-  await app.register(paperRoutes);
+  // The paper book's routes serve locally only on the machine that owns
+  // the book; a reader with a runner forwards them there — one writer,
+  // one database, and the always-on machine does the trading (role.ts).
+  if (ownsPaperBook()) {
+    await app.register(paperRoutes);
+  } else {
+    await app.register(paperProxyRoutes);
+  }
   await app.register(ideaRoutes);
   await app.register(claudeRoutes);
   await app.register(plaidRoutes);
