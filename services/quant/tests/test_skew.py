@@ -111,12 +111,18 @@ def test_every_declared_ride_along_panel_is_joined_at_scoring_time():
     import inspect
 
     from app import rank
-    from app.features import EARNINGS_FEATURE_COLS, NEWS_FEATURE_COLS, SECTOR_FEATURE_COLS
+    from app.features import (
+        EARNINGS_FEATURE_COLS,
+        NEWS_FEATURE_COLS,
+        OPTION_FEATURE_COLS,
+        SECTOR_FEATURE_COLS,
+    )
 
     src = inspect.getsource(rank._forecast_inputs)
     for family, name in [
         (NEWS_FEATURE_COLS, "NEWS_FEATURE_COLS"),
         (SECTOR_FEATURE_COLS, "SECTOR_FEATURE_COLS"),
         (EARNINGS_FEATURE_COLS, "EARNINGS_FEATURE_COLS"),
+        (OPTION_FEATURE_COLS, "OPTION_FEATURE_COLS"),
     ]:
         assert name in src, f"_forecast_inputs has no scoring join for {name}"

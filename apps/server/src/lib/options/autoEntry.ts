@@ -1,8 +1,8 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { nyToday } from './positionHealth.js';
 import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
-import { optionContracts, optionQuotes } from '../../db/market/schema.js';
+import { modelRuns, optionContracts, optionQuotes } from '../../db/market/schema.js';
 import { listUniverse } from './universe.js';
 import { accountCapacity, contractMultiplier, logDecisions, modelEntriesOpenedOn, openOrder, PaperError } from '../paper.js';
 import { paperDb } from '../../db/paper/index.js';
@@ -130,6 +130,34 @@ async function runAutoEntryInner(
       { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'partial_board', detail: { boardCoverage, universeSize } },
     ]);
     return { day, opened: [], skippedReason, failures: [] };
+  }
+
+  // Significance gate: an unproven model does not spend spread and theta.
+  // The champion dir model's own registered metrics say whether its daily
+  // IC clears the Bonferroni hurdle for the trials run so far; until it
+  // does, the edge is plausible, not established — and long options are
+  // the most expensive possible place to find that out. Forecasts,
+  // ledgers, and exits all keep running (shadow mode); only NEW entries
+  // wait. AUTO_ENTRY_REQUIRE_SIGNIFICANCE=false relaxes deliberately.
+  if (config.market.autoEntry.requireSignificance) {
+    const champion = marketDb
+      .select({ runId: modelRuns.runId, metrics: modelRuns.metrics })
+      .from(modelRuns)
+      .where(and(eq(modelRuns.target, 'dir'), eq(modelRuns.status, 'champion')))
+      .get();
+    const m = (champion?.metrics ?? {}) as Record<string, unknown>;
+    if (champion === undefined || m.ic_clears_hurdle !== true) {
+      const t = typeof m.ic_t_stat === 'number' ? m.ic_t_stat.toFixed(2) : 'unknown';
+      const hurdle = typeof m.ic_t_hurdle === 'number' ? m.ic_t_hurdle.toFixed(2) : 'unknown';
+      const skippedReason =
+        `model_below_hurdle: champion dir model ${champion?.runId ?? '(none)'} has t=${t} ` +
+        `against hurdle ${hurdle} — new entries wait until the edge is established; ` +
+        `exits and forecasts keep running`;
+      logDecisions([
+        { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'model_below_hurdle', detail: { runId: champion?.runId ?? null, t: m.ic_t_stat ?? null, hurdle: m.ic_t_hurdle ?? null } },
+      ]);
+      return { day, opened: [], skippedReason, failures: [] };
+    }
   }
 
   // Drawdown circuit breaker: below the high-water mark by more than the

@@ -11,7 +11,7 @@ import { formatOccSymbol, toE4 } from '@org/shared';
 import { config } from '../../config.js';
 import { marketDb } from '../../db/market/index.js';
 import { runMarketMigrations } from '../../db/market/migrate.js';
-import { optionContracts } from '../../db/market/schema.js';
+import { modelRuns, optionContracts } from '../../db/market/schema.js';
 import { paperDb } from '../../db/paper/index.js';
 import { runPaperMigrations } from '../../db/paper/migrate.js';
 import { paperDecisionLog, paperEquity, paperOrders } from '../../db/paper/schema.js';
@@ -95,6 +95,27 @@ function selectFn(
   };
 }
 
+/** A champion dir run whose metrics clear (or miss) the hurdle. */
+function seedChampion(clears: boolean) {
+  marketDb
+    .insert(modelRuns)
+    .values({
+      runId: `test-dir-${clears ? 'proven' : 'unproven'}`,
+      target: 'dir',
+      horizon: 5,
+      trainDaysFirst: '2025-05-20',
+      trainDaysLast: '2026-08-18',
+      trainDaysCount: 300,
+      nSplits: 4,
+      embargo: 2,
+      metrics: { ic_clears_hurdle: clears, ic_t_stat: clears ? 3.5 : 1.76, ic_t_hurdle: 3.01 },
+      artifactDir: '/tmp/none',
+      registeredAt: nowIso(),
+      status: 'champion',
+    })
+    .run();
+}
+
 beforeEach(() => {
   runMarketMigrations();
   runPaperMigrations();
@@ -104,6 +125,33 @@ beforeEach(() => {
   paperDb.delete(paperDecisionLog).run();
   paperDb.delete(paperEquity).run();
   marketDb.delete(optionContracts).run();
+  marketDb.delete(modelRuns).run();
+  // The significance gate (see runAutoEntry) requires a proven champion;
+  // most tests are about everything downstream of it.
+  seedChampion(true);
+});
+
+describe('the significance gate', () => {
+  it('opens nothing while the champion misses its hurdle, but logs why', async () => {
+    marketDb.delete(modelRuns).run();
+    seedChampion(false);
+    const a = ranked();
+    contract(a.occ_symbol, 'NVDA');
+
+    const result = await runAutoEntry('2026-08-18', selectFn([pick(a)]));
+
+    expect(result.opened).toHaveLength(0);
+    expect(result.skippedReason).toContain('model_below_hurdle');
+    expect(decisionsForDay('2026-08-18').some((d) => d.reason === 'model_below_hurdle')).toBe(true);
+  });
+
+  it('opens nothing when no champion exists at all', async () => {
+    marketDb.delete(modelRuns).run();
+    const a = ranked();
+    contract(a.occ_symbol, 'NVDA');
+    const result = await runAutoEntry('2026-08-18', selectFn([pick(a)]));
+    expect(result.skippedReason).toContain('model_below_hurdle');
+  });
 });
 
 /** Seed one equity-curve row, dollars in, E4 stored. */
