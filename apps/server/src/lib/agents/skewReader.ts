@@ -199,6 +199,74 @@ export async function runSkewReader(
   return result;
 }
 
+/**
+ * The whole daily run, self-contained: latest captured board -> skew map
+ * from the quant sidecar -> held-name marking -> the agent over the full
+ * usable board. Shared by the manual route (POST /api/options/skew-agent)
+ * and the reader's daily schedule — the agent used to run only when
+ * triggered by hand, which is why the map showed day-old reads whenever
+ * nobody remembered to press the button (user report, 2026-09-03).
+ *
+ * Held names follow the BOOK, not this machine: since the book moved to
+ * the always-on runner (role.ts), a reader reads its stale local copy
+ * only if it owns a book at all — otherwise the runner's own routes
+ * answer over the proxy URL, so the map's "held" ring means what it says.
+ */
+export async function runSkewAgentForLatestDay(): Promise<SkewAgentRunResult> {
+  const { marketDb } = await import('../../db/market/index.js');
+  const { optionQuotes } = await import('../../db/market/schema.js');
+  const { sql } = await import('drizzle-orm');
+  const day = marketDb
+    .select({ d: sql<string | null>`max(${optionQuotes.tradingDay})` })
+    .from(optionQuotes)
+    .get()?.d;
+  if (!day) return { day: '-', read: 0, skipped: 0, errors: ['No captured chains yet.'] };
+
+  const res = await fetch(`${config.market.quantUrl}/options/skew`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ day }),
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (!res.ok) return { day, read: 0, skipped: 0, errors: [`quant ${res.status}`] };
+  const map = (await res.json()) as { rows: Array<Record<string, unknown>> };
+
+  const held = new Set<string>();
+  const { ownsPaperBook } = await import('../options/role.js');
+  if (ownsPaperBook()) {
+    const { paperDb } = await import('../../db/paper/index.js');
+    const { paperOrders, stockOrders } = await import('../../db/paper/schema.js');
+    const { eq } = await import('drizzle-orm');
+    for (const o of paperDb.select().from(paperOrders).where(eq(paperOrders.status, 'open')).all())
+      held.add(o.underlying ?? o.occSymbol.slice(0, 6).trim());
+    for (const o of paperDb.select().from(stockOrders).where(eq(stockOrders.status, 'open')).all())
+      held.add(o.symbol);
+  } else if (config.market.runnerHttpUrl) {
+    try {
+      const [ordersRes, bookRes] = await Promise.all([
+        fetch(`${config.market.runnerHttpUrl}/api/paper/orders`, { signal: AbortSignal.timeout(15_000) }),
+        fetch(`${config.market.runnerHttpUrl}/api/stocks/book`, { signal: AbortSignal.timeout(15_000) }),
+      ]);
+      if (ordersRes.ok) {
+        for (const o of (await ordersRes.json()) as Array<{ status: string; underlying: string | null; occSymbol: string }>)
+          if (o.status === 'open') held.add(o.underlying ?? o.occSymbol.slice(0, 6).trim());
+      }
+      if (bookRes.ok) {
+        const book = (await bookRes.json()) as { orders: Array<{ status: string; symbol: string }> };
+        for (const o of book.orders) if (o.status === 'open') held.add(o.symbol);
+      }
+    } catch {
+      // Held marking is decoration on the read, never a reason to skip
+      // the day's judgments — an unreachable runner leaves it empty.
+    }
+  }
+
+  const rows = map.rows
+    .filter((r) => r.chain_ok && !r.suspect)
+    .map((r) => ({ ...(r as object), held: held.has(String(r.symbol)) })) as unknown as SkewRowForAgent[];
+  return runSkewReader(day, rows);
+}
+
 export function latestSkewReads(day: string) {
   return db
     .select()
