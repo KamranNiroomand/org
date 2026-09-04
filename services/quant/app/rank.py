@@ -710,7 +710,16 @@ def _forecast_inputs(
     horizon = manifest["horizon"]
     feature_cols = manifest["feature_cols"]
 
-    bars = read_bars()
+    # Serving needs only enough trailing history to compute the longest
+    # feature window (residual momentum's 126-day beta) plus headroom for
+    # holidays and the vol window — NOT the whole corpus. Unbounded, the
+    # 10-year backfill (2026-09-04) turned every cold board build into a
+    # multi-minute scan of 1.35M rows; training keeps reading everything,
+    # because depth is exactly what training is for.
+    from datetime import date as _date, timedelta as _td
+
+    serve_start = (_date.fromisoformat(trading_day) - _td(days=420)).isoformat()
+    bars = read_bars(start=serve_start, end=trading_day)
     if bars.height == 0:
         raise SystemExit("No bars in market.db.")
 
