@@ -394,7 +394,7 @@ class TestRankDayRefusesWeakModels:
         # past it and fail for a completely different, later reason (no
         # bars), which is what proves the gate itself was skipped rather
         # than coincidentally not triggering.
-        monkeypatch.setattr("app.rank.read_bars", lambda: pl.DataFrame())
+        monkeypatch.setattr("app.rank.read_bars", lambda **_kw: pl.DataFrame())
         with pytest.raises(SystemExit, match="No bars"):
             rank_day("2026-01-01", run_dir, force=True)
 

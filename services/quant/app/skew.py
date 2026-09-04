@@ -277,8 +277,13 @@ def skew_map(trading_day: str) -> dict:
 
     sectors_by_symbol = read_symbol_sectors()
 
-    # Price and volume context from bars, one scan.
-    bars = read_bars(symbols=sorted(today.keys()) + ["SPY"])
+    # Price and volume context from bars, one scan — bounded to the ~90
+    # calendar days the 1-month return and 20-session RVOL actually use;
+    # unbounded, the 10-year backfill made this a full-corpus scan.
+    from datetime import date as _date, timedelta as _td
+
+    _start = (_date.fromisoformat(trading_day) - _td(days=90)).isoformat()
+    bars = read_bars(symbols=sorted(today.keys()) + ["SPY"], start=_start, end=trading_day)
     ret_1m: dict[str, float] = {}
     rvol: dict[str, float] = {}
     for sym, group in bars.filter(pl.col("day") <= trading_day).sort("day").group_by(
