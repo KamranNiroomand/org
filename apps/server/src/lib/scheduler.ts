@@ -225,6 +225,21 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
           result.errors.push(`Auto-entry: ${err instanceof Error ? err.message : String(err)}`);
         }
 
+        // The skew agent's daily read of the freshly pulled board — it
+        // used to run only when triggered by hand, so the map showed
+        // stale reads whenever nobody pressed the button. Idempotent per
+        // (day, symbol), so a manual run earlier the same day just makes
+        // this a fast no-op. Judgment storage is reader-local (org.db);
+        // held-marking follows the book over the proxy.
+        try {
+          const { runSkewAgentForLatestDay } = await import('./agents/skewReader.js');
+          const skewRead = await runSkewAgentForLatestDay();
+          log.info(`Skew agent: ${skewRead.read} read, ${skewRead.skipped} already done (${skewRead.day})`);
+          if (skewRead.errors.length > 0) log.warn(`Skew agent: ${skewRead.errors.slice(0, 3).join('; ')}`);
+        } catch (err) {
+          result.errors.push(`Skew agent: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
         // The stock engine's own daily cycle — panel reads the news for
         // the model's best names, then each book enters and manages.
         // Same placement logic as the options auto-entry above: whichever
