@@ -77,8 +77,11 @@ class TestTrainEndToEnd:
         # An absurdly large horizon collapses the usable panel to near
         # nothing; this must refuse rather than silently train a model on a
         # handful of rows and hand back a confident-looking manifest.
+        # 20000, not 2000: the 10-year backfill (2026-09-04) grew the
+        # corpus past 2000 days, and a horizon the corpus can actually
+        # label no longer tests this guard.
         with pytest.raises(SystemExit, match="too few"):
-            train(target="dir", horizon=2000, n_splits=3, embargo=2, output_dir=tmp_path)
+            train(target="dir", horizon=20_000, n_splits=3, embargo=2, output_dir=tmp_path)
 
 
 class TestConfigHash:

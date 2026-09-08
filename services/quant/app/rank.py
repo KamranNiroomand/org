@@ -797,7 +797,13 @@ def _forecast_inputs(
     predicted = booster.predict(latest_features.select(feature_cols).to_numpy())
 
     label_cfg = manifest.get("label") or {}
-    if label_cfg.get("kind") == "vol_scaled":
+    if label_cfg.get("kind") in ("vol_scaled", "vol_scaled_xs"):
+        # vol_scaled_xs (trial #28) predicts the MARKET-RELATIVE sigma-unit
+        # return; multiplying back by current sigma yields a relative
+        # return, used as the drift with the market component treated as
+        # zero. Deliberate: the model was never asked to predict the
+        # market, and this is also what stops the equity risk premium
+        # from reading as per-name edge (review finding #10).
         # The model predicted the horizon return in trailing-sigma units;
         # multiplying back by each symbol's *current* trailing sigma —
         # same estimator, same window as the label's denominator —
