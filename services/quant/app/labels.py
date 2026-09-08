@@ -105,6 +105,50 @@ def vol_scaled_forward_return(
     )
 
 
+def vol_scaled_xs_forward_return(
+    bars: pl.DataFrame, horizon: int, vol_window: int = 21, sigma_clip: float = 10.0
+) -> pl.DataFrame:
+    """`vol_scaled_forward_return`, per-day cross-sectionally demeaned —
+    the label finally aimed at what the metric scores (trial #28).
+
+    Every evaluation in this system is WITHIN-day: features are per-day
+    ranks, the IC is a per-day Spearman across names. But the vol-scaled
+    label is absolute, so the single largest component of its variance is
+    the market's own move that day — shared by every name, invisible to a
+    rank metric, and unlearnable from cross-sectional features anyway.
+    The model was spending capacity predicting a quantity its own score
+    ignores. Subtracting each day's cross-sectional mean (AFTER vol
+    scaling, BEFORE winsorizing — the demeaning must see real magnitudes,
+    and the clip must see the final label) leaves exactly the question
+    asked: which names beat the others.
+
+    Side effect, deliberate: the equity risk premium — the market's
+    average upward drift — no longer leaks into every prediction as fake
+    per-name edge (the September 2026 review's finding #10). At serve
+    time the prediction reads as a market-relative return; using it as
+    the pricing drift treats the market component as zero, which is the
+    honest choice for a model that was never asked to predict it.
+
+    The demeaning uses only same-day peers (no future data), and drops
+    days with fewer than 5 names — a "cross-section" of two is noise.
+    """
+    scaled = vol_scaled_forward_return(bars, horizon, vol_window, sigma_clip=float("inf"))
+    if scaled.height == 0:
+        return scaled
+    label_col = f"fwd_ret_{horizon}d"
+    return (
+        scaled.with_columns(
+            pl.col(label_col).mean().over("day").alias("_day_mean"),
+            pl.col(label_col).count().over("day").alias("_day_n"),
+        )
+        .filter(pl.col("_day_n") >= 5)
+        .with_columns(
+            (pl.col(label_col) - pl.col("_day_mean")).clip(-sigma_clip, sigma_clip).alias(label_col)
+        )
+        .select(["symbol", "day", label_col, "label_sigma_h"])
+    )
+
+
 def direction_bucket(
     bars: pl.DataFrame, horizon: int, flat_threshold: float = 0.01
 ) -> pl.DataFrame:

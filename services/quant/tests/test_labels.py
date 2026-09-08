@@ -212,3 +212,60 @@ class TestVolScaledForwardReturn:
         bars = self._trending_bars(n=10)  # shorter than the 21-day window
         out = vol_scaled_forward_return(bars, 5, vol_window=21)
         assert out.height == 0
+
+
+class TestVolScaledXs:
+    """Trial #28's label: per-day demeaned after vol scaling, before the
+    winsorize clip; no lookahead beyond forward_return's own shift."""
+
+    def _bars(self):
+        import polars as pl
+        rows = []
+        # 8 symbols x 40 days of gently drifting prices with a shared
+        # market move, so the demeaning has something real to remove.
+        import math
+        for i, sym in enumerate("ABCDEFGH"):
+            px = 100.0 + i
+            for d in range(40):
+                # Deterministic per-symbol wiggle so trailing vol is real
+                # and no label lands near the 10-sigma winsorize clip.
+                wiggle = 0.01 * math.sin(d * 1.7 + i)
+                px *= 1.0 + 0.002 + 0.001 * i + wiggle + (0.01 if d == 25 else 0.0)
+                rows.append({"symbol": sym, "day": f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}",
+                             "open": px, "high": px, "low": px, "close": px, "volume": 1000})
+        return pl.DataFrame(rows)
+
+    def test_per_day_mean_is_zero(self) -> None:
+        import polars as pl
+        from app.labels import vol_scaled_xs_forward_return
+
+        out = vol_scaled_xs_forward_return(self._bars(), horizon=5)
+        assert out.height > 0
+        means = out.group_by("day").agg(pl.col("fwd_ret_5d").mean().alias("m"))
+        assert float(means["m"].abs().max()) < 1e-9
+
+    def test_thin_days_are_dropped(self) -> None:
+        import polars as pl
+        from app.labels import vol_scaled_xs_forward_return
+
+        bars = self._bars().filter(
+            (pl.col("symbol").is_in(["A", "B", "C"])) | (pl.col("day") > "2026-01-10")
+        )
+        out = vol_scaled_xs_forward_return(bars, horizon=5)
+        thin_days = out.group_by("day").agg(pl.len().alias("n")).filter(pl.col("n") < 5)
+        assert thin_days.height == 0
+
+    def test_demeaning_removes_the_shared_market_move(self) -> None:
+        import polars as pl
+        from app.labels import vol_scaled_forward_return, vol_scaled_xs_forward_return
+
+        bars = self._bars()
+        absolute = vol_scaled_forward_return(bars, horizon=5)
+        xs = vol_scaled_xs_forward_return(bars, horizon=5)
+        # The day-25 shared jump inflates every absolute label in the days
+        # leading into it; the demeaned label's cross-day dispersion of
+        # per-day means must be ~zero while the absolute one's is not.
+        abs_means = absolute.group_by("day").agg(pl.col("fwd_ret_5d").mean().alias("m"))
+        assert float(abs_means["m"].abs().max()) > 1e-6
+        xs_means = xs.group_by("day").agg(pl.col("fwd_ret_5d").mean().alias("m"))
+        assert float(xs_means["m"].abs().max()) < 1e-9

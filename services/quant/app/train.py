@@ -48,7 +48,7 @@ from .features import (
     rank_features_per_day,
     sector_feature_panel,
 )
-from .labels import direction_bucket, forward_return, vol_scaled_forward_return
+from .labels import direction_bucket, forward_return, vol_scaled_forward_return, vol_scaled_xs_forward_return
 from .metrics import ic_summary, information_coefficient, rmse
 from .models import beats_baseline, mean_baseline, train_lgbm_regressor
 
@@ -212,6 +212,11 @@ class TargetSpec:
     #: 2-year corpus and the first fold starves. A long-horizon target
     #: must state its own floor.
     min_train_days: int | None = None
+    #: Which label builder this target trains against. "vol_scaled" is the
+    #: absolute sigma-unit forward return; "vol_scaled_xs" additionally
+    #: demeans per day (see labels.py) so the label matches the
+    #: within-day metric. Feeds _config_hash: changing it is a new trial.
+    label_kind: str = LABEL_KIND
 
 
 TARGETS: dict[str, TargetSpec] = {
@@ -221,7 +226,12 @@ TARGETS: dict[str, TargetSpec] = {
     # strongest dir signal recorded (artifact
     # 2026-09-01-dir-h5-359f97363a0d). Still below the hurdle; the
     # banner stands.
-    "dir": TargetSpec(5, DIR_COLS, LABEL_VOL_WINDOW, 4, include_news=True),
+    # Trial #28 (2026-09-08): the cross-sectionally demeaned label. The
+    # features are per-day ranks and the metric is within-day IC, but the
+    # absolute label made the model spend capacity on the market's own
+    # move — a component the score ignores and cross-sectional features
+    # cannot predict. Counted on running.
+    "dir": TargetSpec(5, DIR_COLS, LABEL_VOL_WINDOW, 4, include_news=True, label_kind="vol_scaled_xs"),
     # Stock engine: ~1-4 week swings.
     "stk_short": TargetSpec(21, STOCK_SHORT_COLS, 21, 4, include_news=True),
     # Stock engine: ~6-12 month positions. Two folds until the bar corpus
@@ -270,7 +280,9 @@ def build_panel(target: str, horizon: int) -> pl.DataFrame:
         if earnings.height > 0:
             features = features.join(earnings, on=["symbol", "day"], how="left")
 
-    if LABEL_KIND == "vol_scaled":
+    if spec.label_kind == "vol_scaled_xs":
+        labels = vol_scaled_xs_forward_return(bars, horizon, vol_window=spec.label_vol_window)
+    elif spec.label_kind == "vol_scaled":
         labels = vol_scaled_forward_return(bars, horizon, vol_window=spec.label_vol_window)
     else:
         labels = forward_return(bars, horizon)
@@ -384,7 +396,7 @@ def train(
 
     config_hash = _config_hash(
         target, horizon, feature_cols, early_stopping_rounds,
-        label_kind=LABEL_KIND, rank_features=RANK_FEATURES,
+        label_kind=spec.label_kind, rank_features=RANK_FEATURES,
         label_vol_window=spec.label_vol_window,
     )
     run_id = f"{date.today().isoformat()}-{target}-h{horizon}-{config_hash}"
@@ -415,7 +427,7 @@ def train(
                 "train_days": {"first": days[0], "last": days[-1], "count": len(days)},
                 "n_splits": n_splits,
                 "embargo": embargo,
-                "label": {"kind": LABEL_KIND, "vol_window": spec.label_vol_window},
+                "label": {"kind": spec.label_kind, "vol_window": spec.label_vol_window},
                 "rank_features": RANK_FEATURES,
                 "metrics": metrics,
             },
