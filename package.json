@@ -13,7 +13,7 @@
   },
   "scripts": {
     "dev": "concurrently -n server,web,quant -c cyan,magenta,yellow \"npm:dev:server\" \"npm:dev:web\" \"npm:dev:quant\"",
-    "dev:server": "npm run dev -w @org/server",
+    "dev:server": "PORT=5174 npm run dev -w @org/server",
     "dev:web": "npm run dev -w @org/web",
     "build": "npm run build -w @org/web",
     "start": "npm run start -w @org/server",
