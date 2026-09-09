@@ -164,6 +164,16 @@ DIR_COLS = [
     "risk_reversal_25d",
     "put_call_oi_ratio",
     "put_call_volume_ratio",
+    # Trial #29 (2026-09-09): the two remaining unwired news windows and
+    # the earnings clock. The 21-day news columns give the model the
+    # slow-burn coverage story the 1d/5d windows cut off; the earnings
+    # features carry post-earnings drift, the best-documented anomaly in
+    # the cross-sectional literature. Both families already serve-join in
+    # _forecast_inputs (the trial-24 lesson, pre-paid). Counted.
+    "news_count_21d",
+    "news_sent_net_21d",
+    "days_since_earnings",
+    "last_earnings_sent",
 ]
 
 STOCK_SHORT_COLS = [
