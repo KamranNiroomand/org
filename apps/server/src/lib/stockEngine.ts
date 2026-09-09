@@ -14,6 +14,7 @@ import {
   logStockDecisions,
   type StockDecisionRow,
   markStockPosition,
+  latestStockMarkByOrder,
   openStockPosition,
   openStockOrders,
   stockCapacity,
@@ -363,7 +364,37 @@ export async function runStockEntries(
       },
     ]);
   }
-  if (slots <= 0) {
+  // Slot rotation: a full book is a claim that these are the best
+  // `maxPositions` names available — a claim nothing ever re-tested, so
+  // a mediocre holding that never quite hit its stop camped in a slot
+  // forever while stronger candidates queued outside (found live: 14/14
+  // slots held through three sessions of fresh boards). When the book is
+  // full for POSITION reasons (not daily/regime caps), compare today's
+  // board against the weakest eligible holding; a candidate clearing it
+  // by ROTATION_MIN_EDGE_SIGMAS evicts it at the current mark. The freed
+  // slot then flows through the NORMAL entry pipeline below — panel,
+  // crowding, sizing all still gate what actually fills it. Hysteresis:
+  // a holding is eligible only after rotationMinHoldDays, and at most
+  // one rotation per book per day.
+  let rotated = false;
+  if (
+    slots <= 0 &&
+    alreadyToday < Math.min(cfg.maxNewPerDay, dailyCap) &&
+    capacity.openCount >= maxPositions &&
+    !stockRotationHappenedOn(day, book)
+  ) {
+    try {
+      rotated = await attemptRotation(log, day, book, target, horizonDays);
+    } catch (err) {
+      log.warn(`Stock rotation (${book}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const capacityNow = rotated ? stockCapacity(book) : capacity;
+  const slotsNow = rotated
+    ? Math.min(Math.max(0, maxPositions - capacityNow.openCount), Math.max(0, dailyCap - alreadyToday))
+    : slots;
+
+  if (slotsNow <= 0) {
     const reason =
       alreadyToday >= cfg.maxNewPerDay
         ? 'daily_cap_spent'
@@ -983,4 +1014,108 @@ export async function runStockCycle(
   const exits = await runStockExits(log, day);
   if (exits.closed > 0) log.info(`Stock exits: closed ${exits.closed} of ${exits.checked}`);
   return { day, entries, exits };
+}
+
+
+/** At most one rotation per book per day — churn is the failure mode
+ * hysteresis exists to prevent, and one swap a day compounds plenty. */
+function stockRotationHappenedOn(day: string, book: StockBook): boolean {
+  return stockDecisionsForDay(day).some((d) => d.book === book && d.reason === 'rotated_out');
+}
+
+/**
+ * The rotation decision itself. Compares today's board against the
+ * weakest ELIGIBLE holding (past the minimum hold period) in sigma
+ * units — the model's native, cross-name-comparable output. A holding
+ * absent from the top-200 board is scored 0 (the board's neutral
+ * level), not negative infinity: "the model no longer ranks it" is
+ * grounds for eviction only when a genuinely positive candidate clears
+ * the edge threshold over neutral, never automatically. Closes at the
+ * latest mark; the freed slot is filled (or not) by the ordinary entry
+ * pipeline with all its gates.
+ */
+export async function attemptRotation(
+  log: FastifyBaseLogger,
+  day: string,
+  book: StockBook,
+  target: 'stk_short' | 'stk_long',
+  _horizonDays: number,
+  rankFn: typeof stockRank = stockRank,
+): Promise<boolean> {
+  const cfg = config.market.stockBook;
+  const ranked = await rankFn(day, target, 200);
+  const holdings = openStockOrders(book);
+  if (holdings.length === 0) return false;
+  const scoreBySymbol = new Map(ranked.picks.map((p) => [p.symbol, p.forecastSigmas]));
+
+  const now = Date.now();
+  const eligible = holdings.filter(
+    (o) => now - Date.parse(o.openedAt) >= cfg.rotationMinHoldDays * 86_400_000,
+  );
+  if (eligible.length === 0) return false;
+
+  const scored = eligible.map((o) => ({
+    order: o,
+    sigma: scoreBySymbol.get(o.symbol) ?? 0,
+    onBoard: scoreBySymbol.has(o.symbol),
+  }));
+  const weakest = scored.reduce((a, b) => (b.sigma < a.sigma ? b : a));
+
+  const heldSymbols = new Set(holdings.map((o) => o.symbol));
+  const candidate = ranked.picks.find(
+    (p) => !heldSymbols.has(p.symbol) && (p.forecastSigmas ?? 0) > 0,
+  );
+  if (!candidate || candidate.forecastSigmas === null) return false;
+
+  const edge = candidate.forecastSigmas - weakest.sigma;
+  if (edge < cfg.rotationMinEdgeSigmas) {
+    logStockDecisions([
+      {
+        day,
+        book,
+        symbol: weakest.order.symbol,
+        decision: 'skipped',
+        reason: 'rotation_no_edge',
+        detail: {
+          weakestSigma: weakest.sigma,
+          weakestOnBoard: weakest.onBoard,
+          candidate: candidate.symbol,
+          candidateSigma: candidate.forecastSigmas,
+          minEdge: cfg.rotationMinEdgeSigmas,
+        },
+        modelRunId: ranked.modelRunId,
+      },
+    ]);
+    return false;
+  }
+
+  const mark = latestStockMarkByOrder().get(weakest.order.id);
+  if (!mark) {
+    log.warn(`Stock rotation (${book}): ${weakest.order.symbol} has no mark to close at — skipping`);
+    return false;
+  }
+  closeStockPosition(weakest.order.id, mark.markPriceE4, 'modelled', day, 'rotated_for_stronger_candidate');
+  logStockDecisions([
+    {
+      day,
+      book,
+      symbol: weakest.order.symbol,
+      decision: 'exited',
+      reason: 'rotated_out',
+      detail: {
+        weakestSigma: weakest.sigma,
+        weakestOnBoard: weakest.onBoard,
+        candidate: candidate.symbol,
+        candidateSigma: candidate.forecastSigmas,
+        edge,
+        markPriceE4: mark.markPriceE4,
+      },
+      modelRunId: ranked.modelRunId,
+    },
+  ]);
+  log.info(
+    `Stock rotation (${book}): closed ${weakest.order.symbol} (sigma ${weakest.sigma.toFixed(2)}) ` +
+      `to make room — ${candidate.symbol} scores ${candidate.forecastSigmas.toFixed(2)}, edge ${edge.toFixed(2)}`,
+  );
+  return true;
 }
