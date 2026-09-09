@@ -113,7 +113,8 @@ def _parse_form4(xml_bytes: bytes) -> list[dict]:
 
 def ingest(symbols: list[str] | None, incremental: bool) -> None:
     ua = _ua()
-    con = sqlite3.connect(DB)
+    con = sqlite3.connect(DB, timeout=120)
+    con.execute("pragma busy_timeout = 120000")
     universe = symbols or [
         r[0] for r in con.execute("select symbol from tracked_underlyings where active=1 order by symbol")
     ]
