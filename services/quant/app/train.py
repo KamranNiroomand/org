@@ -243,11 +243,15 @@ TARGETS: dict[str, TargetSpec] = {
     # cannot predict. Counted on running.
     "dir": TargetSpec(5, DIR_COLS, LABEL_VOL_WINDOW, 4, include_news=True, label_kind="vol_scaled_xs"),
     # Stock engine: ~1-4 week swings.
-    "stk_short": TargetSpec(21, STOCK_SHORT_COLS, 21, 4, include_news=True),
+    # Trials #30/#31 (2026-09-09): the cross-sectionally demeaned label,
+    # proven on dir (trial #28: IC 0.0074 -> 0.0110, t 1.45 -> 1.98),
+    # applied to the stock targets whose ranking and sizing are just as
+    # cross-sectional. Counted per target — each is its own config.
+    "stk_short": TargetSpec(21, STOCK_SHORT_COLS, 21, 4, include_news=True, label_kind="vol_scaled_xs"),
     # Stock engine: ~6-12 month positions. Two folds until the bar corpus
     # is deep enough for four (the CV math, not a preference: a 126-day
     # horizon plus purge eats ~128 training days per fold).
-    "stk_long": TargetSpec(126, STOCK_LONG_COLS, 63, 2, include_news=True, min_train_days=180),
+    "stk_long": TargetSpec(126, STOCK_LONG_COLS, 63, 2, include_news=True, min_train_days=180, label_kind="vol_scaled_xs"),
 }
 
 
