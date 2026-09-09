@@ -926,6 +926,7 @@ let panelTask: ReturnType<typeof cron.schedule> | null = null;
 let exitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stockExitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stalenessHealTask: ReturnType<typeof cron.schedule> | null = null;
+let skewAgentHealTask: ReturnType<typeof cron.schedule> | null = null;
 let retierTask: ReturnType<typeof cron.schedule> | null = null;
 const selfHealAttemptsToday = { day: '', count: 0 };
 let lastResult: NightlyResult | null = null;
@@ -1286,6 +1287,39 @@ export function startScheduler(log: FastifyBaseLogger): void {
       { timezone: config.market.captureTimezone },
     );
     log.info('Market staleness self-heal scheduled (hourly, reader only)');
+
+    // Same hourly heartbeat, second duty: a board with no agent reads is
+    // the skew map showing an empty "worth looking into" strip while
+    // real candidates sit one day back — found live (2026-09-09: EIX and
+    // INTC flagged on the 09-07 board, invisible because the UI shows
+    // the newest board and the 06:00 job that would have judged it slept
+    // with the laptop). Idempotent per (day, symbol) and rate-limited by
+    // the same principle as the pull heal: one attempt per hour is
+    // plenty, and a day whose reads exist is a no-op query.
+    skewAgentHealTask = cron.schedule(
+      '20 8-18 * * 1-5',
+      () => {
+        void (async () => {
+          try {
+            const { runSkewAgentForLatestDay } = await import('./agents/skewReader.js');
+            const { latestSkewReads } = await import('./agents/skewReader.js');
+            const { marketDb: mdb } = await import('../db/market/index.js');
+            const { optionQuotes: oq } = await import('../db/market/schema.js');
+            const { sql: dsql } = await import('drizzle-orm');
+            const day = mdb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d;
+            if (!day || latestSkewReads(day).length > 0) return;
+            log.info(`Skew agent self-heal: board ${day} has no reads — judging it`);
+            const r = await runSkewAgentForLatestDay();
+            log.info(`Skew agent self-heal: ${r.read} read, ${r.skipped} skipped (${r.day})`);
+            if (r.errors.length > 0) log.warn(`Skew agent self-heal: ${r.errors.slice(0, 2).join('; ')}`);
+          } catch (err) {
+            log.warn(`Skew agent self-heal failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        })();
+      },
+      { timezone: config.market.captureTimezone },
+    );
+    log.info('Skew agent self-heal scheduled (hourly 08-18 ET, reader only)');
   }
 
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
@@ -1364,6 +1398,8 @@ export function stopScheduler(): void {
   stockExitRecheckTask = null;
   stalenessHealTask?.stop();
   stalenessHealTask = null;
+  skewAgentHealTask?.stop();
+  skewAgentHealTask = null;
   retierTask?.stop();
   retierTask = null;
 }
