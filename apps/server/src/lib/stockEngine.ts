@@ -476,9 +476,9 @@ export async function runStockEntries(
     result.rejections.push({ symbol, reason });
     decisions.push({ day, book, symbol, decision: 'rejected', reason, detail, modelRunId });
   };
-  const sectorCounts = { ...capacity.sectorCounts };
-  const held = new Set(capacity.heldSymbols);
-  let remainingCashE4 = capacity.freeCashE4;
+  const sectorCounts = { ...capacityNow.sectorCounts };
+  const held = new Set(capacityNow.heldSymbols);
+  let remainingCashE4 = capacityNow.freeCashE4;
   const perPositionE4 = Math.floor(capacity.bookCapitalE4 / maxPositions);
 
   // The stop each candidate would actually get, computed once: sizing is
@@ -515,7 +515,7 @@ export async function runStockEntries(
   }
 
   for (const pick of picks.slice(0, PANEL_CANDIDATES)) {
-    if (result.opened.length >= slots) {
+    if (result.opened.length >= slotsNow) {
       pushRejection(pick.symbol, 'slots_full');
       continue;
     }
