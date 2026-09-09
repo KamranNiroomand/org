@@ -101,7 +101,8 @@ def _parse_ptr(pdf_bytes: bytes) -> list[dict]:
 
 
 def ingest(years: list[int]) -> None:
-    con = sqlite3.connect(DB)
+    con = sqlite3.connect(DB, timeout=120)
+    con.execute("pragma busy_timeout = 120000")
     parsed = rows_written = skipped = errors = 0
     for year in years:
         try:
