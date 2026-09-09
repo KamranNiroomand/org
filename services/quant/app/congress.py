@@ -58,7 +58,7 @@ def _get(url: str) -> bytes:
 
 def _iso(mdY: str) -> str:
     m, d, y = mdY.split("/")
-    return f"{y}-{m}-{d}"
+    return f"{y}-{m.zfill(2)}-{d.zfill(2)}"  # unpadded months break string date sorts
 
 
 def _year_index(year: int) -> list[tuple[str, str, str]]:
