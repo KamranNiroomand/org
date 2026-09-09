@@ -32,6 +32,7 @@ dependencies = [
     "lightgbm>=4.5",
     "scikit-learn>=1.6",
     "rapidfuzz>=3.10",
+    "pypdf>=6.18.0",
 ]
 
 [project.optional-dependencies]

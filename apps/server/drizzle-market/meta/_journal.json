@@ -85,6 +85,20 @@
       "when": 1787784927755,
       "tag": "0011_open_miek",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1788959768807,
+      "tag": "0012_insider_trades",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1788959881757,
+      "tag": "0013_congress_trades",
+      "breakpoints": true
     }
   ]
 }

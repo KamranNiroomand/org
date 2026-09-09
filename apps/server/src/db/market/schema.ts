@@ -1,4 +1,4 @@
-import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /**
  * Market research data — option chains, bars, rates, corporate events.
@@ -502,5 +502,68 @@ export const docMentions = sqliteTable(
   (t) => [
     uniqueIndex('doc_mentions_doc_underlying_uq').on(t.documentId, t.underlying),
     index('doc_mentions_underlying_idx').on(t.underlying),
+  ],
+);
+
+
+/**
+ * SEC Form 4 insider transactions, one row per (filing, insider, code,
+ * transaction date). Free, backfillable years deep, and the literature's
+ * best-documented "smart money" signal is the clustered officer BUY —
+ * which is why the feature layer (services/quant insider features)
+ * aggregates net open-market buying, not raw filing counts. Ingested by
+ * services/quant/app/insider.py on the runner; a ride-along source until
+ * a counted trial earns it a feature-set seat.
+ */
+export const insiderTrades = sqliteTable(
+  'insider_trades',
+  {
+    accession: text('accession').notNull(),
+    symbol: text('symbol').notNull(),
+    filedDate: text('filed_date').notNull(),
+    transDate: text('trans_date'),
+    insiderName: text('insider_name').notNull(),
+    isOfficer: integer('is_officer').notNull().default(0),
+    isDirector: integer('is_director').notNull().default(0),
+    /** Form 4 transaction code: P = open-market purchase, S = sale, A = award/grant, etc. */
+    code: text('code').notNull(),
+    shares: real('shares'),
+    price: real('price'),
+    valueUsd: real('value_usd'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.accession, t.insiderName, t.code, t.transDate] }),
+    index('insider_symbol_filed_idx').on(t.symbol, t.filedDate),
+  ],
+);
+
+
+/**
+ * Congressional periodic transaction reports (STOCK Act PTRs) — the raw
+ * feed every paid "Pelosi tracker" resells, ingested from the House
+ * Clerk's own daily zip by services/quant/app/congress.py. Amounts are
+ * the disclosure's ranges (a $1,001-$15,000 bucket, not an exact fill);
+ * the feature layer uses range midpoints, signed by buy/sell. Filings
+ * lag trades by up to 45 days by law — the trans/filed date gap IS the
+ * signal's latency and must never be paper-covered. Ride-along source
+ * until a counted trial earns it a feature-set seat.
+ */
+export const congressTrades = sqliteTable(
+  'congress_trades',
+  {
+    docId: text('doc_id').notNull(),
+    member: text('member').notNull(),
+    chamber: text('chamber').notNull().default('house'),
+    symbol: text('symbol').notNull(),
+    /** P = purchase, S = sale (partial or full collapsed together). */
+    code: text('code').notNull(),
+    transDate: text('trans_date'),
+    filedDate: text('filed_date').notNull(),
+    amountMin: real('amount_min'),
+    amountMax: real('amount_max'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.docId, t.symbol, t.code, t.transDate] }),
+    index('congress_symbol_filed_idx').on(t.symbol, t.filedDate),
   ],
 );
