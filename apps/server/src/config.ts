@@ -205,6 +205,16 @@ const schema = z.object({
   // sector cap's blind spot (an AI book spread across three GICS sectors
   // passes every sector check and still moves as one position).
   STOCK_MAX_BOOK_CORRELATION: z.coerce.number().min(0).max(1).default(0.7),
+  // Slot rotation (2026-09-09): with every slot occupied, a mediocre
+  // holding that never quite hits its stop camps forever while stronger
+  // candidates queue outside. When today's board carries a non-held
+  // candidate whose sigma-unit forecast beats the weakest eligible
+  // holding's by at least this edge, the weakest is closed to make room
+  // — the normal entry gates still decide what actually fills the slot.
+  STOCK_ROTATION_MIN_EDGE_SIGMAS: z.coerce.number().min(0).default(0.4),
+  // A position must survive this many calendar days before rotation can
+  // touch it — hysteresis against churning in and out on forecast noise.
+  STOCK_ROTATION_MIN_HOLD_DAYS: z.coerce.number().int().min(0).default(7),
   PAPER_SPREAD_HAIRCUT_PCT: z.coerce.number().min(0).max(0.2).default(0.03),
   PAPER_SPREAD_HAIRCUT_MIN_E4: z.coerce.number().int().min(0).default(500),
   // Artificial starting balance for the paper book, in whole dollars.
@@ -459,6 +469,8 @@ export const config = {
       exitRecheckCron: env.STOCK_EXIT_RECHECK_CRON,
       distressMaxReviewsPerDay: env.STOCK_DISTRESS_MAX_REVIEWS_PER_DAY,
       maxBookCorrelation: env.STOCK_MAX_BOOK_CORRELATION,
+      rotationMinEdgeSigmas: env.STOCK_ROTATION_MIN_EDGE_SIGMAS,
+      rotationMinHoldDays: env.STOCK_ROTATION_MIN_HOLD_DAYS,
     },
     /** See SEC_EDGAR_USER_AGENT above — null disables EDGAR ingestion cleanly. */
     edgarUserAgent: env.SEC_EDGAR_USER_AGENT ?? null,
