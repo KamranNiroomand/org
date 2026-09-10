@@ -254,7 +254,12 @@ const schema = z.object({
   // Entries wait until the champion dir model's daily IC clears its own
   // Bonferroni hurdle (metrics.ic_clears_hurdle) — an unproven edge does
   // not spend option spread+theta. Exits/forecasts/ledgers unaffected.
-  AUTO_ENTRY_REQUIRE_SIGNIFICANCE: z.coerce.boolean().default(true),
+  // NOTE z.coerce.boolean() is a trap: Boolean('false') === true, so an
+  // env of "false" read as ON — the gate kept refusing entries a day
+  // after being "disabled" (found live 2026-09-10). The file's own
+  // `bool` helper parses properly; unset now means OFF, matching the
+  // paper phase — arm it explicitly with =true when capital is real.
+  AUTO_ENTRY_REQUIRE_SIGNIFICANCE: bool,
   AUTO_ENTRY_CAPITAL_RESERVE_PCT: z.coerce.number().min(0).max(1).default(0.2),
   // The maturity band an entry may be opened in. The forecast is a single
   // fixed horizon (5 trading days) annualized into a constant drift, so a
