@@ -699,7 +699,24 @@ def _forecast_inputs(
     """
     booster, manifest = load_model(model_dir)
     metrics = manifest["metrics"]
-    if not metrics["beats_baseline"] and not force:
+    # The refusal criterion depends on what the label made claimable. For
+    # the demeaned label (vol_scaled_xs, trial #28) the RMSE-vs-mean
+    # baseline is unwinnable BY CONSTRUCTION: the cross-sectional mean is
+    # ~0, so "predict zero" is near-optimal in RMSE while contributing
+    # nothing to ranking — the only claim this system trades on. A
+    # rank model's servable evidence is its daily rank IC; refusing on an
+    # RMSE contest it was never trained to win would permanently refuse
+    # every honest xs-label model (found 2026-09-10: the promoted
+    # champion, t=1.98, was unservable without force).
+    label_kind = (manifest.get("label") or {}).get("kind")
+    if label_kind == "vol_scaled_xs":
+        if metrics.get("ic_mean", 0.0) <= 0.0 and not force:
+            raise SystemExit(
+                f"Model {manifest['run_id']} has non-positive out-of-fold daily rank IC "
+                f"({metrics.get('ic_mean')}) — no rank skill to serve. "
+                f"Pass force=True to rank against it anyway."
+            )
+    elif not metrics["beats_baseline"] and not force:
         raise SystemExit(
             f"Model {manifest['run_id']} does not beat the mean baseline out-of-fold "
             f"(RMSE {metrics['model_rmse']:.5f} vs baseline {metrics['baseline_rmse']:.5f}, "
