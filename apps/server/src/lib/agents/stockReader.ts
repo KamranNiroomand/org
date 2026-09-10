@@ -175,7 +175,7 @@ export async function runStockReader(day: string, rows: StockRowForAgent[]): Pro
 export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRunResult> {
   const { stockRank } = await import('../quant.js');
   const { skewAgentReads } = await import('../../db/schema.js');
-  const { marketDb } = await import('../../db/market/index.js');
+  const marketMod = await import('../../db/market/index.js');
   const { congressTrades, insiderTrades } = await import('../../db/market/schema.js');
   const { sql } = await import('drizzle-orm');
   const { nyToday } = await import('../options/positionHealth.js');
@@ -227,21 +227,21 @@ export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRu
     );
     for (const symbol of symbols) {
       const pick = picks.find((p) => p.symbol === symbol);
-      const insider = marketDb
+      const insider = marketMod.marketDb
         .select({
           net: sql<number | null>`sum(case when ${insiderTrades.code}='P' then ${insiderTrades.valueUsd} when ${insiderTrades.code}='S' then -${insiderTrades.valueUsd} else 0 end)`,
         })
         .from(insiderTrades)
         .where(and(eq(insiderTrades.symbol, symbol), sql`${insiderTrades.filedDate} >= ${cutoff}`))
         .get();
-      const congress = marketDb
+      const congress = marketMod.marketDb
         .select({
           net: sql<number | null>`sum((${congressTrades.amountMin}+${congressTrades.amountMax})/2.0 * case when ${congressTrades.code}='P' then 1 else -1 end)`,
         })
         .from(congressTrades)
         .where(and(eq(congressTrades.symbol, symbol), sql`${congressTrades.filedDate} >= ${cutoff}`))
         .get();
-      const buyers = marketDb
+      const buyers = marketMod.marketDb
         .select({ member: congressTrades.member })
         .from(congressTrades)
         .where(and(eq(congressTrades.symbol, symbol), eq(congressTrades.code, 'P'), sql`${congressTrades.filedDate} >= ${cutoff}`))
