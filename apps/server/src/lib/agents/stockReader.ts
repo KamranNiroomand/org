@@ -29,6 +29,13 @@ research signal the system has. Discipline:
 
 - Outside view first: most model picks are noise; most insider/political
   buying is routine; a high model rank alone is weak evidence.
+- Valuation is context, not verdict: a headline trailing P/E is a
+  trap — weigh the forward P/E against it (a big gap means earnings are
+  inflecting), and read distance-from-52-week-high as where in its own
+  cycle the name sits. A great story at a silly price is an avoid; a
+  sound business marked down 30% while insiders buy is the classic
+  candidate. Company scale matters: a $50B name can double in ways a
+  $2T name cannot.
 - Convergence is the story: a name where the statistical model, the
   news-reading panel, the options-positioning map, and real insider or
   congressional money AGREE deserves conviction; one signal alone
@@ -75,6 +82,10 @@ export interface StockRowForAgent {
   ret1mPct: number | null;
   panelStance: string | null;
   skewVerdict: string | null;
+  trailingPe: number | null;
+  forwardPe: number | null;
+  marketCapUsd: number | null;
+  pctOff52wHigh: number | null;
   /** Net open-market insider buying, trailing 90 days, dollars. */
   insiderNet90dUsd: number | null;
   /** Net congressional buying (range midpoints), trailing 90 days by FILED date. */
@@ -181,7 +192,7 @@ export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRu
   const { stockRank } = await import('../quant.js');
   const { skewAgentReads } = await import('../../db/schema.js');
   const marketMod = await import('../../db/market/index.js');
-  const { congressTrades, insiderTrades } = await import('../../db/market/schema.js');
+  const { congressTrades, insiderTrades, fundamentalsSnapshots, equityBars } = await import('../../db/market/schema.js');
   const { sql } = await import('drizzle-orm');
   const { nyToday } = await import('../options/positionHealth.js');
   const { stancesForSymbols } = await import('../stockEngine.js');
@@ -232,6 +243,29 @@ export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRu
     );
     for (const symbol of symbols) {
       const pick = picks.find((p) => p.symbol === symbol);
+      const fundamentals = marketMod.marketDb
+        .select({
+          trailingPe: fundamentalsSnapshots.trailingPe,
+          forwardPe: fundamentalsSnapshots.forwardPe,
+          marketCap: fundamentalsSnapshots.marketCap,
+          high52w: fundamentalsSnapshots.high52w,
+        })
+        .from(fundamentalsSnapshots)
+        .where(eq(fundamentalsSnapshots.symbol, symbol))
+        .orderBy(desc(fundamentalsSnapshots.asOfDay))
+        .limit(1)
+        .get();
+      const lastClose = marketMod.marketDb
+        .select({ c: equityBars.closeE4 })
+        .from(equityBars)
+        .where(eq(equityBars.symbol, symbol))
+        .orderBy(desc(equityBars.day))
+        .limit(1)
+        .get();
+      const pctOffHigh =
+        fundamentals?.high52w && lastClose?.c
+          ? ((lastClose.c / 10_000) / fundamentals.high52w - 1) * 100
+          : null;
       const insider = marketMod.marketDb
         .select({
           net: sql<number | null>`sum(case when ${insiderTrades.code}='P' then ${insiderTrades.valueUsd} when ${insiderTrades.code}='S' then -${insiderTrades.valueUsd} else 0 end)`,
@@ -258,6 +292,10 @@ export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRu
         modelRank: pick?.rank ?? null,
         forecastSigmas: pick?.forecastSigmas ?? null,
         ret1mPct: null,
+        trailingPe: fundamentals?.trailingPe ?? null,
+        forwardPe: fundamentals?.forwardPe ?? null,
+        marketCapUsd: fundamentals?.marketCap ?? null,
+        pctOff52wHigh: pctOffHigh,
         panelStance: stances[symbol]?.stance ?? null,
         skewVerdict: skewReads.get(symbol) ?? null,
         insiderNet90dUsd: insider?.net ?? null,
