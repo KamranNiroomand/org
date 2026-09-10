@@ -132,6 +132,18 @@ beforeEach(() => {
 });
 
 describe('the significance gate', () => {
+  // OFF by default in the paper phase (see config.ts's coercion-trap
+  // note); these tests arm it the way a live-capital deployment would.
+  const cfg = config.market.autoEntry as { requireSignificance: boolean };
+  let saved: boolean;
+  beforeEach(() => {
+    saved = cfg.requireSignificance;
+    cfg.requireSignificance = true;
+  });
+  afterEach(() => {
+    cfg.requireSignificance = saved;
+  });
+
   it('opens nothing while the champion misses its hurdle, but logs why', async () => {
     marketDb.delete(modelRuns).run();
     seedChampion(false);

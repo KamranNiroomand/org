@@ -295,6 +295,10 @@ function OrderRow({ order, onClosed }: { order: PaperOrder; onClosed: () => void
           {order.quantity} @ {usd(order.entryPriceE4)}
           {order.entryBasis === 'modelled' && ' · estimated'}
         </div>
+        <div className="tnum mt-0.5 text-muted">
+          bought {order.openedAt.slice(0, 10)}
+          {order.status === 'closed' && order.closedAt && <> · sold {order.closedAt.slice(0, 10)}</>}
+        </div>
         {autoManaged && order.status === 'open' && (
           <div className="tnum mt-0.5 text-muted">
             target {usd(order.targetExitPriceE4!)} · stop {usd(order.stopLossPriceE4!)} · by{' '}
@@ -417,6 +421,7 @@ export function PaperBook() {
   // fact must travel with the numbers, not be buried in a README.
   const { data: runs } = useQuery({ queryKey: ['model-runs', 'dir'], queryFn: () => optionsApi.modelRuns('dir') });
 
+  const [positionFilter, setPositionFilter] = useState<'open' | 'closed' | 'all'>('open');
   const invalidate = () => void qc.invalidateQueries({ queryKey: ['paper-equity'] });
   const mark = useMutation({ mutationFn: () => optionsApi.markNow(), onSuccess: invalidate });
   const checkHealth = useMutation({ mutationFn: () => optionsApi.checkHealthNow(), onSuccess: invalidate });
@@ -505,11 +510,28 @@ export function PaperBook() {
         {data.orders.length === 0 ? (
           <Empty title="No paper trades yet" hint="Open one above with an OCC symbol from a captured chain." />
         ) : (
-          <div className="divide-y divide-border">
-            {data.orders.map((o) => (
-              <OrderRow key={o.id} order={o} onClosed={invalidate} />
-            ))}
-          </div>
+          <>
+            <div className="flex items-center gap-1.5 border-b border-border px-4 py-2 text-xs">
+              {(['open', 'closed', 'all'] as const).map((f) => (
+                <Button
+                  key={f}
+                  size="sm"
+                  variant={positionFilter === f ? 'secondary' : 'ghost'}
+                  onClick={() => setPositionFilter(f)}
+                >
+                  {f === 'open' ? `Open (${open.length})` : f === 'closed' ? `Closed (${closed.length})` : 'All'}
+                </Button>
+              ))}
+            </div>
+            <div className="divide-y divide-border">
+              {(positionFilter === 'all'
+                ? data.orders
+                : data.orders.filter((o) => o.status === positionFilter)
+              ).map((o) => (
+                <OrderRow key={o.id} order={o} onClosed={invalidate} />
+              ))}
+            </div>
+          </>
         )}
       </Card>
     </div>
