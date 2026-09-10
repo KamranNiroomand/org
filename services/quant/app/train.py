@@ -164,16 +164,12 @@ DIR_COLS = [
     "risk_reversal_25d",
     "put_call_oi_ratio",
     "put_call_volume_ratio",
-    # Trial #29 (2026-09-09): the two remaining unwired news windows and
-    # the earnings clock. The 21-day news columns give the model the
-    # slow-burn coverage story the 1d/5d windows cut off; the earnings
-    # features carry post-earnings drift, the best-documented anomaly in
-    # the cross-sectional literature. Both families already serve-join in
-    # _forecast_inputs (the trial-24 lesson, pre-paid). Counted.
-    "news_count_21d",
-    "news_sent_net_21d",
-    "days_since_earnings",
-    "last_earnings_sent",
+    # Trial #29 (2026-09-09) RAN AND WAS REJECTED: 21d news windows +
+    # earnings clock dropped dir's IC 0.0110 -> 0.0074 and t 1.98 -> 1.35
+    # on the full ten-year corpus (artifact 2026-09-10-dir-h5-
+    # 3bc874ad4105). Post-earnings drift may still live at the STOCK
+    # horizons; for a 5-day options model it was dilution. Reverted to
+    # the trial-#28 set — the ledger keeps the attempt (count stays 31).
 ]
 
 STOCK_SHORT_COLS = [
