@@ -213,10 +213,10 @@ export async function runSkewReader(
  * answer over the proxy URL, so the map's "held" ring means what it says.
  */
 export async function runSkewAgentForLatestDay(): Promise<SkewAgentRunResult> {
-  const { marketDb } = await import('../../db/market/index.js');
+  const marketMod = await import('../../db/market/index.js');
   const { optionQuotes } = await import('../../db/market/schema.js');
   const { sql } = await import('drizzle-orm');
-  const day = marketDb
+  const day = marketMod.marketDb
     .select({ d: sql<string | null>`max(${optionQuotes.tradingDay})` })
     .from(optionQuotes)
     .get()?.d;
