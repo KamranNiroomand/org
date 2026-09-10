@@ -809,3 +809,38 @@ export const skewAgentReads = sqliteTable(
   },
   (t) => [uniqueIndex('skew_agent_day_symbol_uq').on(t.day, t.symbol)],
 );
+
+
+/**
+ * The stock reader's daily verdicts — the skew reader's sibling for the
+ * stock boards, same standalone-by-design contract: no engine reads
+ * this table, and its probabilities are Brier-scored against outcomes
+ * before its judgment is allowed to influence anything. One row per
+ * (day, book, symbol): the SHORT (3-week) and LONG (6-month) boards get
+ * separate reads because "worth research hours" is a different question
+ * at different horizons. Unlike the skew reader, this agent DOES see
+ * the model's rank and the insider/congressional tape — its job is to
+ * synthesize every research layer into one plain sentence, not to be
+ * blind to them; independence from the ENGINES is what the contract
+ * protects, not ignorance of the data.
+ */
+export const stockAgentReads = sqliteTable(
+  'stock_agent_reads',
+  {
+    id: id(),
+    day: text('day').notNull(),
+    book: text('book', { enum: ['short', 'long'] }).notNull(),
+    symbol: text('symbol').notNull(),
+    verdict: text('verdict', {
+      enum: ['enter_candidate', 'avoid', 'hold_if_held', 'ignore'],
+    }).notNull(),
+    /** P(symbol outperforms its sector over the book's horizon), clamped
+     * [0.05, 0.95] in code — the panel's scoreable question, one grader. */
+    probability: real('probability').notNull(),
+    reasoning: text('reasoning').notNull(),
+    falsifier: text('falsifier').notNull(),
+    inputs: text('inputs', { mode: 'json' }).$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: now(),
+  },
+  (t) => [uniqueIndex('stock_agent_day_book_symbol_uq').on(t.day, t.book, t.symbol)],
+);

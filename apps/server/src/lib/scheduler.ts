@@ -236,6 +236,12 @@ export async function runNightly(log: FastifyBaseLogger, reason: string): Promis
           const skewRead = await runSkewAgentForLatestDay();
           log.info(`Skew agent: ${skewRead.read} read, ${skewRead.skipped} already done (${skewRead.day})`);
           if (skewRead.errors.length > 0) log.warn(`Skew agent: ${skewRead.errors.slice(0, 3).join('; ')}`);
+          // The stock reader rides the same slot — same standalone
+          // contract, judging the stock boards instead of the skew map.
+          const { runStockReaderForLatestDay } = await import('./agents/stockReader.js');
+          const stockRead = await runStockReaderForLatestDay();
+          log.info(`Stock reader: ${stockRead.read} read, ${stockRead.skipped} already done (${stockRead.day})`);
+          if (stockRead.errors.length > 0) log.warn(`Stock reader: ${stockRead.errors.slice(0, 3).join('; ')}`);
         } catch (err) {
           result.errors.push(`Skew agent: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -1307,11 +1313,20 @@ export function startScheduler(log: FastifyBaseLogger): void {
             const { optionQuotes: oq } = await import('../db/market/schema.js');
             const { sql: dsql } = await import('drizzle-orm');
             const day = mdb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d;
-            if (!day || latestSkewReads(day).length > 0) return;
-            log.info(`Skew agent self-heal: board ${day} has no reads — judging it`);
-            const r = await runSkewAgentForLatestDay();
-            log.info(`Skew agent self-heal: ${r.read} read, ${r.skipped} skipped (${r.day})`);
-            if (r.errors.length > 0) log.warn(`Skew agent self-heal: ${r.errors.slice(0, 2).join('; ')}`);
+            if (day && latestSkewReads(day).length === 0) {
+              log.info(`Skew agent self-heal: board ${day} has no reads — judging it`);
+              const r = await runSkewAgentForLatestDay();
+              log.info(`Skew agent self-heal: ${r.read} read, ${r.skipped} skipped (${r.day})`);
+              if (r.errors.length > 0) log.warn(`Skew agent self-heal: ${r.errors.slice(0, 2).join('; ')}`);
+            }
+            // Stock reader: same heal, keyed on TODAY having no reads yet.
+            const { latestStockReads } = await import('./agents/stockReader.js');
+            const { runStockReaderForLatestDay: healStockReads } = await import('./agents/stockReader.js');
+            if (latestStockReads(nyToday()).length === 0) {
+              const sr = await healStockReads();
+              log.info(`Stock reader self-heal: ${sr.read} read (${sr.day})`);
+              if (sr.errors.length > 0) log.warn(`Stock reader self-heal: ${sr.errors.slice(0, 2).join('; ')}`);
+            }
           } catch (err) {
             log.warn(`Skew agent self-heal failed: ${err instanceof Error ? err.message : String(err)}`);
           }

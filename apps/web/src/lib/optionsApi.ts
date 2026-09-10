@@ -294,7 +294,19 @@ export interface SkewAgentRead {
   falsifier: string;
 }
 
+export interface StockAgentRead {
+  day: string;
+  book: 'short' | 'long';
+  symbol: string;
+  verdict: 'enter_candidate' | 'avoid' | 'hold_if_held' | 'ignore';
+  probability: number;
+  reasoning: string;
+  falsifier: string;
+}
+
 export const optionsApi = {
+  stockAgentReads: () => api.get<{ day: string; reads: StockAgentRead[] }>('/api/agents/stock-reads'),
+  runStockAgent: () => api.post<{ day: string; read: number; skipped: number; errors: string[] }>('/api/agents/stock-reads', {}),
   skewMap: () => api.get<SkewMapResponse>('/api/options/skew'),
   skewAgentReads: () => api.get<{ day: string; reads: SkewAgentRead[] }>('/api/options/skew-agent'),
   runSkewAgent: () => api.post<{ day: string; read: number; skipped: number; errors: string[] }>('/api/options/skew-agent', {}),
