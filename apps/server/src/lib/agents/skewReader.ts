@@ -169,6 +169,11 @@ export async function runSkewReader(
         reasoning: string;
         falsifier: string;
       };
+      // A verdict must not contradict its own committed probability —
+      // found live: a bearish read (insider selling, model expects lag,
+      // P=0.40) labeled enter_candidate. The probability is the scored
+      // commitment; the label follows it.
+      if (read.verdict === 'enter_candidate' && read.probability < 0.5) read.verdict = 'avoid';
       db.insert(skewAgentReads)
         .values({
           id: newId(),
