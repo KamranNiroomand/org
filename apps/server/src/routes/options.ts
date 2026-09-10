@@ -193,6 +193,23 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     return result;
   });
 
+  // Deliberately NOT under /api/stocks/: a proxying reader forwards that
+  // prefix to the runner, and this agent runs on the READER (org.db +
+  // Anthropic key live here).
+  app.post('/api/agents/stock-reads', async (_req, reply) => {
+    const { runStockReaderForLatestDay } = await import('../lib/agents/stockReader.js');
+    const result = await runStockReaderForLatestDay();
+    if (result.read === 0 && result.errors.length > 0) return reply.code(503).send(result);
+    return result;
+  });
+
+  app.get('/api/agents/stock-reads', async () => {
+    const { latestStockReads } = await import('../lib/agents/stockReader.js');
+    const { nyToday } = await import('../lib/options/positionHealth.js');
+    const day = nyToday();
+    return { day, reads: latestStockReads(day) };
+  });
+
   app.get('/api/options/skew-agent', async (_req, reply) => {
     const { latestSkewReads } = await import('../lib/agents/skewReader.js');
     const { sql: dsql } = await import('drizzle-orm');

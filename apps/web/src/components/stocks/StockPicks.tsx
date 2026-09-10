@@ -7,6 +7,7 @@ import { StatTile } from '../charts';
 import { e4ToUsd, stocksApi, type StockOrderRow } from '../../lib/optionsApi';
 import { ModelPerformance } from '../options/ModelPerformance';
 import { SkewMap } from './SkewMap';
+import { optionsApi, type StockAgentRead } from '../../lib/optionsApi';
 
 function usd(e4: number): string {
   return formatMoney(money(Math.round(e4ToUsd(e4) * 100), 'USD'));
@@ -192,6 +193,8 @@ export function StockPicks() {
         </div>
       </div>
 
+      {view === 'picks' && <StockAgentReads book={book} />}
+
       {view === 'model' && (
         <Card className="overflow-hidden">
           <CardHeader
@@ -278,6 +281,55 @@ function DecisionLog({ book }: { book: 'short' | 'long' }) {
           </div>
         ))}
       </div>
+    </Card>
+  );
+}
+
+
+/** The stock reader's daily verdicts for one book — the skew map's
+ * "worth looking into" idea, pointed at the stock boards. Standalone by
+ * contract: no engine reads these; the probabilities are scored. */
+function StockAgentReads({ book }: { book: 'short' | 'long' }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['stock-agent-reads'],
+    queryFn: () => optionsApi.stockAgentReads(),
+    refetchInterval: 5 * 60 * 1000,
+  });
+  if (isLoading) return <Skeleton className="h-24" />;
+  const reads = (data?.reads ?? []).filter((r) => r.book === book);
+  const candidates = reads.filter((r) => r.verdict === 'enter_candidate');
+  const tone = (v: StockAgentRead['verdict']) =>
+    v === 'enter_candidate' ? 'accent' : v === 'avoid' ? 'danger' : 'neutral';
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader
+        title="Worth looking into"
+        subtitle="The reading agent's take on today's candidates — every signal the system has (models, news, option positioning, insider and congressional buying) folded into plain words. Homework assignments, never orders; its accuracy is on the record."
+      />
+      {reads.length === 0 ? (
+        <Empty
+          title={`No reads for ${data?.day ?? 'today'} yet`}
+          hint="The agent runs each morning and self-heals hourly — reads appear here once today's board is judged."
+        />
+      ) : (
+        <div className="divide-y divide-border">
+          {candidates.length === 0 && (
+            <div className="px-4 py-3 text-xs text-muted">
+              Nothing worth entering today — most days there is nothing, and the agent saying so is it working.
+            </div>
+          )}
+          {[...candidates, ...reads.filter((r) => r.verdict !== 'enter_candidate')].map((r) => (
+            <div key={`${r.book}:${r.symbol}`} className="px-4 py-3 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="font-mono font-medium">{r.symbol}</span>
+                <Badge tone={tone(r.verdict) as never}>{r.verdict.replace(/_/g, ' ')}</Badge>
+                <span className="tnum text-muted">{Math.round(r.probability * 100)}% to beat its peers</span>
+              </div>
+              <div className="mt-1 whitespace-pre-line text-muted">{r.reasoning.split('\n\n')[0]}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </Card>
   );
 }
