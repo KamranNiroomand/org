@@ -1287,3 +1287,62 @@ class TestSolveMissingHeldIv:
         )
         out = _solve_missing_iv(quotes, "2026-08-25", [(30, 0.04)], 0.0)
         assert out["iv"][0] is None
+
+
+class TestXsLabelServingGate:
+    """The demeaned label cannot win an RMSE contest against predict-zero
+    by construction — its servable claim is rank IC (see _forecast_inputs)."""
+
+    def _manifest(self, tmp_path, ic_mean, beats_baseline):
+        import json
+        import lightgbm as lgb
+        import numpy as np
+
+        d = tmp_path / "m"
+        d.mkdir()
+        X = np.random.RandomState(0).normal(size=(80, 2))
+        y = X[:, 0] * 0.1
+        booster = lgb.train({"objective": "regression", "verbosity": -1}, lgb.Dataset(X, y), num_boost_round=2)
+        booster.save_model(str(d / "model.txt"))
+        json.dump({"feature_cols": ["a", "b"]}, open(d / "features.json", "w"))
+        json.dump(
+            {
+                "run_id": "xs-test",
+                "horizon": 5,
+                "feature_cols": ["a", "b"],
+                "label": {"kind": "vol_scaled_xs", "vol_window": 21},
+                "metrics": {
+                    "ic_mean": ic_mean,
+                    "beats_baseline": beats_baseline,
+                    "model_rmse": 1.0,
+                    "baseline_rmse": 0.99,
+                    "information_coefficient": ic_mean,
+                },
+            },
+            open(d / "manifest.json", "w"),
+        )
+        return d
+
+    def test_positive_ic_serves_despite_losing_the_rmse_contest(self, tmp_path) -> None:
+        from app.rank import load_model, _forecast_inputs  # noqa: F401
+        import app.rank as rank_mod
+
+        d = self._manifest(tmp_path, ic_mean=0.011, beats_baseline=False)
+        # Reaching past the refusal is enough — data loading fails later
+        # on the toy manifest, but NOT with the baseline refusal.
+        try:
+            rank_mod._forecast_inputs("2026-01-02", d, 21, force=False)
+        except SystemExit as e:
+            assert "does not beat the mean baseline" not in str(e)
+            assert "non-positive" not in str(e)
+        except Exception:
+            pass  # downstream toy-data failures are fine; the gate passed
+
+    def test_non_positive_ic_is_refused(self, tmp_path) -> None:
+        import pytest as _pytest
+
+        import app.rank as rank_mod
+
+        d = self._manifest(tmp_path, ic_mean=-0.001, beats_baseline=False)
+        with _pytest.raises(SystemExit, match="non-positive"):
+            rank_mod._forecast_inputs("2026-01-02", d, 21, force=False)
