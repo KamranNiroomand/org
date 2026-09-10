@@ -36,6 +36,16 @@ research signal the system has. Discipline:
   sound business marked down 30% while insiders buy is the classic
   candidate. Company scale matters: a $50B name can double in ways a
   $2T name cannot.
+- Sum of the parts, for multi-business companies: name the distinct
+  businesses (e.g. a retailer that is also a cloud provider and an ad
+  platform), say which one actually carries the value, and judge THAT
+  business's quality — a blended multiple on a conglomerate hides the
+  crown jewel and the deadweight alike. Use rough splits you are
+  confident about; say "roughly" rather than inventing precision.
+- Net cash first: netCashUsd (from the company's own SEC filings) is
+  money in the till — mentally subtract it from marketCapUsd before
+  judging whether the price is rich. A company at a scary multiple
+  with a tenth of its value in cash is less scary than it looks.
 - Convergence is the story: a name where the statistical model, the
   news-reading panel, the options-positioning map, and real insider or
   congressional money AGREE deserves conviction; one signal alone
@@ -83,6 +93,9 @@ export interface StockRowForAgent {
   panelStance: string | null;
   skewVerdict: string | null;
   trailingPe: number | null;
+  /** Cash & equivalents + short-term investments − total debt, from SEC
+   * XBRL company facts (latest reported quarter). Null when unmapped. */
+  netCashUsd: number | null;
   forwardPe: number | null;
   marketCapUsd: number | null;
   pctOff52wHigh: number | null;
@@ -293,6 +306,7 @@ export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRu
         forecastSigmas: pick?.forecastSigmas ?? null,
         ret1mPct: null,
         trailingPe: fundamentals?.trailingPe ?? null,
+        netCashUsd: await netCashUsd(symbol),
         forwardPe: fundamentals?.forwardPe ?? null,
         marketCapUsd: fundamentals?.marketCap ?? null,
         pctOff52wHigh: pctOffHigh,
@@ -306,6 +320,62 @@ export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRu
     }
   }
   return runStockReader(day, rows);
+}
+
+/** CIK map + per-day net-cash cache — ~24 SEC calls a day, polite. */
+const cikCache: { map: Map<string, string> | null } = { map: null };
+const netCashCache = new Map<string, { day: string; value: number | null }>();
+
+async function netCashUsd(symbol: string): Promise<number | null> {
+  const today = new Date().toISOString().slice(0, 10);
+  const cached = netCashCache.get(symbol);
+  if (cached && cached.day === today) return cached.value;
+  try {
+    const ua = config.market.edgarUserAgent;
+    if (!ua) return null;
+    if (!cikCache.map) {
+      const res = await fetch('https://www.sec.gov/files/company_tickers.json', {
+        headers: { 'User-Agent': ua },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return null;
+      const raw = (await res.json()) as Record<string, { ticker: string; cik_str: number }>;
+      cikCache.map = new Map(Object.values(raw).map((r) => [r.ticker.toUpperCase(), String(r.cik_str).padStart(10, '0')]));
+    }
+    const cik = cikCache.map.get(symbol.toUpperCase());
+    if (!cik) return cache(symbol, today, null);
+    const res = await fetch(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`, {
+      headers: { 'User-Agent': ua },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return cache(symbol, today, null);
+    const facts = ((await res.json()) as { facts?: { 'us-gaap'?: Record<string, { units?: { USD?: Array<{ end: string; val: number; form?: string }> } }> } }).facts?.['us-gaap'];
+    if (!facts) return cache(symbol, today, null);
+    const latest = (tag: string): number | null => {
+      const rows = facts[tag]?.units?.USD;
+      if (!rows?.length) return null;
+      // Latest reported instant value from a 10-Q/10-K.
+      const usable = rows.filter((r) => !r.form || r.form.startsWith('10'));
+      const best = (usable.length ? usable : rows).reduce((a, b) => (b.end > a.end ? b : a));
+      return best.val;
+    };
+    const cash =
+      latest('CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents') ??
+      latest('CashAndCashEquivalentsAtCarryingValue') ??
+      0;
+    const shortTerm = latest('ShortTermInvestments') ?? latest('MarketableSecuritiesCurrent') ?? 0;
+    const debt =
+      (latest('LongTermDebtNoncurrent') ?? latest('LongTermDebt') ?? 0) +
+      (latest('LongTermDebtCurrent') ?? 0);
+    return cache(symbol, today, cash + shortTerm - debt);
+  } catch {
+    return cache(symbol, today, null);
+  }
+}
+
+function cache(symbol: string, day: string, value: number | null): number | null {
+  netCashCache.set(symbol, { day, value });
+  return value;
 }
 
 export function latestStockReads(day: string) {
