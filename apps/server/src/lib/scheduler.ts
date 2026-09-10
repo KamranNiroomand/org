@@ -1313,18 +1313,25 @@ export function startScheduler(log: FastifyBaseLogger): void {
             const { optionQuotes: oq } = await import('../db/market/schema.js');
             const { sql: dsql } = await import('drizzle-orm');
             const day = mdb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d;
-            if (day && latestSkewReads(day).length === 0) {
-              log.info(`Skew agent self-heal: board ${day} has no reads — judging it`);
+            // ALWAYS top up, never only-when-empty: a run cut off mid-board
+            // (deploy restart, crash) left 7 of ~100 names judged and the
+            // zero-reads condition then skipped the day forever — the
+            // "worth looking into" strip sat empty while the interesting
+            // names were simply never read (user report, 2026-09-10).
+            // Idempotence per (day, symbol) makes a complete day cost one
+            // map fetch and no LLM calls.
+            if (day) {
+              const before = latestSkewReads(day).length;
               const r = await runSkewAgentForLatestDay();
-              log.info(`Skew agent self-heal: ${r.read} read, ${r.skipped} skipped (${r.day})`);
-              if (r.errors.length > 0) log.warn(`Skew agent self-heal: ${r.errors.slice(0, 2).join('; ')}`);
+              if (r.read > 0 || r.errors.length > 0) {
+                log.info(`Skew agent self-heal: +${r.read} (had ${before}) for ${r.day}`);
+                if (r.errors.length > 0) log.warn(`Skew agent self-heal: ${r.errors.slice(0, 2).join('; ')}`);
+              }
             }
-            // Stock reader: same heal, keyed on TODAY having no reads yet.
-            const { latestStockReads } = await import('./agents/stockReader.js');
             const { runStockReaderForLatestDay: healStockReads } = await import('./agents/stockReader.js');
-            if (latestStockReads(nyToday()).length === 0) {
-              const sr = await healStockReads();
-              log.info(`Stock reader self-heal: ${sr.read} read (${sr.day})`);
+            const sr = await healStockReads();
+            if (sr.read > 0 || sr.errors.length > 0) {
+              log.info(`Stock reader self-heal: +${sr.read} (${sr.day})`);
               if (sr.errors.length > 0) log.warn(`Stock reader self-heal: ${sr.errors.slice(0, 2).join('; ')}`);
             }
           } catch (err) {
