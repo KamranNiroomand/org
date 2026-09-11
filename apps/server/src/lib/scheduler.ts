@@ -1308,8 +1308,13 @@ export function startScheduler(log: FastifyBaseLogger): void {
     // with the laptop). Idempotent per (day, symbol) and rate-limited by
     // the same principle as the pull heal: one attempt per hour is
     // plenty, and a day whose reads exist is a no-op query.
+    // 5 AM ET, not 8: the user's clock runs ahead of New York, and the
+    // agents' inputs (last night's board) sit ready from the small
+    // hours — pinning the first pass to New York's workday meant every
+    // morning the user looked at an empty page that had no reason to be
+    // empty (report, 2026-09-11).
     skewAgentHealTask = cron.schedule(
-      '20 8-18 * * 1-5',
+      '20 5-18 * * 1-5',
       () => {
         void (async () => {
           try {
@@ -1386,6 +1391,24 @@ export function startScheduler(log: FastifyBaseLogger): void {
       spawnSync('pkill', ['-9', '-f', 'uvicorn app.main:app']);
     })();
   });
+
+  // On boot, give the agents one pass too — restarts kept eating the
+  // scheduled runs, and idempotence makes a redundant pass a no-op.
+  if (!config.market.isRunner && config.market.runnerSshHost) {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          const { runSkewAgentForLatestDay } = await import('./agents/skewReader.js');
+          const { runStockReaderForLatestDay } = await import('./agents/stockReader.js');
+          const a = await runSkewAgentForLatestDay();
+          const b = await runStockReaderForLatestDay();
+          log.info(`Boot agent pass: skew +${a.read}, stock +${b.read}`);
+        } catch (err) {
+          log.warn(`Boot agent pass failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })();
+    }, 60_000).unref();
+  }
 
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
   // delay keeps startup fast and avoids racing the first request.
