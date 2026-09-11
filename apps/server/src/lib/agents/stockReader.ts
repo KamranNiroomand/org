@@ -51,8 +51,14 @@ research signal the system has. Discipline:
   congressional money AGREE deserves conviction; one signal alone
   rarely does. Say which signals drove you.
 - verdict vocabulary: enter_candidate (worth the reader's research
-  hours — never an order), avoid (looks tempting, evidence says stand
-  back), hold_if_held (fine to keep, not to add), ignore (nothing here).
+  hours — never an order), avoid (do NOT buy — for names the reader
+  does not hold), hold_if_held (held name: fine to keep, do not add),
+  exit_if_held (held name ONLY: the evidence has turned enough that
+  the reader should seriously consider selling — say why plainly),
+  ignore (nothing here). For a name marked held:true choose between
+  hold_if_held and exit_if_held, never plain avoid — "avoid buying
+  more" and "sell what you own" are different advice and the reader
+  must never have to guess which one you mean.
 - plain: the FIRST thing the reader sees. Zero market jargon — no
   "momentum", "sigma", "IC", "options", "skew", "long/short book". Say
   what is happening to the company's stock in everyday words and what
@@ -69,7 +75,7 @@ const READ_SCHEMA = {
   properties: {
     verdict: {
       type: 'string' as const,
-      enum: ['enter_candidate', 'avoid', 'hold_if_held', 'ignore'],
+      enum: ['enter_candidate', 'avoid', 'hold_if_held', 'exit_if_held', 'ignore'],
     },
     plain: {
       type: 'string' as const,
@@ -157,7 +163,7 @@ export async function runStockReader(day: string, rows: StockRowForAgent[]): Pro
       const block = response.content.find((b) => b.type === 'text');
       if (!block || block.type !== 'text') throw new Error('no content');
       const read = JSON.parse(block.text) as {
-        verdict: 'enter_candidate' | 'avoid' | 'hold_if_held' | 'ignore';
+        verdict: 'enter_candidate' | 'avoid' | 'hold_if_held' | 'exit_if_held' | 'ignore';
         plain: string;
         probability: number;
         reasoning: string;
@@ -168,6 +174,9 @@ export async function runStockReader(day: string, rows: StockRowForAgent[]): Pro
       // P=0.40) labeled enter_candidate. The probability is the scored
       // commitment; the label follows it.
       if (read.verdict === 'enter_candidate' && read.probability < 0.5) read.verdict = 'avoid';
+      if (read.verdict === 'exit_if_held' && read.probability > 0.55) read.verdict = 'hold_if_held';
+      if (read.verdict === 'exit_if_held' && !row.held) read.verdict = 'avoid';
+      if (read.verdict === 'avoid' && row.held) read.verdict = read.probability < 0.45 ? 'exit_if_held' : 'hold_if_held';
       db.insert(stockAgentReads)
         .values({
           id: newId(),
@@ -191,6 +200,15 @@ export async function runStockReader(day: string, rows: StockRowForAgent[]): Pro
         })
         .run();
       result.read += 1;
+      // A verdict CHANGE on a held name is exactly the moment the user
+      // said they needed to hear about ("it was a buy earlier and now
+      // is avoid — tell me BEFORE"): compare against the previous read
+      // and raise an alert on any downgrade, loudest for exit_if_held.
+      try {
+        await raiseVerdictChangeAlert(day, row, read.verdict, read.plain);
+      } catch {
+        // an alert failure must never fail the read itself
+      }
     } catch (err) {
       result.errors.push(`${row.book}:${row.symbol}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -376,6 +394,48 @@ async function netCashUsd(symbol: string): Promise<number | null> {
 function cache(symbol: string, day: string, value: number | null): number | null {
   netCashCache.set(symbol, { day, value });
   return value;
+}
+
+const VERDICT_RANK: Record<string, number> = {
+  enter_candidate: 3, hold_if_held: 2, ignore: 2, avoid: 1, exit_if_held: 0,
+};
+
+async function raiseVerdictChangeAlert(
+  day: string,
+  row: StockRowForAgent,
+  verdict: string,
+  plain: string,
+): Promise<void> {
+  if (!row.held) return;
+  const previous = db
+    .select({ verdict: stockAgentReads.verdict, day: stockAgentReads.day })
+    .from(stockAgentReads)
+    .where(and(eq(stockAgentReads.book, row.book), eq(stockAgentReads.symbol, row.symbol)))
+    .orderBy(desc(stockAgentReads.day))
+    .limit(1)
+    .get();
+  if (!previous || previous.day >= day) return;
+  const before = VERDICT_RANK[previous.verdict] ?? 2;
+  const after = VERDICT_RANK[verdict] ?? 2;
+  if (after >= before) return;
+  const { alertEvents } = await import('../../db/schema.js');
+  db.insert(alertEvents)
+    .values({
+      id: newId(),
+      symbol: row.symbol,
+      ruleKey: 'agent_verdict_change',
+      tradingDay: day,
+      context: 'holding',
+      direction: 'bearish',
+      headline:
+        verdict === 'exit_if_held'
+          ? `${row.symbol}: the reading agent now says consider SELLING (was: ${previous.verdict.replace(/_/g, ' ')}). ${plain}`
+          : `${row.symbol}: the reading agent downgraded its view (${previous.verdict.replace(/_/g, ' ')} → ${verdict.replace(/_/g, ' ')}). ${plain}`,
+      detail: { book: row.book, previousVerdict: previous.verdict, previousDay: previous.day, verdict },
+      triggeredAt: nowIso(),
+      createdAt: nowIso(),
+    })
+    .run();
 }
 
 export function latestStockReads(day: string) {

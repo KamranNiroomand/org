@@ -478,7 +478,7 @@ export const alertEvents = sqliteTable(
     id: id(),
     symbol: text('symbol').notNull(),
     ruleKey: text('rule_key', {
-      enum: ['day_change_up', 'day_change_down', 'new_52w_high', 'new_52w_low', 'volume_spike', 'news_event'],
+      enum: ['day_change_up', 'day_change_down', 'new_52w_high', 'new_52w_low', 'volume_spike', 'news_event', 'agent_verdict_change'],
     }).notNull(),
     /** Civil day the underlying move/document happened on — the dedup key. */
     tradingDay: text('trading_day').notNull(),
@@ -832,7 +832,7 @@ export const stockAgentReads = sqliteTable(
     book: text('book', { enum: ['short', 'long'] }).notNull(),
     symbol: text('symbol').notNull(),
     verdict: text('verdict', {
-      enum: ['enter_candidate', 'avoid', 'hold_if_held', 'ignore'],
+      enum: ['enter_candidate', 'avoid', 'hold_if_held', 'exit_if_held', 'ignore'],
     }).notNull(),
     /** P(symbol outperforms its sector over the book's horizon), clamped
      * [0.05, 0.95] in code — the panel's scoreable question, one grader. */
