@@ -937,6 +937,8 @@ let exitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stockExitRecheckTask: ReturnType<typeof cron.schedule> | null = null;
 let stalenessHealTask: ReturnType<typeof cron.schedule> | null = null;
 let skewAgentHealTask: ReturnType<typeof cron.schedule> | null = null;
+let quantResurrectTask: ReturnType<typeof cron.schedule> | null = null;
+let quantFailStreak = 0;
 let retierTask: ReturnType<typeof cron.schedule> | null = null;
 const selfHealAttemptsToday = { day: '', count: 0 };
 let lastResult: NightlyResult | null = null;
@@ -1357,6 +1359,34 @@ export function startScheduler(log: FastifyBaseLogger): void {
     log.info('Skew agent self-heal scheduled (hourly 08-18 ET, reader only)');
   }
 
+  // Quant sidecar resurrection — BOTH machines. The recurring disease
+  // behind half of one week's incidents: uvicorn (--reload watching the
+  // whole repo) wedges after pulls — process alive, port held, nothing
+  // answered — and every downstream step then starves silently (no
+  // solved prices 09-10, a dead rehearsal 09-11). A wedged process is
+  // not dead, so supervisor restart policies never fire; this cron IS
+  // the missing policy: two consecutive failed health probes -> SIGKILL
+  // the uvicorns, and concurrently's --restart-after respawns a clean
+  // one on the port within seconds.
+  quantResurrectTask = cron.schedule('*/10 * * * *', () => {
+    void (async () => {
+      try {
+        const res = await fetch(`${config.market.quantUrl}/health`, { signal: AbortSignal.timeout(10_000) });
+        if (res.ok) {
+          quantFailStreak = 0;
+          return;
+        }
+      } catch {
+        /* fall through to streak */
+      }
+      quantFailStreak += 1;
+      if (quantFailStreak < 2) return;
+      quantFailStreak = 0;
+      log.warn('Quant sidecar unresponsive twice — killing it so the supervisor respawns a clean one');
+      spawnSync('pkill', ['-9', '-f', 'uvicorn app.main:app']);
+    })();
+  });
+
   // Catch up shortly after boot if the machine was off or asleep at 06:00. The
   // delay keeps startup fast and avoids racing the first request.
   setTimeout(() => {
@@ -1435,6 +1465,8 @@ export function stopScheduler(): void {
   stalenessHealTask = null;
   skewAgentHealTask?.stop();
   skewAgentHealTask = null;
+  quantResurrectTask?.stop();
+  quantResurrectTask = null;
   retierTask?.stop();
   retierTask = null;
 }
