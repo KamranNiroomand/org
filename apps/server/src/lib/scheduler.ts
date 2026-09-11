@@ -677,6 +677,10 @@ export async function runOptionsCapture(
         result.autoEntrySkippedReason = entry.skippedReason;
         if (entry.opened.length > 0) {
           log.info(`Auto-entry opened ${result.autoEntryOpened.join(', ')}`);
+        } else {
+          // Silence was how a whole entry day vanished — a no-trade
+          // night must SAY why in the log, every night.
+          log.info(`Auto-entry opened nothing: ${entry.skippedReason ?? 'selection empty'}`);
         }
         // See the same block in runMarketSync: `failures` now also carries
         // size trims on orders that did open, which nothing else reports.
@@ -1327,6 +1331,15 @@ export function startScheduler(log: FastifyBaseLogger): void {
                 log.info(`Skew agent self-heal: +${r.read} (had ${before}) for ${r.day}`);
                 if (r.errors.length > 0) log.warn(`Skew agent self-heal: ${r.errors.slice(0, 2).join('; ')}`);
               }
+            }
+            // The watchdog runs on the same heartbeat — verify the whole
+            // chain, remediate the standard failures, keep the report the
+            // Status card serves.
+            try {
+              const { runSystemCheck } = await import('./systemCheck.js');
+              await runSystemCheck(log);
+            } catch (err) {
+              log.warn(`System check failed to run: ${err instanceof Error ? err.message : String(err)}`);
             }
             const { runStockReaderForLatestDay: healStockReads } = await import('./agents/stockReader.js');
             const sr = await healStockReads();
