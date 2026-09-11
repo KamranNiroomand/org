@@ -300,6 +300,10 @@ export interface SelectEntriesResult {
 export async function selectEntries(input: SelectEntriesInput): Promise<SelectEntriesResult> {
   let res: Response;
   try {
+    // 10 minutes, not 2: a freshly restarted sidecar prices the whole
+    // board cold in ~3-5 minutes, and a 120s limit meant any restart in
+    // the hours before capture starved that night's entries (caught by
+    // the first rehearsal, 2026-09-11). The nightly flow is in no hurry.
     res = await fetch(`${config.market.quantUrl}/select-entries`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -316,7 +320,7 @@ export async function selectEntries(input: SelectEntriesInput): Promise<SelectEn
         min_dte: input.minDte,
         max_dte: input.maxDte,
       }),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(600_000),
     });
   } catch (err) {
     throw new QuantUnavailable(err instanceof Error ? err.message : String(err));
