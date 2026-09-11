@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { cn } from '../ui';
-import { CorpusStatus } from './CorpusStatus';
+import { CorpusStatus, SystemHealth } from './CorpusStatus';
 import { ModelPerformance } from './ModelPerformance';
 import { PaperBook } from './PaperBook';
 import { SignalBoard } from './SignalBoard';
@@ -46,7 +46,7 @@ export function OptionsTab() {
         ))}
       </div>
 
-      {tab === 'status' && <CorpusStatus />}
+      {tab === 'status' && (<div className="space-y-4"><SystemHealth /><CorpusStatus /></div>)}
       {tab === 'signals' && <SignalBoard />}
       {tab === 'paper' && <PaperBook />}
       {tab === 'performance' && <ModelPerformance />}

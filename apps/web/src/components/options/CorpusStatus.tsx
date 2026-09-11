@@ -3,6 +3,7 @@ import { AlertTriangle, Database, RefreshCw } from 'lucide-react';
 import { Badge, Button, Card, CardHeader, Skeleton, cn } from '../ui';
 import { StatTile } from '../charts';
 import { optionsApi } from '../../lib/optionsApi';
+import { api } from '../../lib/api';
 
 /**
  * What is actually collecting data, and how much of it exists.
@@ -13,6 +14,46 @@ import { optionsApi } from '../../lib/optionsApi';
  * this page exists to answer "is the pipeline actually working" before
  * anything built on top of it can be trusted.
  */
+interface HealthCheckRow { name: string; ok: boolean; detail: string; remediated?: boolean }
+interface HealthReport { ranAt: string; checks: HealthCheckRow[]; allOk: boolean }
+
+/** The watchdog's latest verdict — nine plain checks over the whole
+ * chain, self-remediating hourly. Green means nobody has to ask. */
+export function SystemHealth() {
+  const { data, isLoading, refetch, isFetching } = useQuery<HealthReport>({
+    queryKey: ['system-health'],
+    queryFn: () => api.get<HealthReport>('/api/system/health'),
+    refetchInterval: 5 * 60 * 1000,
+  });
+  if (isLoading) return <Skeleton className="h-24" />;
+  if (!data) return null;
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader
+        title={data.allOk ? 'All systems working' : 'Needs attention'}
+        subtitle={`The system checks itself every hour and fixes the routine problems on its own. Last check ${new Date(data.ranAt).toLocaleTimeString()}.`}
+        action={
+          <Button size="sm" variant="ghost" disabled={isFetching} onClick={() => void refetch()}>
+            {isFetching ? 'Checking…' : 'Check now'}
+          </Button>
+        }
+      />
+      <div className="divide-y divide-border">
+        {data.checks.map((c) => (
+          <div key={c.name} className="flex items-start gap-3 px-4 py-2 text-xs">
+            <span className={c.ok ? 'text-positive' : 'text-negative'}>{c.ok ? '✓' : '✕'}</span>
+            <div>
+              <span className="font-medium">{c.name}</span>
+              {c.remediated && <Badge tone="accent">self-fixed</Badge>}
+              <div className="text-muted">{c.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 export function CorpusStatus() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({

@@ -203,6 +203,13 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     return result;
   });
 
+  app.get('/api/system/health', async (req) => {
+    const { latestHealthReport, runSystemCheck } = await import('../lib/systemCheck.js');
+    const fresh = (req.query as { run?: string }).run === '1';
+    if (fresh || !latestHealthReport()) return runSystemCheck(req.log);
+    return latestHealthReport();
+  });
+
   app.get('/api/agents/stock-reads', async () => {
     const { latestStockReads } = await import('../lib/agents/stockReader.js');
     const { nyToday } = await import('../lib/options/positionHealth.js');
@@ -268,6 +275,59 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
    * from capture unpriced — a rate-limited provider or a cold quant sidecar
    * leaves real rows with a null `iv_bps`. Never re-fetches from the vendor.
    */
+  /** The runner's self-description for the reader's watchdog — plain
+   * facts, no judgment; systemCheck.ts turns them into pass/fail. */
+  app.get('/api/options/daily-audit', async () => {
+    const { paperDb } = await import('../db/paper/index.js');
+    const { paperDecisionLog, paperMarks } = await import('../db/paper/schema.js');
+    const { modelRuns: mr } = await import('../db/market/schema.js');
+    const { sql: dsql, eq: deq } = await import('drizzle-orm');
+    const { optionQuotes: oq } = await import('../db/market/schema.js');
+    const boardDay = marketDb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d ?? null;
+    const ivCount = boardDay
+      ? marketDb.select({ n: dsql<number>`count(*)` }).from(oq).where(dsql`${oq.tradingDay} = ${boardDay} and ${oq.ivBps} is not null`).get()?.n ?? 0
+      : 0;
+    const entryReasons = new Set(['stale_board','partial_board','model_below_hurdle','drawdown_breaker','entry_run_in_flight','entry_lock_stolen','entry_threw','cleared_all_bars','day_full','no_exit_plan']);
+    const entryDecisions = boardDay
+      ? paperDb.select().from(paperDecisionLog).where(deq(paperDecisionLog.day, boardDay)).all().filter((r) => entryReasons.has(r.reason)).length
+      : 0;
+    let quantHealthy = false;
+    try {
+      const res = await fetch(`${config.market.quantUrl}/health`, { signal: AbortSignal.timeout(5000) });
+      quantHealthy = res.ok;
+    } catch { /* stays false */ }
+    return {
+      latestBoardDay: boardDay,
+      latestBoardIvCount: ivCount,
+      entryDecisionsForBoardDay: entryDecisions,
+      latestMarksDay: paperDb.select({ d: dsql<string | null>`max(${paperMarks.tradingDay})` }).from(paperMarks).get()?.d ?? null,
+      latestModelRegisteredDay: marketDb.select({ d: dsql<string | null>`max(substr(${mr.registeredAt},1,10))` }).from(mr).get()?.d ?? null,
+      quantHealthy,
+    };
+  });
+
+  /** Watchdog remediation hook: re-solve the LATEST board's prices. */
+  app.post('/api/options/reprice-latest', async (_req, reply) => {
+    if (!config.market.isRunner) return reply.code(409).send({ error: 'runner only' });
+    const { sql: dsql } = await import('drizzle-orm');
+    const { optionQuotes: oq } = await import('../db/market/schema.js');
+    const day = marketDb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d;
+    if (!day) return reply.code(409).send({ error: 'no board' });
+    return repriceDay(day);
+  });
+
+  /** Tonight's entry path, run NOW — everything except the order write.
+   * See AutoEntryOptions.rehearsal. Runner only (it owns the book). */
+  app.post('/api/options/entry-rehearsal', async (_req, reply) => {
+    if (!config.market.isRunner) return reply.code(409).send({ error: 'runner only' });
+    const { runAutoEntry } = await import('../lib/options/autoEntry.js');
+    const { sql: dsql } = await import('drizzle-orm');
+    const { optionQuotes: oq } = await import('../db/market/schema.js');
+    const day = marketDb.select({ d: dsql<string | null>`max(${oq.tradingDay})` }).from(oq).get()?.d;
+    if (!day) return reply.code(409).send({ error: 'no board' });
+    return runAutoEntry(day, undefined, { rehearsal: true });
+  });
+
   app.post('/api/options/reprice', async (req, reply) => {
     if (!config.market.isRunner) {
       return reply

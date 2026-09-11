@@ -59,32 +59,69 @@ export interface AutoEntryResult {
  * 21:15, morning sync, boot catch-up): two invocations interleaving both
  * read `openedToday` before either writes, and each spends the full daily
  * budget — the wake-from-sleep race (review finding, 2026-09-02). */
-let entryRunInFlight = false;
+let entryRunStartedAt: number | null = null;
+//: A run older than this is presumed dead (crashed without its finally,
+//: or hung on something no timeout covers) and the lock is stolen — an
+//: immortal lock silently ate the 2026-09-10 entry cycle: an earlier
+//: invocation never released, the 16:45 attempt returned in-flight
+//: WITHOUT LOGGING, and the day's decision log showed nothing at all.
+const ENTRY_LOCK_STALE_MS = 15 * 60 * 1000;
+
+export interface AutoEntryOptions {
+  /** Tonight's code path, run NOW: everything through selection, real
+   * multiplier/budget/ask trims and all guards except stale-board (a
+   * rehearsal is BY DEFINITION off-session), with the final openOrder
+   * and decision-log writes skipped. Exists so a bug anywhere in the
+   * chain fires in daylight instead of silently at 16:45. */
+  rehearsal?: boolean;
+}
 
 export async function runAutoEntry(
   day: string,
   selectEntriesFn: typeof selectEntries = selectEntries,
+  opts: AutoEntryOptions = {},
 ): Promise<AutoEntryResult> {
-  if (entryRunInFlight) {
-    return {
-      day,
-      opened: [],
-      skippedReason: 'entry_run_in_flight: another auto-entry invocation is still running',
-      failures: [],
-    };
+  if (entryRunStartedAt !== null) {
+    const age = Date.now() - entryRunStartedAt;
+    if (age < ENTRY_LOCK_STALE_MS) {
+      const skippedReason = `entry_run_in_flight: another auto-entry invocation started ${Math.round(age / 1000)}s ago`;
+      // Every refusal leaves a row — an invisible skip is how a whole
+      // trading day disappeared from the record.
+      logDecisions([
+        { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'entry_run_in_flight', detail: { ageMs: age } },
+      ]);
+      return { day, opened: [], skippedReason, failures: [] };
+    }
+    logDecisions([
+      { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'entry_lock_stolen', detail: { staleMs: age } },
+    ]);
   }
-  entryRunInFlight = true;
+  entryRunStartedAt = Date.now();
   try {
-    return await runAutoEntryInner(day, selectEntriesFn);
+    return await runAutoEntryInner(day, selectEntriesFn, opts);
+  } catch (err) {
+    // A throw above the first logDecisions used to vanish into the
+    // caller's errors array — same invisibility, different door.
+    logDecisions([
+      { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'entry_threw', detail: { message: err instanceof Error ? err.message : String(err) } },
+    ]);
+    throw err;
   } finally {
-    entryRunInFlight = false;
+    entryRunStartedAt = null;
   }
 }
 
 async function runAutoEntryInner(
   day: string,
   selectEntriesFn: typeof selectEntries = selectEntries,
+  opts: AutoEntryOptions = {},
 ): Promise<AutoEntryResult> {
+  const rehearsal = opts.rehearsal === true;
+  // A rehearsal must leave ZERO rows behind — 'opened' rows feed the
+  // daily budget count, and phantom rows would shrink tonight's real run.
+  const logDecisionsUnlessRehearsal: typeof logDecisions = (rows) =>
+    rehearsal ? true : logDecisions(rows);
+
   // Entries only on the session the board describes. The board is a
   // snapshot of one trading day's market; buying from it on any OTHER
   // calendar day records a fill nobody could get — found live when a
@@ -93,11 +130,11 @@ async function runAutoEntryInner(
   // passes (board day == today); every stale path — weekend catch-ups,
   // a reader restart replaying yesterday's board — is refused here, in
   // one place, rather than each caller remembering to check.
-  if (day !== nyToday()) {
+  if (day !== nyToday() && !rehearsal) {
     const skippedReason =
       `stale_board: board is for ${day} but today is ${nyToday()} — ` +
       `not opening entries against a session that is not this one`;
-    logDecisions([
+    logDecisionsUnlessRehearsal([
       { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'stale_board', detail: { boardDay: day, today: nyToday() } },
     ]);
     return { day, opened: [], skippedReason, failures: [] };
@@ -126,7 +163,7 @@ async function runAutoEntryInner(
     const skippedReason =
       `partial_board: only ${boardCoverage}/${universeSize} underlyings captured for ${day} — ` +
       `an alphabetically-biased menu; not opening entries from it`;
-    logDecisions([
+    logDecisionsUnlessRehearsal([
       { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'partial_board', detail: { boardCoverage, universeSize } },
     ]);
     return { day, opened: [], skippedReason, failures: [] };
@@ -153,7 +190,7 @@ async function runAutoEntryInner(
         `model_below_hurdle: champion dir model ${champion?.runId ?? '(none)'} has t=${t} ` +
         `against hurdle ${hurdle} — new entries wait until the edge is established; ` +
         `exits and forecasts keep running`;
-      logDecisions([
+      logDecisionsUnlessRehearsal([
         { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'model_below_hurdle', detail: { runId: champion?.runId ?? null, t: m.ic_t_stat ?? null, hurdle: m.ic_t_hurdle ?? null } },
       ]);
       return { day, opened: [], skippedReason, failures: [] };
@@ -180,7 +217,7 @@ async function runAutoEntryInner(
         `drawdown_breaker: equity ${(latest.totalEquityE4 / 10_000).toFixed(0)} is ` +
         `${(drawdown * 100).toFixed(1)}% below the high-water mark ${(peakE4 / 10_000).toFixed(0)} ` +
         `(limit ${(config.market.autoEntry.maxDrawdownPct * 100).toFixed(0)}%) — no new entries until it recovers`;
-      logDecisions([
+      logDecisionsUnlessRehearsal([
         { day, occSymbol: '-', underlying: null, decision: 'rejected', reason: 'drawdown_breaker', detail: { drawdown, peakE4, latestEquityE4: latest.totalEquityE4, asOfDay: latest.day } },
       ]);
       return { day, opened: [], skippedReason, failures: [] };
@@ -249,7 +286,7 @@ async function runAutoEntryInner(
   // nothing", "the book was full" and "everything was too expensive" are
   // three different situations that look identical from the outside.
   if (selected.length === 0) {
-    const logged = logDecisions(decisions);
+    const logged = logDecisionsUnlessRehearsal(decisions);
     return {
       day,
       opened: [],
@@ -368,7 +405,7 @@ async function runAutoEntryInner(
       }
       // Order and exit plan land in one insert — see `OpenOrderInput.exitPlan`
       // for why this must not be an insert followed by an update.
-      const orderId = openOrder({
+      const orderId = rehearsal ? `rehearsal-${candidate.occ_symbol.trim()}` : openOrder({
         occSymbol: candidate.occ_symbol,
         quantity: size,
         entryPriceE4: liveAskE4 ?? entryPriceE4,
@@ -389,7 +426,7 @@ async function runAutoEntryInner(
       // between openOrder and a deferred batch write would grant the next
       // invocation a fresh full budget on top of positions already open
       // (review finding, 2026-09-02).
-      if (!logDecisions([
+      if (!logDecisionsUnlessRehearsal([
         { day, occSymbol: candidate.occ_symbol, underlying: candidate.underlying, decision: 'opened', reason: 'cleared_all_bars', detail: { orderId, quantity: size, entryPriceE4, ev: candidate.ev, ev_per_risk: candidate.ev_per_risk, prob_profit: candidate.prob_profit, dte: candidate.dte } },
       ])) {
         failures.push(`${candidate.occ_symbol}: opened but its decision row failed to write — opened-today count is now understated`);
@@ -405,7 +442,7 @@ async function runAutoEntryInner(
 
   // Checked rather than discarded — a silently failed log is the blind
   // spot this table exists to end, rebuilt one level down.
-  if (!logDecisions(decisions)) {
+  if (!logDecisionsUnlessRehearsal(decisions)) {
     failures.push(`Decision log write failed for ${decisions.length} decision(s) — they are lost.`);
   }
 
