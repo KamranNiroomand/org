@@ -94,13 +94,16 @@ function PickList({ book }: { book: 'short' | 'long' }) {
   );
 }
 
-function PositionRow({ order }: { order: StockOrderRow }) {
+function PositionRow({ order, inBothBooks }: { order: StockOrderRow; inBothBooks?: boolean }) {
   const current = order.exitPriceE4 ?? order.markPriceE4;
   const ret = current === null ? null : ((current - order.entryPriceE4) / order.entryPriceE4) * 100;
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5 text-xs">
       <span className="w-16 font-medium">{order.symbol}</span>
       <Badge tone={order.status === 'open' ? 'neutral' : 'accent'}>{order.status}</Badge>
+      {inBothBooks && order.status === 'open' && (
+        <Badge tone="accent">also in {order.book === 'short' ? 'long' : 'short'} term</Badge>
+      )}
       <span className="tnum text-muted">
         {order.quantity.toFixed(3)} @ {usd(order.entryPriceE4)}
       </span>
@@ -149,6 +152,11 @@ export function StockPicks() {
   const equity = bookData?.equity;
   const orders = bookData?.orders ?? [];
   const openOrders = orders.filter((o) => o.status === 'open' && o.book === book);
+  // A name held in BOTH horizon books reads as a ghost when one copy
+  // sells and the other stays — the badge makes the twin visible.
+  const openElsewhere = new Set(
+    orders.filter((o) => o.status === 'open' && o.book !== book).map((o) => o.symbol),
+  );
   const closedOrders = orders.filter((o) => o.status === 'closed' && o.book === book);
   const cumulative =
     equity && equity.startingBalanceE4 > 0
@@ -227,7 +235,7 @@ export function StockPicks() {
         ) : (
           <div className="divide-y divide-border">
             {[...openOrders, ...closedOrders].map((o) => (
-              <PositionRow key={o.id} order={o} />
+              <PositionRow key={o.id} order={o} inBothBooks={openElsewhere.has(o.symbol)} />
             ))}
           </div>
         )}
