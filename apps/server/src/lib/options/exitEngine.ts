@@ -280,7 +280,13 @@ export async function runExitEngine(
       .map((c) => ({ occSymbol: c.occSymbol, underlying: c.underlying }));
     if (heldContracts.length > 0) {
       try {
-        health = await deps.scoreHeldContracts(todayKey(), heldContracts);
+        // The CAPTURED day, not the calendar day: during an intraday
+        // pass today's quotes don't exist yet, so scoring against
+        // todayKey() returned None for every contract and every advisor
+        // escalation reasoned with 'currentEv: null' (visible in weeks
+        // of stored advisor texts). The latest board is the freshest
+        // scorable truth.
+        health = await deps.scoreHeldContracts(operatingTradingDay(), heldContracts);
       } catch (err) {
         // No current EV view available for anyone this pass (sidecar down,
         // model refuses) — the deterministic price/DTE rules below still
