@@ -1139,6 +1139,11 @@ class EntrySelection:
     cost: float
 
 
+#: A candidate whose daily returns average above this correlation with
+#: the option book's underlyings (held + accepted today) is the same
+#: bet wearing a new ticker — the stock book's cap, ported.
+OPTIONS_MAX_BOOK_CORRELATION = float(os.environ.get("OPTIONS_MAX_BOOK_CORRELATION", "0.7"))
+
 #: No single new position may take more than this fraction of the
 #: day's investable cash. See the sizing comment below for the incident.
 #: Cut from 0.25 after the August 2026 drawdown: the inflated-EV bugs did
@@ -1256,6 +1261,41 @@ def select_entries(
     # the equal-weight rule above exists to prevent.
     per_slot_budget = available_capital / room
 
+    # Correlation guard, ported from the stock book (its blind spot was
+    # found live there: an AI book spread across three sectors that moved
+    # as one position). Options entries had NO equivalent — nothing
+    # prevented five semiconductor calls that are really one bet. Daily
+    # log-returns over the crowding module's own 63-session window; a
+    # candidate averaging above OPTIONS_MAX_BOOK_CORRELATION against the
+    # names already in the book (held + accepted earlier today) is the
+    # same bet wearing a new ticker, and is rejected as such. Missing
+    # history abstains rather than vetoing.
+    from .crowding import CORR_WINDOW, _daily_log_returns, _pearson
+    from datetime import date as _date, timedelta as _td
+
+    _corr_symbols = sorted({c.underlying for c in candidates} | set(held_underlyings))
+    _corr_rets: dict[str, dict[str, float]] = {}
+    if _corr_symbols:
+        try:
+            _corr_start = (_date.today() - _td(days=120)).isoformat()
+            _corr_rets = _daily_log_returns(
+                read_bars(symbols=_corr_symbols, start=_corr_start), CORR_WINDOW
+            )
+        except Exception:
+            _corr_rets = {}
+
+    def _book_correlation(candidate_underlying: str, book: set[str]) -> float | None:
+        cand = _corr_rets.get(candidate_underlying)
+        if cand is None:
+            return None
+        corrs = [
+            c
+            for h in book
+            if h != candidate_underlying and (r := _corr_rets.get(h)) is not None
+            if (c := _pearson(cand, r)) is not None
+        ]
+        return sum(corrs) / len(corrs) if len(corrs) >= 2 else None
+
     taken_underlyings: set[str] = set()
     selected: list[EntrySelection] = []
     rejected: list[EntryRejection] = []
@@ -1297,6 +1337,11 @@ def select_entries(
             continue
         if c.underlying in taken_underlyings:
             reject(c, "underlying_taken_today", underlying=c.underlying)
+            continue
+        _corr = _book_correlation(c.underlying, held_underlyings | taken_underlyings)
+        if _corr is not None and _corr > OPTIONS_MAX_BOOK_CORRELATION:
+            reject(c, "crowded_with_book", avg_corr=round(_corr, 3),
+                   cap=OPTIONS_MAX_BOOK_CORRELATION)
             continue
         cost_per_contract = c.market_price * multiplier
         if cost_per_contract <= 0:

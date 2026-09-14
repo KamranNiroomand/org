@@ -1346,3 +1346,37 @@ class TestXsLabelServingGate:
         d = self._manifest(tmp_path, ic_mean=-0.001, beats_baseline=False)
         with _pytest.raises(SystemExit, match="non-positive"):
             rank_mod._forecast_inputs("2026-01-02", d, 21, force=False)
+
+
+class TestOptionsCrowding:
+    """The stock book's correlation guard, ported to options entries."""
+
+    def _select(self, candidates, held, monkeypatch, rets):
+        import app.rank as rank_mod
+        import app.crowding as crowding_mod
+
+        monkeypatch.setattr(crowding_mod, "_daily_log_returns", lambda bars, window: rets)
+        monkeypatch.setattr(rank_mod, "read_bars", lambda **kw: pl.DataFrame())
+        return select_entries(
+            candidates, held_underlyings=held, available_capital=100_000.0,
+            open_position_count=0, max_concurrent_positions=10,
+            max_new_positions=5, opened_today=0, min_ev_per_risk=0.05,
+            min_prob_profit=0.5, min_dte=14, max_dte=60,
+        )
+
+    def test_a_clone_of_the_held_book_is_rejected(self, monkeypatch) -> None:
+        days = [f"2026-{m:02d}-{d:02d}" for m in (1, 2, 3) for d in range(1, 29)]
+        base = {d: 0.01 * ((i % 5) - 2) for i, d in enumerate(days)}
+        anti = {d: -v for d, v in base.items()}
+        rets = {"HELD1": dict(base), "HELD2": dict(base), "CLONE": dict(base), "DIVERSE": anti}
+        clone = _candidate(underlying="CLONE", occ_symbol="CLONE 260918C00100000", ev=99.0)
+        diverse = _candidate(underlying="DIVERSE", occ_symbol="DIVER 260918C00100000", ev=50.0)
+        selected, rejected = self._select([clone, diverse], {"HELD1", "HELD2"}, monkeypatch, rets)
+        assert [s.contract.underlying for s in selected] == ["DIVERSE"]
+        assert any(r.reason == "crowded_with_book" and r.contract.underlying == "CLONE" for r in rejected)
+
+    def test_missing_history_abstains_rather_than_vetoing(self, monkeypatch) -> None:
+        # No return series for anyone: the guard must not block entries.
+        c = _candidate(underlying="NEWIPO", occ_symbol="NEWIP 260918C00100000")
+        selected, _ = self._select([c], {"HELD1", "HELD2"}, monkeypatch, {})
+        assert [s.contract.underlying for s in selected] == ["NEWIPO"]
