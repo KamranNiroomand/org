@@ -156,6 +156,12 @@ def evaluate(target: str, fit_final: bool) -> None:
                     "coef": w.tolist(),
                     "mu": mu.tolist(),
                     "sd": sd.tolist(),
+                    # The gate's line in the sand: the bottom quintile of
+                    # trust across the full training history — the slice
+                    # that lost money consistently out-of-time. Stored at
+                    # fit time so serving never recomputes (or drifts)
+                    # the threshold.
+                    "p20": float(np.quantile(predict(w, Xall), 0.2)),
                 },
                 indent=2,
             )

@@ -377,6 +377,11 @@ export interface StockPick {
   /** The forecast in the symbol's own volatility units — the model's
    * native output and the ranking key. See stock_rank in rank.py. */
   forecastSigmas: number | null;
+  /** Trial #32: P(this pick works) from the meta model, null when no
+   * meta model is fitted for the target. Gate threshold rides along as
+   * metaP20 — the bottom-quintile cutoff fixed at fit time. */
+  metaTrust: number | null;
+  metaP20: number | null;
   annualDrift: number | null;
   forecastVol: number | null;
 }
@@ -485,6 +490,8 @@ export async function stockRank(
       rank: number;
       horizon_return: number;
       forecast_sigmas: number | null;
+      meta_trust?: number | null;
+      meta_p20?: number | null;
       annual_drift: number | null;
       forecast_vol: number | null;
     }>;
@@ -498,6 +505,8 @@ export async function stockRank(
       rank: p.rank,
       horizonReturn: p.horizon_return,
       forecastSigmas: p.forecast_sigmas,
+      metaTrust: p.meta_trust ?? null,
+      metaP20: p.meta_p20 ?? null,
       annualDrift: p.annual_drift,
       forecastVol: p.forecast_vol,
     })),
