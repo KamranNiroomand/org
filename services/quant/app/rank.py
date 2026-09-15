@@ -1499,6 +1499,50 @@ def score_held_contracts(
     return results
 
 
+def _meta_trust_scores(
+    target: str, raw_by_symbol: dict[str, float]
+) -> tuple[dict[str, float], float | None]:
+    # P(pick works) per symbol from meta-<target>.json, else ({}, None).
+    #
+    # Sigma-unit alignment: the meta model trained on the primary's OOF
+    # `predicted` column (label/sigma units), while `raw_by_symbol` here
+    # carries horizon RETURNS (sigma x current vol). Dividing the field
+    # by its own std at serve makes the two `predicted` features
+    # scale-free before the stored train-time standardization applies;
+    # the rank/dispersion/breadth features are unit-free by construction
+    # — and the holdout said that is where most of the signal lives.
+    # Absent file = ({}, None) = no gating downstream (fail-open).
+    import json as _json
+
+    path = Path.home() / ".org" / "market" / "models" / f"meta-{target}.json"
+    if not path.exists() or not raw_by_symbol:
+        return {}, None
+    try:
+        m = _json.loads(path.read_text())
+        import numpy as _np
+
+        symbols = list(raw_by_symbol)
+        vals = _np.array([raw_by_symbol[s] for s in symbols], dtype=float)
+        field_sd = float(vals.std()) or 1.0
+        pred = vals / field_sd
+        order = pred.argsort().argsort()
+        rank_pct = (order + 1) / len(pred)
+        X = _np.column_stack([
+            pred,
+            _np.abs(pred),
+            rank_pct,
+            _np.full(len(pred), float(pred.std())),
+            _np.full(len(pred), float(len(pred))),
+        ])
+        X = (X - _np.array(m["mu"])) / _np.array(m["sd"])
+        Xb = _np.hstack([_np.ones((len(X), 1)), X])
+        p = 1.0 / (1.0 + _np.exp(-(Xb @ _np.array(m["coef"]))))
+        p20 = float(m["p20"]) if m.get("p20") is not None else None
+        return dict(zip(symbols, p.tolist())), p20
+    except Exception:
+        return {}, None
+
+
 #: (trading day, target, champion run id) -> the full ranked board.
 #: Rebuilding it costs ~20s — the whole two-year feature panel is
 #: recomputed from bars — and a board is a *daily* quantity: it cannot
@@ -1619,6 +1663,13 @@ def stock_rank(
     # names — the expected Sharpe, not the expected move — and sizes
     # separately. (The options ranker keeps the return-based drift: an
     # option pricer needs an actual drift, not a z-score.)
+    # Meta trust (trial #32): when a fitted meta model exists for this
+    # target, every symbol gets P(this pick works), computed over the
+    # FULL day's field — the same per-day context the meta model trained
+    # on; scoring only a sliced top-N would feed it a distribution it
+    # never learned. No file = no gating (fail-open).
+    meta_trust, meta_p20 = _meta_trust_scores(target, raw_by_symbol)
+
     horizon = manifest["horizon"]
     ranked_all = sorted(
         raw_by_symbol.items(),
@@ -1652,6 +1703,10 @@ def stock_rank(
                 "forecast_vol": vol,
                 "model_run_id": ensemble_id,
                 "horizon_days": horizon,
+                # Trial #32's gate inputs — null when no meta model is
+                # fitted for this target, and the engine then never gates.
+                "meta_trust": meta_trust.get(symbol),
+                "meta_p20": meta_p20,
             }
         )
     _stock_rank_cache.clear()  # one board at a time; never an unbounded map

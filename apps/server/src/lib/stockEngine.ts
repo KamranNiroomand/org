@@ -523,6 +523,16 @@ export async function runStockEntries(
       pushRejection(pick.symbol, 'already_held');
       continue;
     }
+    // Trial #32's gate: picks in the historically-losing bottom quintile
+    // of meta trust are skipped before any panel/crowding budget is
+    // spent on them. Out-of-time evidence (stk_long holdout, ~1.5y):
+    // distrusted picks won 38% averaging -0.23 sigma while trusted picks
+    // made money. Null trust (no meta model fitted for this target — as
+    // of trial #32, only stk_long has one) never gates.
+    if (pick.metaTrust !== null && pick.metaP20 !== null && pick.metaTrust < pick.metaP20) {
+      pushRejection(pick.symbol, 'meta_distrust');
+      continue;
+    }
     const stance = stances.get(pick.symbol);
     if (stance?.stance === 'not_notable') {
       pushRejection(pick.symbol, 'panel_not_notable');

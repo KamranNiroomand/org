@@ -43,6 +43,8 @@ function board(entries: Array<[string, number | null]>): typeof rankStub {
         rank: i + 1,
         horizonReturn: 0.01,
         forecastSigmas: sigma,
+        metaTrust: null,
+        metaP20: null,
         annualDrift: 0.1,
         forecastVol: 0.3,
       })),
