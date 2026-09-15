@@ -402,7 +402,7 @@ export async function runExitEngine(
         // with the session instead of standing at last night's close all
         // day. Written before the decision, so even a pass that exits or
         // errors below leaves the freshest observation on record.
-        recordIntradayMark(order.id, day, evalPriceE4, measuredBidE4 !== null ? 'measured' : 'modelled');
+        recordIntradayMark(order.id, day, rawEvalE4, evalBasis);
 
         const docs = readDocumentsSince(contract.underlying, order.exitUpdatedAt ?? order.openedAt);
         const currentEv = health?.contracts[order.occSymbol]?.ev ?? undefined;
@@ -442,13 +442,7 @@ export async function runExitEngine(
         });
 
         if (decision.action === 'exit_now') {
-          closeAndTally(
-            order,
-            evalPriceE4,
-            decision.triggeredBy,
-            { reasonText: decision.reason },
-            measuredBidE4 !== null ? 'measured' : 'modelled',
-          );
+          closeAndTally(order, rawEvalE4, decision.triggeredBy, { reasonText: decision.reason }, evalBasis);
           continue;
         }
 
@@ -461,8 +455,8 @@ export async function runExitEngine(
           const sliceId = reduceOrder({
             orderId: order.id,
             contracts: decision.reduceContracts,
-            exitPriceE4: evalPriceE4,
-            exitBasis: measuredBidE4 !== null ? 'measured' : 'modelled',
+            exitPriceE4: rawEvalE4,
+            exitBasis: evalBasis,
           });
           summary.reduced += 1;
           record(order, 'reduced', decision.triggeredBy, {
@@ -722,13 +716,7 @@ export async function runExitEngine(
         if (revised) summary.revised += 1;
 
         if (advice.action === 'exit_now') {
-          closeAndTally(
-            order,
-            evalPriceE4,
-            'advisor_exit_now',
-            { reasoning: advice.reasoning },
-            measuredBidE4 !== null ? 'measured' : 'modelled',
-          );
+          closeAndTally(order, rawEvalE4, 'advisor_exit_now', { reasoning: advice.reasoning }, evalBasis);
           continue;
         }
         // advice.action === 'hold': the cutoff moved, the target stands.
