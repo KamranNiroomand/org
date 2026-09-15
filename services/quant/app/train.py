@@ -423,6 +423,18 @@ def train(
     (run_dir / "history.json").write_text(
         json.dumps({str(fold): curves for fold, curves in model_result.history.items()}, indent=2)
     )
+    # Out-of-fold predictions, persisted: the meta-labeling training set
+    # (which of this model's own picks succeed?) and the raw material for
+    # any future honest re-analysis. Small (a few MB) and leakage-guarded
+    # by the same purged splits the metrics trust.
+    pl.DataFrame(
+        {
+            "day": model_result.days.tolist(),
+            "symbol": model_result.symbols.tolist(),
+            "actual": model_result.actual.tolist(),
+            "predicted": model_result.predicted.tolist(),
+        }
+    ).write_parquet(run_dir / "oof.parquet")
     (run_dir / "features.json").write_text(
         json.dumps({"feature_cols": feature_cols, "target": "label", "config_hash": config_hash}, indent=2)
     )

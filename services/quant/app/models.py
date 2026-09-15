@@ -31,6 +31,10 @@ from .cv import WalkForwardSplit, apply_split
 class FoldPrediction:
     fold: int
     days: list[str]
+    #: Parallel to `days` — the symbol each out-of-fold row belongs to.
+    #: Meta-labeling's whole question is "which PICKS to trust", which is
+    #: unanswerable without knowing which name each prediction named.
+    symbols: list[str]
     actual: np.ndarray
     predicted: np.ndarray
 
@@ -63,6 +67,14 @@ class TrainingResult:
     @property
     def predicted(self) -> np.ndarray:
         return np.concatenate([f.predicted for f in self.folds]) if self.folds else np.array([])
+
+    @property
+    def symbols(self) -> np.ndarray:
+        return (
+            np.concatenate([np.asarray(f.symbols, dtype=object) for f in self.folds])
+            if self.folds
+            else np.array([], dtype=object)
+        )
 
     @property
     def days(self) -> np.ndarray:
@@ -117,6 +129,7 @@ def mean_baseline(
             FoldPrediction(
                 fold=split.fold,
                 days=test[day_col].to_list(),
+                symbols=test["symbol"].to_list() if "symbol" in test.columns else [""] * test.height,
                 actual=test[label_col].to_numpy(),
                 predicted=np.full(test.height, prediction),
             )
@@ -316,6 +329,7 @@ def train_lgbm_regressor(
             FoldPrediction(
                 fold=split.fold,
                 days=test[day_col].to_list(),
+                symbols=test["symbol"].to_list() if "symbol" in test.columns else [""] * test.height,
                 actual=test[label_col].to_numpy(),
                 predicted=np.asarray(predicted),
             )
