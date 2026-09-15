@@ -557,13 +557,23 @@ export const congressTrades = sqliteTable(
     symbol: text('symbol').notNull(),
     /** P = purchase, S = sale (partial or full collapsed together). */
     code: text('code').notNull(),
+    /**
+     * ST = common stock, OP = an options row. In the PK because a filer
+     * (famously Pelosi) often buys shares AND calls of the same name on
+     * the same day — one PK slot per asset type keeps both rows.
+     */
+    assetType: text('asset_type').notNull().default('ST'),
     transDate: text('trans_date'),
     filedDate: text('filed_date').notNull(),
     amountMin: real('amount_min'),
     amountMax: real('amount_max'),
+    /** OP rows only, parsed from the free-text description when stated. */
+    optionType: text('option_type'),
+    strike: real('strike'),
+    optionExpiry: text('option_expiry'),
   },
   (t) => [
-    primaryKey({ columns: [t.docId, t.symbol, t.code, t.transDate] }),
+    primaryKey({ columns: [t.docId, t.symbol, t.code, t.assetType, t.transDate] }),
     index('congress_symbol_filed_idx').on(t.symbol, t.filedDate),
   ],
 );
