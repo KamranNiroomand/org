@@ -311,12 +311,19 @@ export async function runStockReaderForLatestDay(top = 12): Promise<StockAgentRu
         .from(congressTrades)
         .where(and(eq(congressTrades.symbol, symbol), sql`${congressTrades.filedDate} >= ${cutoff}`))
         .get();
-      const buyers = marketMod.marketDb
-        .select({ member: congressTrades.member })
-        .from(congressTrades)
-        .where(and(eq(congressTrades.symbol, symbol), eq(congressTrades.code, 'P'), sql`${congressTrades.filedDate} >= ${cutoff}`))
-        .all()
-        .map((r) => r.member);
+      // An options purchase is a louder statement than shares — leverage
+      // plus an expiry date is a view with a deadline — so it's named as
+      // such next to the member.
+      const buyers = [
+        ...new Set(
+          marketMod.marketDb
+            .select({ member: congressTrades.member, assetType: congressTrades.assetType, optionType: congressTrades.optionType })
+            .from(congressTrades)
+            .where(and(eq(congressTrades.symbol, symbol), eq(congressTrades.code, 'P'), sql`${congressTrades.filedDate} >= ${cutoff}`))
+            .all()
+            .map((r) => (r.assetType === 'OP' ? `${r.member} (${r.optionType ?? 'option'}s)` : r.member)),
+        ),
+      ];
       rows.push({
         symbol,
         book,

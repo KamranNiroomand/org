@@ -99,6 +99,13 @@
       "when": 1788959881757,
       "tag": "0013_congress_trades",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1789479729238,
+      "tag": "0014_congress_options_rows",
+      "breakpoints": true
     }
   ]
 }

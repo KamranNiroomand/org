@@ -115,9 +115,16 @@ def ingest(symbols: list[str] | None, incremental: bool) -> None:
     ua = _ua()
     con = sqlite3.connect(DB, timeout=120)
     con.execute("pragma busy_timeout = 120000")
-    universe = symbols or [
-        r[0] for r in con.execute("select symbol from tracked_underlyings where active=1 order by symbol")
-    ]
+    # Names watched for their filers rather than traded: DJT (Trump
+    # Media) is where anything filed by or around the Trump family shows
+    # up as SEC Form 4s — the only machine-readable "Trump insider"
+    # feed that exists (a sitting president files an annual OGE 278, no
+    # tickers, no dates, nothing tradeable). Ride-along only; being here
+    # puts a symbol in NO trading universe.
+    WATCH_ONLY = ["DJT"]
+    universe = symbols or sorted(
+        {r[0] for r in con.execute("select symbol from tracked_underlyings where active=1")} | set(WATCH_ONLY)
+    )
     ciks = _cik_map(ua)
     cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 10 * 86400)) if incremental else None
 
