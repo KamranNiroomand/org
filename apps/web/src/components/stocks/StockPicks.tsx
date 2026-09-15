@@ -8,6 +8,7 @@ import { e4ToUsd, stocksApi, type StockOrderRow } from '../../lib/optionsApi';
 import { ModelPerformance } from '../options/ModelPerformance';
 import { SkewMap } from './SkewMap';
 import { optionsApi, type StockAgentRead } from '../../lib/optionsApi';
+import { api } from '../../lib/api';
 
 function usd(e4: number): string {
   return formatMoney(money(Math.round(e4ToUsd(e4) * 100), 'USD'));
@@ -135,7 +136,7 @@ export function StockPicks() {
   const [book, setBook] = useState<'short' | 'long'>('short');
   // The three questions this tab answers: what does the model like, is
   // the model any good, and what did the engine actually do about it.
-  const [view, setView] = useState<'picks' | 'model' | 'decisions' | 'skew'>('picks');
+  const [view, setView] = useState<'picks' | 'model' | 'decisions' | 'skew' | 'perf'>('picks');
   const { data: bookData, isLoading } = useQuery({
     queryKey: ['stock-book'],
     queryFn: () => stocksApi.book(),
@@ -189,9 +190,9 @@ export function StockPicks() {
           </Button>
         ))}
         <span className="mx-1 h-4 w-px bg-border" />
-        {(['picks', 'model', 'decisions', 'skew'] as const).map((v) => (
+        {(['picks', 'model', 'decisions', 'skew', 'perf'] as const).map((v) => (
           <Button key={v} size="sm" variant={view === v ? 'primary' : 'ghost'} onClick={() => setView(v)}>
-            {v === 'picks' ? 'Picks & book' : v === 'model' ? 'Model' : v === 'decisions' ? 'Decision log' : 'Skew map'}
+            {v === 'picks' ? 'Picks & book' : v === 'model' ? 'Model' : v === 'decisions' ? 'Decision log' : v === 'skew' ? 'Skew map' : 'Performance'}
           </Button>
         ))}
         <div className="ml-auto">
@@ -214,6 +215,8 @@ export function StockPicks() {
       )}
 
       {view === 'skew' && <SkewMap />}
+
+      {view === 'perf' && <Attribution />}
 
       {view === 'decisions' && <DecisionLog book={book} />}
 
@@ -339,5 +342,66 @@ function StockAgentReads({ book }: { book: 'short' | 'long' }) {
         </div>
       )}
     </Card>
+  );
+}
+
+
+interface AttrRow { key: string; count: number; winRate: number; avgReturnPct: number; totalPlE4: number }
+interface AttrResponse { closedTrades: number; byExitReason: AttrRow[]; byBook: AttrRow[]; byConviction: AttrRow[] }
+
+/** Where the money actually came from — every closed stock trade
+ * attributed by exit rule, book, and the model's conviction at entry.
+ * The honest answer to "is it improving?", refreshed as trades close. */
+function Attribution() {
+  const { data, isLoading } = useQuery<AttrResponse>({
+    queryKey: ['stock-attribution'],
+    queryFn: () => api.get<AttrResponse>('/api/stocks/attribution'),
+    refetchInterval: 10 * 60 * 1000,
+  });
+  if (isLoading) return <Skeleton className="h-40" />;
+  if (!data) return null;
+  const section = (title: string, hint: string, rows: AttrRow[]) => (
+    <Card className="overflow-hidden" key={title}>
+      <CardHeader title={title} subtitle={hint} />
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-border text-left text-muted">
+              <th className="px-4 py-2 font-normal">Group</th>
+              <th className="px-4 py-2 font-normal">Trades</th>
+              <th className="px-4 py-2 font-normal">Win rate</th>
+              <th className="px-4 py-2 font-normal">Avg return</th>
+              <th className="px-4 py-2 font-normal">Total P&L</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {rows.map((r) => (
+              <tr key={r.key}>
+                <td className="px-4 py-2 font-medium">{r.key.replace(/_/g, ' ')}</td>
+                <td className="tnum px-4 py-2">{r.count}</td>
+                <td className="tnum px-4 py-2">{Math.round(r.winRate * 100)}%</td>
+                <td className={cn('tnum px-4 py-2', r.avgReturnPct >= 0 ? 'text-positive' : 'text-negative')}>
+                  {r.avgReturnPct >= 0 ? '+' : ''}{r.avgReturnPct.toFixed(1)}%
+                </td>
+                <td className={cn('tnum px-4 py-2', r.totalPlE4 >= 0 ? 'text-positive' : 'text-negative')}>
+                  {r.totalPlE4 >= 0 ? '+' : '-'}US${Math.abs(r.totalPlE4 / 10000).toFixed(0)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+  return (
+    <div className="space-y-4">
+      <div className="text-xs text-muted">
+        {data.closedTrades} closed trades so far. Small samples — treat every number as a hint until trade counts
+        reach three digits; the point is watching WHICH groups earn as the count grows.
+      </div>
+      {section('By exit rule', 'How each way of closing a position has paid — stops should be small losses, targets and rotations should carry the profits', data.byExitReason)}
+      {section('By conviction at entry', "Whether the model's most-confident picks actually do better than its least — the core question about the model itself", data.byConviction)}
+      {section('By book', 'Short-horizon vs long-horizon performance', data.byBook)}
+    </div>
   );
 }

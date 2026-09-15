@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { desc } from 'drizzle-orm';
+import { eq, desc } from 'drizzle-orm';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { paperDb } from '../db/paper/index.js';
@@ -112,6 +112,78 @@ export async function paperRoutes(app: FastifyInstance): Promise<void> {
    * Brier-scored in the quant sidecar against sector-relative outcomes.
    * Mostly "pending" until late September; wired now so maturation is
    * automatic. */
+  /**
+   * Performance attribution — the answer to "is it improving?" as
+   * evidence instead of a feeling. Every CLOSED stock trade grouped
+   * three ways: which exit rule ended it, which book it lived in, and
+   * how convinced the model was at entry (forecast tercile). Per group:
+   * count, win rate, average return, total dollars. Winners and losers
+   * both attributed, so the group that quietly dilutes the book has
+   * nowhere to hide. Computed on the machine that owns the book; the
+   * reader reaches it through the ordinary proxy.
+   */
+  app.get('/api/stocks/attribution', async () => {
+    const closed = paperDb
+      .select()
+      .from(stockOrders)
+      .where(eq(stockOrders.status, 'closed'))
+      .all()
+      .filter((o) => o.exitPriceE4 !== null);
+
+    interface Bucket { count: number; wins: number; retSum: number; plE4: number }
+    const mk = (): Bucket => ({ count: 0, wins: 0, retSum: 0, plE4: 0 });
+    const add = (m: Map<string, Bucket>, key: string, ret: number, plE4: number) => {
+      const b = m.get(key) ?? mk();
+      b.count += 1;
+      if (ret > 0) b.wins += 1;
+      b.retSum += ret;
+      b.plE4 += plE4;
+      m.set(key, b);
+    };
+
+    const byExit = new Map<string, Bucket>();
+    const byBook = new Map<string, Bucket>();
+    const byConviction = new Map<string, Bucket>();
+    // Conviction terciles from the closed set itself — a fixed absolute
+    // threshold would silently drift as label/config changes rescale the
+    // forecast; terciles always split "the model's most vs least
+    // convinced picks of this era".
+    const forecasts = closed
+      .map((o) => o.entryForecastReturn)
+      .filter((f): f is number => f !== null)
+      .sort((a, b) => a - b);
+    const q = (p: number) => forecasts[Math.min(forecasts.length - 1, Math.floor(p * forecasts.length))] ?? 0;
+    const [t1, t2] = [q(1 / 3), q(2 / 3)];
+    const conviction = (f: number | null): string =>
+      f === null ? 'unknown' : f <= t1 ? 'low third' : f <= t2 ? 'middle third' : 'high third';
+
+    for (const o of closed) {
+      const ret = (o.exitPriceE4! / o.entryPriceE4 - 1) * 100;
+      const plE4 = (o.exitPriceE4! - o.entryPriceE4) * o.quantity;
+      add(byExit, o.exitReason ?? 'unknown', ret, plE4);
+      add(byBook, o.book, ret, plE4);
+      add(byConviction, conviction(o.entryForecastReturn), ret, plE4);
+    }
+
+    const rows = (m: Map<string, Bucket>) =>
+      [...m.entries()]
+        .map(([key, b]) => ({
+          key,
+          count: b.count,
+          winRate: b.count > 0 ? b.wins / b.count : 0,
+          avgReturnPct: b.count > 0 ? b.retSum / b.count : 0,
+          totalPlE4: Math.round(b.plE4),
+        }))
+        .sort((a, b) => b.totalPlE4 - a.totalPlE4);
+
+    return {
+      closedTrades: closed.length,
+      byExitReason: rows(byExit),
+      byBook: rows(byBook),
+      byConviction: rows(byConviction),
+    };
+  });
+
   app.get('/api/stocks/calibration', async (_req, reply) => {
     const { db } = await import('../db/index.js');
     const { panelAgentTurns, panelRuns, panelSymbolAnalyses } = await import('../db/schema.js');
